@@ -23,8 +23,8 @@ class FileReference:
         try:
             with open(self.path, "r") as file:
                 contents = file.read()
-                contents = self.process(contents)
-                return contents
+            contents = self.process(contents)
+            return contents
         except FileNotFoundError:
             print(f"File not found: {self.path}")
             return ""
@@ -36,12 +36,15 @@ class FileReference:
     def process(self, contents):
         if self.clean_contents:
             contents = self.clean(contents)
-
         if self.range:
             contents = self.extract_range(contents, self.range)
-
-        contents = self.delineate(contents, self.format, self.get_label())
-
+        if self.format == "md":
+            max_backticks = self.count_max_backticks(contents)
+            contents = self.delineate(
+                contents, self.format, self.get_label(), max_backticks
+            )
+        else:
+            contents = self.delineate(contents, self.format, self.get_label())
         return contents
 
     def extract_range(self, contents, range):
@@ -50,7 +53,6 @@ class FileReference:
         return "\n".join(lines[start - 1 : end])
 
     def clean(self, contents):
-        # perform cleaning operations, e.g., replace spaces with tabs
         return contents.replace("    ", "\t")
 
     def get_label(self):
@@ -63,9 +65,18 @@ class FileReference:
         else:
             return ""
 
-    def delineate(self, contents, format, label):
+    def count_max_backticks(self, contents):
+        max_backticks = 0
+        lines = contents.split("\n")
+        for line in lines:
+            if line.startswith("`"):
+                max_backticks = max(max_backticks, len(line) - len(line.lstrip("`")))
+        return max_backticks
+
+    def delineate(self, contents, format, label, max_backticks=0):
         if format == "md":
-            return f"```{label}\n{contents}\n```"
+            backticks_str = "`" * (max_backticks + 2) if max_backticks >= 3 else "```"
+            return f"{backticks_str}{label}\n{contents}\n{backticks_str}"
         elif format == "xml":
             return f"<file path='{label}'>\n{contents}\n</file>"
         else:
