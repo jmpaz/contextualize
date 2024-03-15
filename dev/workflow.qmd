@@ -1,0 +1,24 @@
+This tool serves to provide a simple way to render strings from files, typically within a git repository.
+1. The user specifies an arbitrary number of file paths (and associated ranges). 
+    - This step can be skipped in favor of manually instantiating `FileReference` objects.
+2. `FileReference` objects are created for each file path (required) and range (optional: default is entire file).
+    - A `FileReference` object returns a string representation of its target file.
+        - If `format` is:
+            - "md": the string is wrapped in a markdown code block.
+            - "xml": the string is wrapped in '<file>' tags.
+        - If `label` is:
+            - "relative": the relative file path will be appended to the end of the file's initial backticks in "md" mode, or included in the '<file>' tag in "xml" mode.
+            - "name": only the file name (not path, including extension) will be used.
+            - "ext": only the file extension will be used
+            - "none": no label will be used.
+        - If `clean_contents` is True, token-reducing operations (e.g. spaces -> tabs, generally not needed) will be performed before returning the string.
+3. The `FileReference` objects are rendered into a string, separated by newlines.
+ 
+```python
+from contextualize.reference import FileReference, concat_refs
+
+file1 = FileReference("dev/workflow.qmd")
+file2 = FileReference("contextualize/reference.py", range=(1, 8))
+print(concat_refs([file2, file1]))
+
+```
