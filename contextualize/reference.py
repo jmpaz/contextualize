@@ -25,6 +25,9 @@ class FileReference:
                 contents = file.read()
             contents = self.process(contents)
             return contents
+        except UnicodeDecodeError:
+            print(f"Skipping unreadable file: {self.path}")
+            return ""
         except FileNotFoundError:
             print(f"File not found: {self.path}")
             return ""
