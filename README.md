@@ -10,6 +10,11 @@ You can install the package using pip:
 pip install contextualize
 ```
 
+or pipx for using the CLI globally:
+```python
+pipx install contextualize
+```
+
 
 ## Usage (`reference.py`)
 
