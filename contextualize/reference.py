@@ -23,6 +23,7 @@ class FileReference:
         try:
             with open(self.path, "r") as file:
                 contents = file.read()
+                self.file_content = contents
             contents = self.process(contents)
             return contents
         except UnicodeDecodeError:

@@ -1,8 +1,24 @@
+## Create and concatenate references
+
 ```python
 from contextualize.reference import FileReference, concat_refs
 
 file1 = FileReference("dev/workflow.qmd")
 file2 = FileReference("contextualize/reference.py", range=(1, 8))
 print(concat_refs([file2, file1]))
+
+```
+
+
+
+## Print file details
+
+```python
+
+from contextualize.tokenize import call_tiktoken
+
+result = call_tiktoken(file1.file_content, "p50k_base")
+output_str = f"{file1.path}: {result['count']} tokens ({result['encoding']})"
+print(f"{output_str}\n\n{file1.file_content}")
 
 ```
