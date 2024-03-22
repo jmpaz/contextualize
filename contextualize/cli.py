@@ -2,6 +2,7 @@ import os
 from pathspec import PathSpec
 import argparse
 from contextualize.reference import FileReference, concat_refs
+from contextualize.tokenize import call_tiktoken
 
 
 def create_file_references(paths, ignore_paths=None, format="md", label="relative"):
@@ -55,6 +56,28 @@ def cat_cmd(args):
     print(concatenated_refs)
 
 
+def ls_cmd(args):
+    file_references = create_file_references(args.paths)
+    total_tokens = 0
+    encoding = None
+
+    for ref in file_references:
+        result = call_tiktoken(ref.file_content, "p50k_base")
+        output_str = (
+            f"{ref.path}: {result['count']} tokens"
+            if len(file_references) > 1
+            else f"{result['count']} tokens"
+        )
+        print(output_str)
+
+        total_tokens += result["count"]
+        if not encoding:
+            encoding = result["encoding"]
+
+    if len(file_references) > 1:
+        print(f"\nTotal: {total_tokens} tokens ('{encoding}')")
+
+
 def main():
     parser = argparse.ArgumentParser(description="File reference CLI")
     subparsers = parser.add_subparsers(dest="command")
@@ -75,10 +98,15 @@ def main():
         help="Label style (options: 'relative', 'name', 'ext', default 'relative')",
     )
     cat_parser.set_defaults(func=cat_cmd)
+    ls_parser = subparsers.add_parser("ls", help="List file paths and token counts")
+    ls_parser.add_argument("paths", nargs="+", help="File or folder paths")
+    ls_parser.set_defaults(func=ls_cmd)
 
     args = parser.parse_args()
 
     if args.command == "cat":
+        args.func(args)
+    elif args.command == "ls":
         args.func(args)
     else:
         parser.print_help()
