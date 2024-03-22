@@ -61,8 +61,21 @@ def ls_cmd(args):
     total_tokens = 0
     encoding = None
 
+    if args.encoding and args.model:
+        print(
+            "Warning: Both 'encoding' and 'model' arguments provided. Using 'encoding' only."
+        )
+
     for ref in file_references:
-        result = call_tiktoken(ref.file_content, "p50k_base")
+        if args.encoding:
+            result = call_tiktoken(ref.file_content, encoding_str=args.encoding)
+        elif args.model:
+            result = call_tiktoken(
+                ref.file_content, encoding_str=None, model_str=args.model
+            )
+        else:
+            result = call_tiktoken(ref.file_content)
+
         output_str = (
             f"{ref.path}: {result['count']} tokens"
             if len(file_references) > 1
@@ -72,7 +85,7 @@ def ls_cmd(args):
 
         total_tokens += result["count"]
         if not encoding:
-            encoding = result["encoding"]
+            encoding = result["encoding"]  # set once for the first file
 
     if len(file_references) > 1:
         print(f"\nTotal: {total_tokens} tokens ('{encoding}')")
@@ -98,8 +111,16 @@ def main():
         help="Label style (options: 'relative', 'name', 'ext', default 'relative')",
     )
     cat_parser.set_defaults(func=cat_cmd)
-    ls_parser = subparsers.add_parser("ls", help="List file paths and token counts")
+    ls_parser = subparsers.add_parser("ls", help="List token counts")
     ls_parser.add_argument("paths", nargs="+", help="File or folder paths")
+    ls_parser.add_argument(
+        "--encoding",
+        help="encoding to use for tokenization, e.g., 'cl100k_base' (default), 'p50k_base', 'r50k_base'",
+    )
+    ls_parser.add_argument(
+        "--model",
+        help="Model (e.g., 'gpt-3.5-turbo'/'gpt-4' (default), 'text-davinci-003', 'code-davinci-002') to determine which encoding to use for tokenization. Not used if 'encoding' is provided.",
+    )
     ls_parser.set_defaults(func=ls_cmd)
 
     args = parser.parse_args()
