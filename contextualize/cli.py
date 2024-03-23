@@ -88,7 +88,7 @@ def ls_cmd(args):
             encoding = result["encoding"]  # set once for the first file
 
     if len(file_references) > 1:
-        print(f"\nTotal: {total_tokens} tokens ('{encoding}')")
+        print(f"\nTotal: {total_tokens} tokens ({encoding})")
 
 
 def main():
