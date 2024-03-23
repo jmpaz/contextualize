@@ -1,5 +1,6 @@
 import os
 from pathspec import PathSpec
+from pyperclip import copy
 import argparse
 from contextualize.reference import FileReference, concat_refs
 from contextualize.tokenize import call_tiktoken
@@ -53,7 +54,20 @@ def cat_cmd(args):
         args.paths, args.ignore, args.format, args.label
     )
     concatenated_refs = concat_refs(file_references)
-    print(concatenated_refs)
+
+    if args.output_file:
+        with open(args.output_file, "w") as file:
+            file.write(concatenated_refs)
+        print(f"Contents written to {args.output_file}")
+
+    if args.output == "clipboard":
+        try:
+            copy(concatenated_refs)
+            print("Contents copied to clipboard.")
+        except Exception as e:
+            print(f"Error copying to clipboard: {e}")
+    elif not args.output_file:
+        print(concatenated_refs)
 
 
 def ls_cmd(args):
@@ -110,6 +124,12 @@ def main():
         default="relative",
         help="Label style (options: 'relative', 'name', 'ext', default 'relative')",
     )
+    cat_parser.add_argument(
+        "--output",
+        default="console",
+        help="Output target (options: 'console' (default), 'clipboard')",
+    )
+    cat_parser.add_argument("--output-file", help="Optional output file path")
     cat_parser.set_defaults(func=cat_cmd)
     ls_parser = subparsers.add_parser("ls", help="List token counts")
     ls_parser.add_argument("paths", nargs="+", help="File or folder paths")

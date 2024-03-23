@@ -37,6 +37,8 @@ A CLI (`cli.py`) is provided to print file contents to the console from the comm
     - `--ignore`: File(s) to ignore (optional)
     - `--format`: Output format (`md` or `xml`, default is `md`)
     - `--label`: Label style (`relative` for relative file path, `name` for file name only, `ext` for file extension only; default is `relative`)
+    - `--output`: Output target (`console` (default), `clipboard`)
+    - `--output-file`: Output file path (optional, compatible with `--output clipboard`)
 - `ls`: List token counts
     - `paths`: Positional arguments for target file(s) or directories  
     - `--encoding`: Encoding to use for tokenization, e.g., `cl100k_base` (default), `p50k_base`, `r50k_base`
