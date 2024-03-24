@@ -2,6 +2,8 @@
 
 `contextualize` is a package to quickly retrieve and format file contents for use with LLMs.
 
+<img src="https://github.com/jmpaz/contextualize/assets/30947643/01dbcec2-69fc-405a-8d91-0a00626f8946" width=80%>
+
 
 ## Installation
 
