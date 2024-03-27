@@ -63,7 +63,8 @@ def cat_cmd(args):
     if args.output == "clipboard":
         try:
             copy(concatenated_refs)
-            print("Contents copied to clipboard.")
+            token_count = call_tiktoken(concatenated_refs)["count"]
+            print(f"Copied {token_count} tokens to clipboard.")
         except Exception as e:
             print(f"Error copying to clipboard: {e}")
     elif not args.output_file:
