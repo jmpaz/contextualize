@@ -1,9 +1,4 @@
 import os
-import subprocess
-
-
-def concat_refs(file_references: list):
-    return "\n\n".join(ref.output for ref in file_references)
 
 
 class FileReference:
@@ -92,35 +87,5 @@ class FileReference:
             return contents
 
 
-class Diff(FileReference):
-    def __init__(
-        self,
-        path: str,
-        base_hash: str,
-        target_hash: str,
-        range: tuple = None,
-        format="md",
-        label="relative",
-        clean_contents=False,
-    ):
-        self.base_hash = base_hash
-        self.target_hash = target_hash
-        super().__init__(path, range, format, label, clean_contents)
-
-    def get_contents(self):
-        try:
-            diff_output = subprocess.check_output(
-                ["git", "diff", self.base_hash, self.target_hash, "--", self.path],
-                universal_newlines=True,
-            )
-            self.file_content = diff_output
-            contents = self.process(diff_output)
-            return contents
-        except subprocess.CalledProcessError as e:
-            print(f"Error occurred while running git diff for file: {self.path}")
-            print(f"Error details: {str(e)}")
-            return ""
-        except Exception as e:
-            print(f"Error occurred while processing diff for file: {self.path}")
-            print(f"Error details: {str(e)}")
-            return ""
+def concat_refs(file_references: list):
+    return "\n\n".join(ref.output for ref in file_references)

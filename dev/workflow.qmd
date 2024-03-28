@@ -9,20 +9,9 @@ print(concat_refs([file2, file1]))
 
 ```
 
-### Diffs
-
-Requires `git` to be installed and in the system path.
-
-```python
-from contextualize.reference import Diff, concat_refs
-
-diff1 = Diff(path="contextualize/reference.py", base_hash="HEAD", target_hash="aad511f", range=(1, 10))
-diff2 = Diff("README.md", "HEAD~2", "HEAD~1", format="xml")
-print(concat_refs([diff1, diff2]))
-```
 
 
-## Print token counts
+## Print file details
 
 ```python
 
@@ -33,4 +22,3 @@ output_str = f"{file1.path}: {result['count']} tokens ({result['encoding']})"
 print(f"{output_str}\n\n{file1.file_content}")
 
 ```
-
