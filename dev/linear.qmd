@@ -1,0 +1,32 @@
+```py
+# ruff: noqa: E402
+```
+
+# Connect to Linear API
+
+## Authentication
+```python
+from contextualize.external import read_secrets
+
+token = read_secrets()["LINEAR_TOKEN"]
+
+```
+
+## Fetch issues
+
+```python
+from contextualize.external import LinearClient
+
+client = LinearClient(token)
+issue = client.get_issue('CD-257')
+
+# generate a Markdown issue representation
+markdown_output = issue.to_markdown(
+    include_properties={"project", "relations", "labels"}
+)
+
+print(markdown_output)
+
+```
+
+
