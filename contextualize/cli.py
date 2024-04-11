@@ -109,7 +109,7 @@ def ls_cmd(args):
 
 
 def fetch_cmd(args):
-    config = read_config()
+    config = read_config(args.config)
     try:
         client = LinearClient(config["LINEAR_TOKEN"])
     except InvalidTokenError as e:
@@ -227,6 +227,10 @@ def main():
         help="Output target (options: 'console' (default), 'clipboard')",
     )
     fetch_parser.add_argument("--output-file", help="Optional output file path")
+    fetch_parser.add_argument(
+        "--config",
+        help="Path to config file to use (default: $XDG_CONFIG_HOME/contextualize/config.yaml)",
+    )
     fetch_parser.set_defaults(func=fetch_cmd)
 
     args = parser.parse_args()
