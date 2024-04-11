@@ -6,9 +6,10 @@
 
 ## Authentication
 ```python
-from contextualize.external import read_secrets
+from contextualize.utils import read_config
 
-token = read_secrets()["LINEAR_TOKEN"]
+config = read_config("config.yaml")
+token = config["LINEAR_TOKEN"]
 
 ```
 
