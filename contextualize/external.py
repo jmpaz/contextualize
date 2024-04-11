@@ -15,7 +15,20 @@ class LinearClient:
     def execute_query(self, query, variables=None):
         data = {"query": query, "variables": variables or {}}
         response = requests.post(self.base_url, headers=self.headers, json=data)
-        return response.json()
+        response_data = response.json()
+
+        if "errors" in response_data:
+            for error in response_data["errors"]:
+                if error.get("message") == "Authentication required, not authenticated":
+                    raise InvalidTokenError(
+                        "Linear authentication failed; token is missing or invalid."
+                    )
+            raise Exception(f"Linear API error: {response_data['errors']}")
+
+        if "data" not in response_data:
+            raise Exception(f"Unexpected Linear API response: {response_data}")
+
+        return response_data
 
     def get_issue(self, issue_id):
         query = """
@@ -170,3 +183,7 @@ class Issue:
             for node in self.relations["nodes"]
         )
         return relations_str
+
+
+class InvalidTokenError(Exception):
+    pass

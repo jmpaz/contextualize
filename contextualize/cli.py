@@ -3,8 +3,8 @@ from pathspec import PathSpec
 from pyperclip import copy
 import argparse
 from contextualize.reference import FileReference, concat_refs
+from contextualize.external import LinearClient, InvalidTokenError
 from contextualize.tokenize import call_tiktoken
-from contextualize.external import LinearClient
 from contextualize.utils import read_config
 
 
@@ -110,7 +110,11 @@ def ls_cmd(args):
 
 def fetch_cmd(args):
     config = read_config()
-    client = LinearClient(config["LINEAR_TOKEN"])
+    try:
+        client = LinearClient(config["LINEAR_TOKEN"])
+    except InvalidTokenError as e:
+        print(f"Error: {str(e)}")
+        return
 
     issue_ids = []
     for arg in args.issue:
