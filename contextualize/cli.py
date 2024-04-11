@@ -4,6 +4,8 @@ from pyperclip import copy
 import argparse
 from contextualize.reference import FileReference, concat_refs
 from contextualize.tokenize import call_tiktoken
+from contextualize.external import LinearClient
+from contextualize.utils import read_config
 
 
 def create_file_references(paths, ignore_paths=None, format="md", label="relative"):
@@ -106,6 +108,68 @@ def ls_cmd(args):
         print(f"\nTotal: {total_tokens} tokens ({encoding})")
 
 
+def fetch_cmd(args):
+    config = read_config()
+    client = LinearClient(config["LINEAR_TOKEN"])
+
+    issue_ids = []
+    for arg in args.issue:
+        if arg.startswith("https://linear.app/"):
+            issue_id = arg.split("/")[-2]
+        else:
+            issue_id = arg
+        issue_ids.append(issue_id)
+
+    include_properties = (
+        args.properties.split(",")
+        if args.properties
+        else config.get("FETCH_INCLUDE_PROPERTIES", [])
+    )
+
+    markdown_outputs = []
+    token_counts = {}
+    total_tokens = 0
+
+    for issue_id in issue_ids:
+        issue = client.get_issue(issue_id)
+        if issue is None:
+            print(f"Issue {issue_id} not found.")
+            continue
+
+        issue_markdown = issue.to_markdown(include_properties=include_properties)
+        markdown_outputs.append(issue_markdown)
+
+        token_count = call_tiktoken(issue_markdown)["count"]
+        token_counts[issue_id] = token_count
+        total_tokens += token_count
+
+    markdown_output = "\n\n".join(markdown_outputs).strip()
+
+    def write_output(content, dest, mode="w"):
+        if dest == "clipboard":
+            copy(content)
+        else:
+            with open(dest, mode) as file:
+                file.write(content)
+
+    if args.output_file:
+        write_output(markdown_output, args.output_file)
+        print(f"Wrote {total_tokens} tokens to {args.output_file}")
+        if len(issue_ids) > 1:
+            for issue_id, count in token_counts.items():
+                print(f"- {issue_id}: {count} tokens")
+    elif args.output == "clipboard":
+        write_output(markdown_output, "clipboard")
+        if len(issue_ids) == 1:
+            print(f"Copied {total_tokens} tokens to clipboard.")
+        else:
+            print(f"Copied {total_tokens} tokens to clipboard:")
+            for issue_id, count in token_counts.items():
+                print(f"- {issue_id}: {count} tokens")
+    else:
+        print(markdown_output)
+
+
 def main():
     parser = argparse.ArgumentParser(description="File reference CLI")
     subparsers = parser.add_subparsers(dest="command")
@@ -143,12 +207,27 @@ def main():
         help="Model (e.g., 'gpt-3.5-turbo'/'gpt-4' (default), 'text-davinci-003', 'code-davinci-002') to determine which encoding to use for tokenization. Not used if 'encoding' is provided.",
     )
     ls_parser.set_defaults(func=ls_cmd)
+    fetch_parser = subparsers.add_parser(
+        "fetch", help="Fetch and prepare Linear issues"
+    )
+    fetch_parser.add_argument(
+        "issue", nargs="+", help="Issue URL or identifier (e.g., CX-212)"
+    )
+    fetch_parser.add_argument(
+        "--properties",
+        help="Comma-separated list of properties to include (e.g., 'labels,project,relations')",
+    )
+    fetch_parser.add_argument(
+        "--output",
+        default="console",
+        help="Output target (options: 'console' (default), 'clipboard')",
+    )
+    fetch_parser.add_argument("--output-file", help="Optional output file path")
+    fetch_parser.set_defaults(func=fetch_cmd)
 
     args = parser.parse_args()
 
-    if args.command == "cat":
-        args.func(args)
-    elif args.command == "ls":
+    if args.command:
         args.func(args)
     else:
         parser.print_help()
