@@ -1,80 +1,34 @@
-import os
-from pathspec import PathSpec
 from pyperclip import copy
 import argparse
-from contextualize.reference import FileReference, concat_refs
+from contextualize.reference import create_file_references
 from contextualize.external import LinearClient, InvalidTokenError
 from contextualize.tokenize import call_tiktoken
 from contextualize.utils import read_config
 
 
-def create_file_references(paths, ignore_paths=None, format="md", label="relative"):
-    file_references = []
-    ignore_patterns = [
-        # ".git/",
-        # "venv/",
-        # ".venv/",
-        ".gitignore",
-        "__pycache__/",
-        "__init__.py",
-    ]
-
-    if ignore_paths:
-        for path in ignore_paths:
-            if os.path.isfile(path):
-                with open(path, "r") as file:
-                    ignore_patterns.extend(file.read().splitlines())
-
-    for path in paths:
-        if os.path.isfile(path):
-            if not is_ignored(path, ignore_patterns):
-                file_references.append(FileReference(path, format=format, label=label))
-        elif os.path.isdir(path):
-            for root, dirs, files in os.walk(path):
-                dirs[:] = [
-                    d
-                    for d in dirs
-                    if not is_ignored(os.path.join(root, d), ignore_patterns)
-                ]
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    if not is_ignored(file_path, ignore_patterns):
-                        file_references.append(
-                            FileReference(file_path, format=format, label=label)
-                        )
-
-    return file_references
-
-
-def is_ignored(path, gitignore_patterns):
-    path_spec = PathSpec.from_lines("gitwildmatch", gitignore_patterns)
-    return path_spec.match_file(path)
-
-
 def cat_cmd(args):
-    file_references = create_file_references(
+    references = create_file_references(
         args.paths, args.ignore, args.format, args.label
-    )
-    concatenated_refs = concat_refs(file_references)
+    )["concatenated"]
 
     if args.output_file:
         with open(args.output_file, "w") as file:
-            file.write(concatenated_refs)
+            file.write(references)
         print(f"Contents written to {args.output_file}")
 
     if args.output == "clipboard":
         try:
-            copy(concatenated_refs)
-            token_count = call_tiktoken(concatenated_refs)["count"]
+            copy(references)
+            token_count = call_tiktoken(references)["count"]
             print(f"Copied {token_count} tokens to clipboard.")
         except Exception as e:
             print(f"Error copying to clipboard: {e}")
     elif not args.output_file:
-        print(concatenated_refs)
+        print(references)
 
 
 def ls_cmd(args):
-    file_references = create_file_references(args.paths)
+    references = create_file_references(args.paths)["refs"]
     total_tokens = 0
     encoding = None
 
@@ -83,7 +37,7 @@ def ls_cmd(args):
             "Warning: Both 'encoding' and 'model' arguments provided. Using 'encoding' only."
         )
 
-    for ref in file_references:
+    for ref in references:
         if args.encoding:
             result = call_tiktoken(ref.file_content, encoding_str=args.encoding)
         elif args.model:
@@ -95,7 +49,7 @@ def ls_cmd(args):
 
         output_str = (
             f"{ref.path}: {result['count']} tokens"
-            if len(file_references) > 1
+            if len(references) > 1
             else f"{result['count']} tokens"
         )
         print(output_str)
@@ -104,7 +58,7 @@ def ls_cmd(args):
         if not encoding:
             encoding = result["encoding"]  # set once for the first file
 
-    if len(file_references) > 1:
+    if len(references) > 1:
         print(f"\nTotal: {total_tokens} tokens ({encoding})")
 
 

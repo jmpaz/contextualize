@@ -1,4 +1,49 @@
 import os
+from pathspec import PathSpec
+
+
+def create_file_references(paths, ignore_paths=None, format="md", label="relative"):
+    """FileReference wrapper for creating a list of file references from paths."""
+    file_references = []
+    ignore_patterns = [
+        ".gitignore",
+        "__pycache__/",
+        "__init__.py",
+    ]
+
+    if ignore_paths:
+        for path in ignore_paths:
+            if os.path.isfile(path):
+                with open(path, "r") as file:
+                    ignore_patterns.extend(file.read().splitlines())
+
+    def is_ignored(path, gitignore_patterns):
+        path_spec = PathSpec.from_lines("gitwildmatch", gitignore_patterns)
+        return path_spec.match_file(path)
+
+    for path in paths:
+        if os.path.isfile(path):
+            if not is_ignored(path, ignore_patterns):
+                file_references.append(FileReference(path, format=format, label=label))
+        elif os.path.isdir(path):
+            for root, dirs, files in os.walk(path):
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if not is_ignored(os.path.join(root, d), ignore_patterns)
+                ]
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    if not is_ignored(file_path, ignore_patterns):
+                        file_references.append(
+                            FileReference(file_path, format=format, label=label)
+                        )
+
+    return {"refs": file_references, "concatenated": concat_refs(file_references)}
+
+
+def concat_refs(file_references: list):
+    return "\n\n".join(ref.output for ref in file_references)
 
 
 class FileReference:
@@ -10,18 +55,23 @@ class FileReference:
         self.format = format
         self.label = label
         self.clean_contents = clean_contents
+        self.file_content = ""
         self.output = self.get_contents()
 
     def get_contents(self):
         try:
             with open(self.path, "r") as file:
-                contents = file.read()
+                self.file_content = file.read()
         except Exception as e:
             print(f"Error reading file {self.path}: {str(e)}")
             return ""
 
         return process_text(
-            contents, self.clean_contents, self.range, self.format, self.get_label()
+            self.file_content,
+            self.clean_contents,
+            self.range,
+            self.format,
+            self.get_label(),
         )
 
     def get_label(self):
@@ -33,10 +83,6 @@ class FileReference:
             return os.path.splitext(self.path)[1]
         else:
             return ""
-
-
-def concat_refs(file_references: list):
-    return "\n\n".join(ref.output for ref in file_references)
 
 
 def _clean(text):
