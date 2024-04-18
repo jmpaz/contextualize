@@ -8,7 +8,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="contextualize",
-    version="0.0.2",
+    version="0.0.3",
     packages=find_packages(),
     install_requires=required,
     entry_points={"console_scripts": ["contextualize = contextualize.cli:main"]},
