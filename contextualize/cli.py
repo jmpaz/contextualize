@@ -31,6 +31,7 @@ def ls_cmd(args):
     references = create_file_references(args.paths)["refs"]
     total_tokens = 0
     encoding = None
+    results = []
 
     if args.encoding and args.model:
         print(
@@ -47,16 +48,20 @@ def ls_cmd(args):
         else:
             result = call_tiktoken(ref.file_content)
 
-        output_str = (
-            f"{ref.path}: {result['count']} tokens"
-            if len(references) > 1
-            else f"{result['count']} tokens"
-        )
-        print(output_str)
-
         total_tokens += result["count"]
         if not encoding:
             encoding = result["encoding"]  # set once for the first file
+
+        results.append((ref.path, result["count"]))
+
+    # sort by token count
+    results.sort(key=lambda x: x[1], reverse=True)
+
+    for path, count in results:
+        output_str = (
+            f"{path}: {count} tokens" if len(references) > 1 else f"{count} tokens"
+        )
+        print(output_str)
 
     if len(references) > 1:
         print(f"\nTotal: {total_tokens} tokens ({encoding})")
