@@ -1,8 +1,11 @@
-from pyperclip import copy
 import argparse
+import os
+
+from pyperclip import copy
+
+from contextualize.external import InvalidTokenError, LinearClient
 from contextualize.reference import create_file_references
-from contextualize.external import LinearClient, InvalidTokenError
-from contextualize.tokenize import call_tiktoken
+from contextualize.tokenize import call_tiktoken, count_tokens
 from contextualize.utils import read_config
 
 
@@ -19,8 +22,11 @@ def cat_cmd(args):
     if args.output == "clipboard":
         try:
             copy(references)
-            token_count = call_tiktoken(references)["count"]
-            print(f"Copied {token_count} tokens to clipboard.")
+            target = "claude-3-5-sonnet-20241022"
+            token_count = count_tokens(references, target=target)
+            print(
+                f"Copied {token_count['count']} tokens to clipboard ({token_count['method']})."
+            )
         except Exception as e:
             print(f"Error copying to clipboard: {e}")
     elif not args.output_file:
@@ -30,27 +36,46 @@ def cat_cmd(args):
 def ls_cmd(args):
     references = create_file_references(args.paths)["refs"]
     total_tokens = 0
-    encoding = None
+    method = None
     results = []
 
-    if args.encoding and args.model:
+    # determine counting method
+    if (
+        sum(
+            bool(x)
+            for x in [args.openai_encoding, args.anthropic_model, args.openai_model]
+        )
+        > 1
+    ):
         print(
-            "Warning: Both 'encoding' and 'model' arguments provided. Using 'encoding' only."
+            "Error: Only one of --openai-encoding, --openai-model, or --anthropic-model can be specified"
+        )
+        return
+
+    if args.openai_encoding:
+        target = args.openai_encoding
+    elif args.anthropic_model:
+        target = args.anthropic_model
+        if "ANTHROPIC_API_KEY" not in os.environ:
+            print(
+                "Warning: ANTHROPIC_API_KEY not set in environment. Falling back to tiktoken."
+            )
+            target = "cl100k_base"
+    elif args.openai_model:
+        result = call_tiktoken("test", model_str=args.openai_model)
+        target = result["encoding"]
+    else:
+        target = (
+            "cl100k_base"
+            if "ANTHROPIC_API_KEY" not in os.environ
+            else "claude-3-5-sonnet-latest"
         )
 
     for ref in references:
-        if args.encoding:
-            result = call_tiktoken(ref.file_content, encoding_str=args.encoding)
-        elif args.model:
-            result = call_tiktoken(
-                ref.file_content, encoding_str=None, model_str=args.model
-            )
-        else:
-            result = call_tiktoken(ref.file_content)
-
-        total_tokens += result["count"]
-        if not encoding:
-            encoding = result["encoding"]  # set once for the first file
+        result = count_tokens(ref.file_content, target=target)
+        total_tokens += int(result["count"])
+        if not method:
+            method = result["method"]
 
         results.append((ref.path, result["count"]))
 
@@ -61,10 +86,15 @@ def ls_cmd(args):
         output_str = (
             f"{path}: {count} tokens" if len(references) > 1 else f"{count} tokens"
         )
-        print(output_str)
+        print(output_str, end="")
+
+        if len(references) == 1:
+            print(f" ({method})")
+        else:
+            print()
 
     if len(references) > 1:
-        print(f"\nTotal: {total_tokens} tokens ({encoding})")
+        print(f"\nTotal: {total_tokens} tokens ({method})")
 
 
 def fetch_cmd(args):
@@ -162,12 +192,16 @@ def main():
     ls_parser = subparsers.add_parser("ls", help="List token counts")
     ls_parser.add_argument("paths", nargs="+", help="File or folder paths")
     ls_parser.add_argument(
-        "--encoding",
-        help="encoding to use for tokenization, e.g., 'cl100k_base' (default), 'p50k_base', 'r50k_base'",
+        "--openai-encoding",
+        help="OpenAI encoding to use (e.g., 'cl100k_base', 'p50k_base', 'r50k_base')",
     )
     ls_parser.add_argument(
-        "--model",
-        help="Model (e.g., 'gpt-3.5-turbo'/'gpt-4' (default), 'text-davinci-003', 'code-davinci-002') to determine which encoding to use for tokenization. Not used if 'encoding' is provided.",
+        "--openai-model",
+        help="OpenAI model name to use for token counting (e.g., 'gpt-3.5-turbo'/'gpt-4' (default), 'text-davinci-003', 'code-davinci-002')",
+    )
+    ls_parser.add_argument(
+        "--anthropic-model",
+        help="Anthropic model to use for token counting (e.g., 'claude-3-5-sonnet-latest')",
     )
     ls_parser.set_defaults(func=ls_cmd)
     fetch_parser = subparsers.add_parser(
