@@ -1,4 +1,5 @@
 import os
+
 from pathspec import PathSpec
 
 
@@ -111,6 +112,8 @@ def _delimit(text, format, label, max_backticks=0):
         return f"{backticks_str}{label}\n{text}\n{backticks_str}"
     elif format == "xml":
         return f"<file path='{label}'>\n{text}\n</file>"
+    elif format == "shell":
+        return f"❯ cat {label}\n{text}"
     else:
         return text
 

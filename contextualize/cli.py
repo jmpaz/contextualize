@@ -175,7 +175,7 @@ def main():
     cat_parser.add_argument(
         "--format",
         default="md",
-        help="Output format (options: 'md', 'xml', default 'md')",
+        help="Output format (options: 'md', 'xml', 'shell', default 'md')",
     )
     cat_parser.add_argument(
         "--label",
