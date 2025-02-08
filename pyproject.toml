@@ -1,0 +1,31 @@
+[project]
+name = "contextualize"
+version = "0.0.4"
+description = "LLM prompt/context preparation utility"
+readme = "README.md"
+authors = [
+  { name = "jmpaz" }
+]
+requires-python = ">=3.6"
+dependencies = [
+  "pyyaml",
+  "pathspec",
+  "aider-chat==0.74.0",
+  "anthropic==0.42.0",
+  "pyperclip>=1.8.2",
+  "tiktoken>=0.6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jmpaz/contextualize"
+
+[project.scripts]
+contextualize = "contextualize.cli:main"
+
+[tool.setuptools]
+packages = ["contextualize"]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+

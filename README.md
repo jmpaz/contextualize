@@ -12,9 +12,9 @@ You can install the package using pip:
 pip install contextualize
 ```
 
-or pipx for using the CLI globally:
+or with [uv](https://docs.astral.sh/uv/) to use the CLI globally:
 ```python
-pipx install contextualize
+uv tool install contextualize
 ```
 
 
