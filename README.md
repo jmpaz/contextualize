@@ -35,9 +35,9 @@ Retrieve wrapped contents from the `output` attribute.
 
 A CLI (`cli.py`) is provided to print file contents to the console from the command line.
 
-- **`cat`**: Prepare and concatenate file references  
-  - **`paths`**: Positional arguments for target file(s) or directories  
-  - **`--ignore`**: File(s) to ignore (optional)  
+- **`cat`**: Prepare and concatenate file references
+  - **`paths`**: Positional arguments for target file(s) or directories
+  - **`--ignore`**: File(s) to ignore (optional)
   - **`--format`**: Output format (`md`, `xml`, or `shell`; default is `md`):
     - **`shell`** mimics `cat` output in a live shell prompt
     - **`xml`** encloses file contents in `<file>` tags
@@ -46,11 +46,17 @@ A CLI (`cli.py`) is provided to print file contents to the console from the comm
   - **`--output`**: Output target (`console` (default), `clipboard`)
   - **`--output-file`**: Output file path (optional, compatible with `--output clipboard`)
 
-- **`ls`**: List token counts  
-  - **`paths`**: Positional arguments for target file(s) or directories to process  
-  - **`--openai-encoding`**: OpenAI encoding to use for tokenization, e.g., `cl100k_base` (default), `p50k_base`, `r50k_base`  
-  - **`--openai-model`**: OpenAI model (e.g., `gpt-3.5-turbo`/`gpt-4` (default), `text-davinci-003`, `code-davinci-002`) to determine which encoding to use for tokenization.  
+- **`ls`**: List file token counts
+  - **`paths`**: Positional arguments for target file(s) or directories to process
+  - **`--openai-encoding`**: OpenAI encoding to use for tokenization, e.g., `cl100k_base` (default), `p50k_base`, `r50k_base`
+  - **`--openai-model`**: OpenAI model (e.g., `gpt-3.5-turbo`/`gpt-4` (default), `text-davinci-003`, `code-davinci-002`) to determine which encoding to use for tokenization.
   - **`--anthropic-model`**: Anthropic model to use for token counting (e.g., `claude-3-5-sonnet-latest`)
+
+- **`map`**: Generate file/repo maps with [aider](https://aider.chat/2023/10/22/repomap.html)
+  - **`paths`**: Positional arguments for file(s) or folder(s) to include in the repo map
+  - **`-t, --max-tokens`**: Maximum tokens for the repo map (default: 10000)
+  - **`--output`**: Output target (options: `console` (default), `clipboard`)
+  - **`--output-file`**: Optional output file path
 
 #### Examples
 
@@ -63,3 +69,7 @@ A CLI (`cli.py`) is provided to print file contents to the console from the comm
 - **`ls`**:
   - `contextualize ls README.md` will count and print the number of tokens in `README.md` using the default `cl100k_base` encoding, unless `ANTHROPIC_API_KEY` is set, in which case the Anthropic [token counting API](https://docs.anthropic.com/en/docs/build-with-claude/token-counting) will be used.
   - `contextualize ls contextualize/ --openai-model text-davinci-003` will count and print the number of tokens in each file in the `contextualize/` directory using the `p50k_base` encoding associated with the `text-davinci-003` model, then print the total tokens for all processed files.
+
+- **`map`**:
+  - `contextualize map .` will generate and print a repository map for the current directory.
+  - `contextualize map src/ tests/ -t 15000` will generate a repository map for files in the `src/` and `tests/` directories with a maximum of 15000 tokens.

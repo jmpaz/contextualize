@@ -3,10 +3,11 @@ import os
 
 from pyperclip import copy
 
-from contextualize.external import InvalidTokenError, LinearClient
-from contextualize.reference import create_file_references
-from contextualize.tokenize import call_tiktoken, count_tokens
-from contextualize.utils import read_config
+from .external import InvalidTokenError, LinearClient
+from .reference import create_file_references
+from .repomap import repomap_cmd
+from .tokenize import call_tiktoken, count_tokens
+from .utils import read_config
 
 
 def cat_cmd(args):
@@ -17,19 +18,19 @@ def cat_cmd(args):
     if args.output_file:
         with open(args.output_file, "w") as file:
             file.write(references)
+        token_info = count_tokens(references, target="cl100k_base")
+        print(f"Copied {token_info['count']} tokens to file ({token_info['method']}).")
         print(f"Contents written to {args.output_file}")
-
-    if args.output == "clipboard":
+    elif args.output == "clipboard":
         try:
             copy(references)
-            target = "claude-3-5-sonnet-20241022"
-            token_count = count_tokens(references, target=target)
+            token_info = count_tokens(references, target="cl100k_base")
             print(
-                f"Copied {token_count['count']} tokens to clipboard ({token_count['method']})."
+                f"Copied {token_info['count']} tokens to clipboard ({token_info['method']})."
             )
         except Exception as e:
             print(f"Error copying to clipboard: {e}")
-    elif not args.output_file:
+    else:
         print(references)
 
 
@@ -76,23 +77,19 @@ def ls_cmd(args):
         total_tokens += int(result["count"])
         if not method:
             method = result["method"]
-
         results.append((ref.path, result["count"]))
 
     # sort by token count
     results.sort(key=lambda x: x[1], reverse=True)
-
     for path, count in results:
         output_str = (
             f"{path}: {count} tokens" if len(references) > 1 else f"{count} tokens"
         )
         print(output_str, end="")
-
         if len(references) == 1:
             print(f" ({method})")
         else:
             print()
-
     if len(references) > 1:
         print(f"\nTotal: {total_tokens} tokens ({method})")
 
@@ -132,9 +129,9 @@ def fetch_cmd(args):
         issue_markdown = issue.to_markdown(include_properties=include_properties)
         markdown_outputs.append(issue_markdown)
 
-        token_count = call_tiktoken(issue_markdown)["count"]
-        token_counts[issue_id] = token_count
-        total_tokens += token_count
+        token_info = call_tiktoken(issue_markdown)["count"]
+        token_counts[issue_id] = token_info
+        total_tokens += token_info
 
     markdown_output = "\n\n".join(markdown_outputs).strip()
 
@@ -164,9 +161,10 @@ def fetch_cmd(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="File reference CLI")
+    parser = argparse.ArgumentParser(description="Contextualize CLI")
     subparsers = parser.add_subparsers(dest="command")
 
+    # 'cat' command
     cat_parser = subparsers.add_parser(
         "cat", help="Prepare and concatenate file references"
     )
@@ -175,12 +173,12 @@ def main():
     cat_parser.add_argument(
         "--format",
         default="md",
-        help="Output format (options: 'md', 'xml', 'shell', default 'md')",
+        help="Output format (options: 'md', 'xml', 'shell'; default 'md')",
     )
     cat_parser.add_argument(
         "--label",
         default="relative",
-        help="Label style (options: 'relative', 'name', 'ext', default 'relative')",
+        help="Label style (options: 'relative', 'name', 'ext'; default 'relative')",
     )
     cat_parser.add_argument(
         "--output",
@@ -189,6 +187,8 @@ def main():
     )
     cat_parser.add_argument("--output-file", help="Optional output file path")
     cat_parser.set_defaults(func=cat_cmd)
+
+    # 'ls' command
     ls_parser = subparsers.add_parser("ls", help="List token counts")
     ls_parser.add_argument("paths", nargs="+", help="File or folder paths")
     ls_parser.add_argument(
@@ -197,13 +197,15 @@ def main():
     )
     ls_parser.add_argument(
         "--openai-model",
-        help="OpenAI model name to use for token counting (e.g., 'gpt-3.5-turbo'/'gpt-4' (default), 'text-davinci-003', 'code-davinci-002')",
+        help="OpenAI model name for token counting (e.g., 'gpt-3.5-turbo'/'gpt-4' (default), 'text-davinci-003', 'code-davinci-002')",
     )
     ls_parser.add_argument(
         "--anthropic-model",
         help="Anthropic model to use for token counting (e.g., 'claude-3-5-sonnet-latest')",
     )
     ls_parser.set_defaults(func=ls_cmd)
+
+    # 'fetch' command
     fetch_parser = subparsers.add_parser(
         "fetch", help="Fetch and prepare Linear issues"
     )
@@ -226,8 +228,27 @@ def main():
     )
     fetch_parser.set_defaults(func=fetch_cmd)
 
-    args = parser.parse_args()
+    # 'map' command
+    map_parser = subparsers.add_parser("map", help="Generate a repository map")
+    map_parser.add_argument(
+        "paths", nargs="+", help="File or folder paths to include in the repo map"
+    )
+    map_parser.add_argument(
+        "-t",
+        "--max-tokens",
+        type=int,
+        default=10000,
+        help="Maximum tokens for the repo map (default: 10000)",
+    )
+    map_parser.add_argument(
+        "--output",
+        default="console",
+        help="Output target (options: 'console' (default), 'clipboard')",
+    )
+    map_parser.add_argument("--output-file", help="Optional output file path")
+    map_parser.set_defaults(func=repomap_cmd)
 
+    args = parser.parse_args()
     if args.command:
         args.func(args)
     else:
