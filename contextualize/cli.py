@@ -171,16 +171,19 @@ def main():
     cat_parser.add_argument("paths", nargs="+", help="File or folder paths")
     cat_parser.add_argument("--ignore", nargs="*", help="File(s) to ignore")
     cat_parser.add_argument(
+        "-f",
         "--format",
         default="md",
         help="Output format (options: 'md', 'xml', 'shell'; default 'md')",
     )
     cat_parser.add_argument(
+        "-l",
         "--label",
         default="relative",
         help="Label style (options: 'relative', 'name', 'ext'; default 'relative')",
     )
     cat_parser.add_argument(
+        "-o",
         "--output",
         default="console",
         help="Output target (options: 'console' (default), 'clipboard')",
