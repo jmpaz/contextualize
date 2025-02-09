@@ -248,6 +248,12 @@ def main():
         default="console",
         help="Output target (options: 'console' (default), 'clipboard')",
     )
+    map_parser.add_argument(
+        "-f",
+        "--format",
+        default="plain",
+        help="Output format (options: 'plain' (default), 'shell')",
+    )
     map_parser.add_argument("--output-file", help="Optional output file path")
     map_parser.set_defaults(func=repomap_cmd)
 

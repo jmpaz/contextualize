@@ -52,6 +52,9 @@ def repomap_cmd(args):
         io.tool_error("No repository map was generated.")
         return
 
+    if getattr(args, "format", "plain") == "shell":
+        repo_map = f"❯ repo-map {' '.join(args.paths)}\n{repo_map}"
+
     token_info = count_tokens(repo_map, target="cl100k_base")
     num_files = len(files)
 
