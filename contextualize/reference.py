@@ -1,10 +1,16 @@
 import os
 
-from pathspec import PathSpec
-
 
 def create_file_references(paths, ignore_paths=None, format="md", label="relative"):
-    """FileReference wrapper for creating a list of file references from paths."""
+    """
+    Build a list of file references from the specified paths.
+    """
+    def is_ignored(path, gitignore_patterns):
+        # We'll import pathspec only if needed:
+        from pathspec import PathSpec
+        path_spec = PathSpec.from_lines("gitwildmatch", gitignore_patterns)
+        return path_spec.match_file(path)
+
     file_references = []
     ignore_patterns = [
         ".gitignore",
@@ -12,20 +18,19 @@ def create_file_references(paths, ignore_paths=None, format="md", label="relativ
         "__init__.py",
     ]
 
+    # If user supplied paths to ignore (like .gitignore, etc.), read them
     if ignore_paths:
         for path in ignore_paths:
             if os.path.isfile(path):
-                with open(path, "r") as file:
+                with open(path, "r", encoding="utf-8") as file:
                     ignore_patterns.extend(file.read().splitlines())
-
-    def is_ignored(path, gitignore_patterns):
-        path_spec = PathSpec.from_lines("gitwildmatch", gitignore_patterns)
-        return path_spec.match_file(path)
 
     for path in paths:
         if os.path.isfile(path):
             if not is_ignored(path, ignore_patterns):
-                file_references.append(FileReference(path, format=format, label=label))
+                file_references.append(
+                    FileReference(path, format=format, label=label)
+                )
         elif os.path.isdir(path):
             for root, dirs, files in os.walk(path):
                 dirs[:] = [
@@ -40,17 +45,21 @@ def create_file_references(paths, ignore_paths=None, format="md", label="relativ
                             FileReference(file_path, format=format, label=label)
                         )
 
-    return {"refs": file_references, "concatenated": concat_refs(file_references)}
+    return {
+        "refs": file_references,
+        "concatenated": concat_refs(file_references),
+    }
 
 
-def concat_refs(file_references: list):
+def concat_refs(file_references):
+    """
+    Concatenate references into a single string with the chosen format.
+    """
     return "\n\n".join(ref.output for ref in file_references)
 
 
 class FileReference:
-    def __init__(
-        self, path, range=None, format="md", label="relative", clean_contents=False
-    ):
+    def __init__(self, path, range=None, format="md", label="relative", clean_contents=False):
         self.range = range
         self.path = path
         self.format = format
@@ -61,7 +70,7 @@ class FileReference:
 
     def get_contents(self):
         try:
-            with open(self.path, "r") as file:
+            with open(self.path, "r", encoding="utf-8") as file:
                 self.file_content = file.read()
         except Exception as e:
             print(f"Error reading file {self.path}: {str(e)}")
@@ -72,7 +81,7 @@ class FileReference:
             self.clean_contents,
             self.range,
             self.format,
-            self.get_label(),
+            self.get_label()
         )
 
     def get_label(self):
@@ -86,29 +95,40 @@ class FileReference:
             return ""
 
 
+def process_text(text, clean=False, range=None, format="md", label=""):
+    if clean:
+        text = _clean(text)
+    if range:
+        text = _extract_range(text, range)
+    max_backticks = _count_max_backticks(text)
+    return _delimit(text, format, label, max_backticks)
+
+
 def _clean(text):
+    # Example cleaning logic
     return text.replace("    ", "\t")
 
 
-def _extract_range(text, range):
-    """Extracts lines from contents based on range tuple."""
-    start, end = range
+def _extract_range(text, range_tuple):
+    start, end = range_tuple
     lines = text.split("\n")
     return "\n".join(lines[start - 1 : end])
 
 
 def _count_max_backticks(text):
     max_backticks = 0
-    lines = text.split("\n")
-    for line in lines:
-        if line.startswith("`"):
-            max_backticks = max(max_backticks, len(line) - len(line.lstrip("`")))
+    for line in text.split("\n"):
+        # If a line starts with backticks, count them
+        stripped = line.lstrip("`")
+        count = len(line) - len(stripped)
+        if count > max_backticks:
+            max_backticks = count
     return max_backticks
 
 
 def _delimit(text, format, label, max_backticks=0):
     if format == "md":
-        backticks_str = "`" * (max_backticks + 2) if max_backticks >= 3 else "```"
+        backticks_str = "`" * max(max_backticks + 2, 3)  # at least 3
         return f"{backticks_str}{label}\n{text}\n{backticks_str}"
     elif format == "xml":
         return f"<file path='{label}'>\n{text}\n</file>"
@@ -116,13 +136,3 @@ def _delimit(text, format, label, max_backticks=0):
         return f"❯ cat {label}\n{text}"
     else:
         return text
-
-
-def process_text(text, clean=False, range=None, format="md", label=""):
-    if clean:
-        text = _clean(text)
-    if range:
-        text = _extract_range(text, range)
-    max_backticks = _count_max_backticks(text)
-    contents = _delimit(text, format, label, max_backticks)
-    return contents

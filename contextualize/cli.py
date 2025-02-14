@@ -1,69 +1,92 @@
-import argparse
-import os
-
-from pyperclip import copy
-
-from .external import InvalidTokenError, LinearClient
-from .reference import create_file_references
-from .repomap import repomap_cmd
-from .tokenize import call_tiktoken, count_tokens
-from .utils import read_config
+import click
 
 
-def cat_cmd(args):
-    references = create_file_references(
-        args.paths, args.ignore, args.format, args.label
-    )["concatenated"]
+@click.group()
+def cli():
+    """Contextualize CLI"""
+    pass
 
-    if args.output_file:
-        with open(args.output_file, "w") as file:
+
+@cli.command("cat")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.option("--ignore", multiple=True, help="File(s) to ignore")
+@click.option("-f", "--format", default="md", help="Output format (md/xml/shell)")
+@click.option(
+    "-l", "--label", default="relative", help="Label style (relative/name/ext)"
+)
+@click.option(
+    "-o", "--output", default="console", help="Output target (console/clipboard)"
+)
+@click.option("--output-file", type=click.Path(), help="Optional output file path")
+def cat_cmd(paths, ignore, format, label, output, output_file):
+    """Prepare and concatenate file references"""
+    from pyperclip import copy
+
+    from .reference import create_file_references
+    from .tokenize import count_tokens
+
+    references = create_file_references(paths, ignore, format, label)["concatenated"]
+
+    if output_file:
+        with open(output_file, "w") as file:
             file.write(references)
         token_info = count_tokens(references, target="cl100k_base")
-        print(f"Copied {token_info['count']} tokens to file ({token_info['method']}).")
-        print(f"Contents written to {args.output_file}")
-    elif args.output == "clipboard":
+        click.echo(
+            f"Copied {token_info['count']} tokens to file ({token_info['method']})."
+        )
+        click.echo(f"Contents written to {output_file}")
+    elif output == "clipboard":
         try:
             copy(references)
             token_info = count_tokens(references, target="cl100k_base")
-            print(
+            click.echo(
                 f"Copied {token_info['count']} tokens to clipboard ({token_info['method']})."
             )
         except Exception as e:
-            print(f"Error copying to clipboard: {e}")
+            click.echo(f"Error copying to clipboard: {e}", err=True)
     else:
-        print(references)
+        click.echo(references)
 
 
-def ls_cmd(args):
-    references = create_file_references(args.paths)["refs"]
+@cli.command("ls")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.option(
+    "--openai-encoding",
+    help="OpenAI encoding to use (e.g., 'cl100k_base', 'p50k_base', 'r50k_base')",
+)
+@click.option("--openai-model", help="OpenAI model name for token counting")
+@click.option("--anthropic-model", help="Anthropic model to use for token counting")
+def ls_cmd(paths, openai_encoding, anthropic_model, openai_model):
+    """List token counts for files"""
+    import os
+
+    from .reference import create_file_references
+    from .tokenize import call_tiktoken, count_tokens
+
+    references = create_file_references(paths)["refs"]
     total_tokens = 0
     method = None
     results = []
 
-    # determine counting method
-    if (
-        sum(
-            bool(x)
-            for x in [args.openai_encoding, args.anthropic_model, args.openai_model]
-        )
-        > 1
-    ):
-        print(
-            "Error: Only one of --openai-encoding, --openai-model, or --anthropic-model can be specified"
+    if sum(bool(x) for x in [openai_encoding, anthropic_model, openai_model]) > 1:
+        click.echo(
+            "Error: Only one of --openai-encoding, --openai-model, or --anthropic-model can be specified",
+            err=True,
         )
         return
 
-    if args.openai_encoding:
-        target = args.openai_encoding
-    elif args.anthropic_model:
-        target = args.anthropic_model
+    if openai_encoding:
+        target = openai_encoding
+    elif anthropic_model:
+        target = anthropic_model
         if "ANTHROPIC_API_KEY" not in os.environ:
-            print(
-                "Warning: ANTHROPIC_API_KEY not set in environment. Falling back to tiktoken."
+            click.echo(
+                "Warning: ANTHROPIC_API_KEY not set in environment. Falling back to tiktoken.",
+                err=True,
             )
             target = "cl100k_base"
-    elif args.openai_model:
-        result = call_tiktoken("test", model_str=args.openai_model)
+    elif openai_model:
+        result = call_tiktoken("test", model_str=openai_model)
         target = result["encoding"]
     else:
         target = (
@@ -79,31 +102,41 @@ def ls_cmd(args):
             method = result["method"]
         results.append((ref.path, result["count"]))
 
-    # sort by token count
     results.sort(key=lambda x: x[1], reverse=True)
     for path, count in results:
         output_str = (
             f"{path}: {count} tokens" if len(references) > 1 else f"{count} tokens"
         )
-        print(output_str, end="")
+        click.echo(output_str, nl=len(references) != 1)
         if len(references) == 1:
-            print(f" ({method})")
-        else:
-            print()
+            click.echo(f" ({method})")
     if len(references) > 1:
-        print(f"\nTotal: {total_tokens} tokens ({method})")
+        click.echo(f"\nTotal: {total_tokens} tokens ({method})")
 
 
-def fetch_cmd(args):
-    config = read_config(args.config)
+@cli.command("fetch")
+@click.argument("issue", nargs=-1)
+@click.option("--properties", help="Comma-separated list of properties to include")
+@click.option("--output", default="console", help="Output target (console/clipboard)")
+@click.option("--output-file", type=click.Path(), help="Optional output file path")
+@click.option("--config", type=click.Path(), help="Path to config file")
+def fetch_cmd(issue, properties, output, output_file, config):
+    """Fetch and prepare Linear issues"""
+    from pyperclip import copy
+
+    from .external import InvalidTokenError, LinearClient
+    from .tokenize import call_tiktoken
+    from .utils import read_config
+
+    config_data = read_config(config)
     try:
-        client = LinearClient(config["LINEAR_TOKEN"])
+        client = LinearClient(config_data["LINEAR_TOKEN"])
     except InvalidTokenError as e:
-        print(f"Error: {str(e)}")
+        click.echo(f"Error: {str(e)}", err=True)
         return
 
     issue_ids = []
-    for arg in args.issue:
+    for arg in issue:
         if arg.startswith("https://linear.app/"):
             issue_id = arg.split("/")[-2]
         else:
@@ -111,9 +144,9 @@ def fetch_cmd(args):
         issue_ids.append(issue_id)
 
     include_properties = (
-        args.properties.split(",")
-        if args.properties
-        else config.get("FETCH_INCLUDE_PROPERTIES", [])
+        properties.split(",")
+        if properties
+        else config_data.get("FETCH_INCLUDE_PROPERTIES", [])
     )
 
     markdown_outputs = []
@@ -121,12 +154,12 @@ def fetch_cmd(args):
     total_tokens = 0
 
     for issue_id in issue_ids:
-        issue = client.get_issue(issue_id)
-        if issue is None:
-            print(f"Issue {issue_id} not found.")
+        issue_obj = client.get_issue(issue_id)
+        if issue_obj is None:
+            click.echo(f"Issue {issue_id} not found.", err=True)
             continue
 
-        issue_markdown = issue.to_markdown(include_properties=include_properties)
+        issue_markdown = issue_obj.to_markdown(include_properties=include_properties)
         markdown_outputs.append(issue_markdown)
 
         token_info = call_tiktoken(issue_markdown)["count"]
@@ -142,126 +175,51 @@ def fetch_cmd(args):
             with open(dest, mode) as file:
                 file.write(content)
 
-    if args.output_file:
-        write_output(markdown_output, args.output_file)
-        print(f"Wrote {total_tokens} tokens to {args.output_file}")
+    if output_file:
+        write_output(markdown_output, output_file)
+        click.echo(f"Wrote {total_tokens} tokens to {output_file}")
         if len(issue_ids) > 1:
             for issue_id, count in token_counts.items():
-                print(f"- {issue_id}: {count} tokens")
-    elif args.output == "clipboard":
+                click.echo(f"- {issue_id}: {count} tokens")
+    elif output == "clipboard":
         write_output(markdown_output, "clipboard")
         if len(issue_ids) == 1:
-            print(f"Copied {total_tokens} tokens to clipboard.")
+            click.echo(f"Copied {total_tokens} tokens to clipboard.")
         else:
-            print(f"Copied {total_tokens} tokens to clipboard:")
+            click.echo(f"Copied {total_tokens} tokens to clipboard:")
             for issue_id, count in token_counts.items():
-                print(f"- {issue_id}: {count} tokens")
+                click.echo(f"- {issue_id}: {count} tokens")
     else:
-        print(markdown_output)
+        click.echo(markdown_output)
+
+
+@cli.command("map")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.option(
+    "-t",
+    "--max-tokens",
+    type=int,
+    default=10000,
+    help="Maximum tokens for the repo map",
+)
+@click.option("--output", default="console", help="Output target (console/clipboard)")
+@click.option("-f", "--format", default="plain", help="Output format (plain/shell)")
+@click.option("--output-file", type=click.Path(), help="Optional output file path")
+def map_cmd(paths, max_tokens, output, format, output_file):
+    """Generate a repository map"""
+    from .repomap import repomap_cmd
+
+    repomap_cmd(
+        paths=paths,
+        max_tokens=max_tokens,
+        output=output,
+        fmt=format,
+        output_file=output_file,
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Contextualize CLI")
-    subparsers = parser.add_subparsers(dest="command")
-
-    # 'cat' command
-    cat_parser = subparsers.add_parser(
-        "cat", help="Prepare and concatenate file references"
-    )
-    cat_parser.add_argument("paths", nargs="+", help="File or folder paths")
-    cat_parser.add_argument("--ignore", nargs="*", help="File(s) to ignore")
-    cat_parser.add_argument(
-        "-f",
-        "--format",
-        default="md",
-        help="Output format (options: 'md', 'xml', 'shell'; default 'md')",
-    )
-    cat_parser.add_argument(
-        "-l",
-        "--label",
-        default="relative",
-        help="Label style (options: 'relative', 'name', 'ext'; default 'relative')",
-    )
-    cat_parser.add_argument(
-        "-o",
-        "--output",
-        default="console",
-        help="Output target (options: 'console' (default), 'clipboard')",
-    )
-    cat_parser.add_argument("--output-file", help="Optional output file path")
-    cat_parser.set_defaults(func=cat_cmd)
-
-    # 'ls' command
-    ls_parser = subparsers.add_parser("ls", help="List token counts")
-    ls_parser.add_argument("paths", nargs="+", help="File or folder paths")
-    ls_parser.add_argument(
-        "--openai-encoding",
-        help="OpenAI encoding to use (e.g., 'cl100k_base', 'p50k_base', 'r50k_base')",
-    )
-    ls_parser.add_argument(
-        "--openai-model",
-        help="OpenAI model name for token counting (e.g., 'gpt-3.5-turbo'/'gpt-4' (default), 'text-davinci-003', 'code-davinci-002')",
-    )
-    ls_parser.add_argument(
-        "--anthropic-model",
-        help="Anthropic model to use for token counting (e.g., 'claude-3-5-sonnet-latest')",
-    )
-    ls_parser.set_defaults(func=ls_cmd)
-
-    # 'fetch' command
-    fetch_parser = subparsers.add_parser(
-        "fetch", help="Fetch and prepare Linear issues"
-    )
-    fetch_parser.add_argument(
-        "issue", nargs="+", help="Issue URL or identifier (e.g., CX-212)"
-    )
-    fetch_parser.add_argument(
-        "--properties",
-        help="Comma-separated list of properties to include (e.g., 'labels,project,relations')",
-    )
-    fetch_parser.add_argument(
-        "--output",
-        default="console",
-        help="Output target (options: 'console' (default), 'clipboard')",
-    )
-    fetch_parser.add_argument("--output-file", help="Optional output file path")
-    fetch_parser.add_argument(
-        "--config",
-        help="Path to config file to use (default: $XDG_CONFIG_HOME/contextualize/config.yaml)",
-    )
-    fetch_parser.set_defaults(func=fetch_cmd)
-
-    # 'map' command
-    map_parser = subparsers.add_parser("map", help="Generate a repository map")
-    map_parser.add_argument(
-        "paths", nargs="+", help="File or folder paths to include in the repo map"
-    )
-    map_parser.add_argument(
-        "-t",
-        "--max-tokens",
-        type=int,
-        default=10000,
-        help="Maximum tokens for the repo map (default: 10000)",
-    )
-    map_parser.add_argument(
-        "--output",
-        default="console",
-        help="Output target (options: 'console' (default), 'clipboard')",
-    )
-    map_parser.add_argument(
-        "-f",
-        "--format",
-        default="plain",
-        help="Output format (options: 'plain' (default), 'shell')",
-    )
-    map_parser.add_argument("--output-file", help="Optional output file path")
-    map_parser.set_defaults(func=repomap_cmd)
-
-    args = parser.parse_args()
-    if args.command:
-        args.func(args)
-    else:
-        parser.print_help()
+    cli()
 
 
 if __name__ == "__main__":

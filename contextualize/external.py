@@ -1,4 +1,3 @@
-import requests
 import re
 from datetime import datetime
 
@@ -13,6 +12,8 @@ class LinearClient:
         }
 
     def execute_query(self, query, variables=None):
+        import requests
+
         data = {"query": query, "variables": variables or {}}
         response = requests.post(self.base_url, headers=self.headers, json=data)
         response_data = response.json()
@@ -133,7 +134,8 @@ class Issue:
         return md
 
     def _format_comment(self, comment, is_reply=False):
-        comment_md = f"{'####' if is_reply else '###'} {comment['id'][:5]}\n"
+        header = "####" if is_reply else "###"
+        comment_md = f"{header} {comment['id'][:5]}\n"
         comment_md += f"{self._format_markdown_body(comment['body'])}\n\n"
         return comment_md
 
@@ -144,23 +146,26 @@ class Issue:
         priority_mapping = {1: "Urgent", 2: "High", 3: "Medium", 4: "Low"}
         estimate_mapping = {1: "XS", 2: "S", 3: "M", 4: "L", 5: "XL"}
 
+        def _format_relations(relations):
+            if not relations or "nodes" not in relations or not relations["nodes"]:
+                return None
+            lines = []
+            for node in relations["nodes"]:
+                rel_issue = node["relatedIssue"]
+                lines.append(f"  - {rel_issue['title']} ({rel_issue['identifier']})")
+            return "\n" + "\n".join(lines)
+
         property_configs = {
             "state": ("State", self.state.get("name")),
-            "priority": (
-                "Priority",
-                priority_mapping.get(self.priority, None),
-            ),
-            "estimate": (
-                "Estimate",
-                estimate_mapping.get(self.estimate, None),
-            ),
+            "priority": ("Priority", priority_mapping.get(self.priority)),
+            "estimate": ("Estimate", estimate_mapping.get(self.estimate)),
             "assignee": (
                 "Assignee",
                 self.assignee.get("name") if self.assignee else None,
             ),
             "labels": ("Labels", ", ".join(self.labels) if self.labels else None),
             "project": ("Project", self.project.get("name")),
-            "relations": ("Relations", self._format_relations()),
+            "relations": ("Relations", _format_relations(self.relations)),
         }
 
         properties = {
@@ -170,19 +175,6 @@ class Issue:
         }
 
         return properties
-
-    def _format_relations(self):
-        if (
-            not self.relations
-            or "nodes" not in self.relations
-            or not self.relations["nodes"]
-        ):
-            return None
-        relations_str = "\n" + "\n".join(
-            f"  - {node['relatedIssue']['title']} ({node['relatedIssue']['identifier']})"
-            for node in self.relations["nodes"]
-        )
-        return relations_str
 
 
 class InvalidTokenError(Exception):

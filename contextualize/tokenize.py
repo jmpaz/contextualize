@@ -1,27 +1,21 @@
 import os
 from typing import Dict, Optional, Union
 
-import anthropic
-import tiktoken
-
 
 def count_tokens(text: str, target: str = "cl100k_base") -> Dict[str, Union[int, str]]:
     """
-    Count tokens using either Anthropic's API or tiktoken based on the target.
+    Count tokens using either Anthropic's API or tiktoken, based on the 'target'.
 
-    Args:
-        text (str):   The text to count tokens for
-        target (str): Either an Anthropic model name (containing 'claude') or
-                      a tiktoken encoding name. Defaults to "cl100k_base"
-
-    Returns:
-        dict: A dictionary containing the token count and method used
+    If the target string includes 'claude' and ANTHROPIC_API_KEY is set, attempt
+    Anthropic's token counting. Otherwise, fall back to tiktoken.
     """
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
 
     if "claude" in target.lower() and anthropic_api_key:
-        client = anthropic.Anthropic(api_key=anthropic_api_key)
         try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=anthropic_api_key)
             response = client.beta.messages.count_tokens(
                 betas=["token-counting-2024-11-01"],
                 model=target,
@@ -31,7 +25,7 @@ def count_tokens(text: str, target: str = "cl100k_base") -> Dict[str, Union[int,
         except Exception as e:
             print(f"Error using Anthropic API: {str(e)}. Falling back to tiktoken.")
 
-    # fall back to tiktoken if Anthropic is not available or fails
+    # Fall back to tiktoken
     result = call_tiktoken(
         text, encoding_str=target if "claude" not in target.lower() else "cl100k_base"
     )
@@ -46,20 +40,16 @@ def call_tiktoken(
     """
     Count the number of tokens in the provided string with tiktoken.
 
-    Args:
-        text (str): The text to count tokens for
-        encoding_str: The encoding to use. "cl100k_base" for GPT-4/3.5-turbo, "p50k_base" for `text-davinci-003` and `code-davinci-002`, "r50k_base" for previous `davinci`/earlier GPT-3 models
-        model_str: Model string to use for fetching an encoding for if `encoding_str` is not provided
-
-    Returns:
-        dict: A dictionary containing the tokens, count, and encoding used"
+    If `encoding_str` is None but `model_str` is provided, detect the encoding for that model.
     """
+    import tiktoken
+
     if encoding_str:
         encoding = tiktoken.get_encoding(encoding_str)
     elif model_str:
         encoding = tiktoken.encoding_for_model(model_str)
     else:
-        raise ValueError("Model or encoding must be provided")
+        raise ValueError("Must provide an encoding_str or a model_str")
 
     tokens = encoding.encode(text)
     return {"tokens": tokens, "count": len(tokens), "encoding": encoding.name}

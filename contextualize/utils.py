@@ -1,5 +1,4 @@
 import os
-import yaml
 
 
 def get_config_path(custom_path=None):
@@ -10,9 +9,11 @@ def get_config_path(custom_path=None):
 
 
 def read_config(custom_path=None):
+    import yaml
+
     config_path = get_config_path(custom_path)
     try:
-        with open(config_path, "r") as file:
+        with open(config_path, "r", encoding="utf-8") as file:
             return yaml.safe_load(file)
     except FileNotFoundError:
         return {}
