@@ -1,18 +1,18 @@
 import os
 
 
-def repomap_cmd(paths, max_tokens, output, fmt, output_file):
+def generate_repo_map_data(paths, max_tokens, fmt):
     """
-    Generate a repository map from the provided paths. If `output_file` is specified,
-    write to that file; otherwise print to stdout or copy to clipboard (if output='clipboard').
+    Generate a repository map and return a dict containing:
+      - repo_map: The generated repository map as a string.
+      - summary: A summary string with file/token info.
+      - messages: Any warnings/errors collected.
+      - error: Present if no map could be generated.
     """
-    import click
     from aider.repomap import RepoMap, find_src_files
-    from pyperclip import copy
-
     from contextualize.tokenize import count_tokens
 
-    # Gather files
+    # Gather files from provided paths.
     files = []
     for path in paths:
         if os.path.isdir(path):
@@ -20,15 +20,19 @@ def repomap_cmd(paths, max_tokens, output, fmt, output_file):
         else:
             files.append(path)
 
-    class ConsoleIO:
+    # Define an IO object that collects messages (instead of printing).
+    class CollectorIO:
+        def __init__(self):
+            self.messages = []
+
         def tool_output(self, msg):
-            click.echo(msg)
+            self.messages.append(msg)
 
         def tool_error(self, msg):
-            click.echo(f"ERROR: {msg}", err=True)
+            self.messages.append(f"ERROR: {msg}")
 
         def tool_warning(self, msg):
-            click.echo(f"WARNING: {msg}", err=True)
+            self.messages.append(f"WARNING: {msg}")
 
         def read_text(self, fname):
             try:
@@ -38,36 +42,64 @@ def repomap_cmd(paths, max_tokens, output, fmt, output_file):
                 self.tool_warning(f"Error reading file {fname}: {str(e)}")
                 return ""
 
+    # Define a token counter that uses our token counting utility.
     class TokenCounter:
         def token_count(self, text):
             result = count_tokens(text, target="cl100k_base")
             return result["count"]
 
-    io = ConsoleIO()
-    main_model = TokenCounter()
+    io = CollectorIO()
+    token_counter = TokenCounter()
 
-    rm = RepoMap(map_tokens=max_tokens, main_model=main_model, io=io)
+    # Create the repo map using the RepoMap class.
+    rm = RepoMap(map_tokens=max_tokens, main_model=token_counter, io=io)
     repo_map = rm.get_repo_map(chat_files=[], other_files=files)
 
     if not repo_map:
-        io.tool_error("No repository map was generated.")
-        return
+        error_message = "\n".join(io.messages) or "No repository map was generated."
+        return {"error": error_message}
 
+    # Optionally adjust the format.
     if fmt == "shell":
         repo_map = f"❯ repo-map {' '.join(paths)}\n{repo_map}"
 
     token_info = count_tokens(repo_map, target="cl100k_base")
     num_files = len(files)
-    summary_str = f"Map of {num_files} files ({token_info['count']} tokens) "
+    summary_str = f"Map of {num_files} files ({token_info['count']} tokens)"
+
+    return {
+        "repo_map": repo_map,
+        "summary": summary_str,
+        "messages": io.messages,
+    }
+
+
+def repomap_cmd(paths, max_tokens, output, fmt, output_file):
+    """
+    CLI command handler for generating a repository map.
+    It calls generate_repo_map_data() and then handles output according to the CLI options.
+    """
+    import click
+    from pyperclip import copy
+
+    result = generate_repo_map_data(paths, max_tokens, fmt)
+
+    # If an error occurred during generation, print it and exit.
+    if "error" in result:
+        click.echo(result["error"], err=True)
+        return
+
+    repo_map = result["repo_map"]
+    summary = result["summary"]
 
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(repo_map)
-        click.echo(f"{summary_str}written to: {output_file}.")
+        click.echo(f"{summary} written to: {output_file}.")
     elif output == "clipboard":
         try:
             copy(repo_map)
-            click.echo(f"{summary_str}copied to clipboard.")
+            click.echo(f"{summary} copied to clipboard.")
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)
     else:
