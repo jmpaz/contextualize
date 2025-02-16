@@ -218,6 +218,71 @@ def map_cmd(paths, max_tokens, output, format, output_file):
     )
 
 
+@cli.command("shell")
+@click.argument("commands", nargs=-1, required=True)
+@click.option(
+    "-f",
+    "--format",
+    default="shell",
+    help="Output format (md/xml/shell). Defaults to shell.",
+)
+@click.option(
+    "-l",
+    "--label",
+    default="cmd",
+    help="How to label each command (default is to show the entire command).",
+)
+@click.option(
+    "-o",
+    "--output",
+    default="console",
+    help="Output target (console/clipboard). Defaults to console.",
+)
+@click.option("--output-file", type=click.Path(), help="Optional output file path")
+@click.option(
+    "--capture-stderr/--no-capture-stderr",
+    default=True,
+    help="Capture stderr along with stdout. Defaults to True.",
+)
+def shell_cmd(commands, format, label, output, output_file, capture_stderr):
+    """
+    Run arbitrary shell commands. Example:
+
+        contextualize cmd "man waybar" "ls --help"
+    """
+    from pyperclip import copy
+
+    from .commands import create_command_references
+    from .tokenize import count_tokens
+
+    refs_data = create_command_references(
+        commands=commands,
+        format=format,
+        label=label,
+        capture_stderr=capture_stderr,
+    )
+    concatenated = refs_data["concatenated"]
+
+    if output_file:
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(concatenated)
+        token_info = count_tokens(concatenated, target="cl100k_base")
+        click.echo(
+            f"Wrote {token_info['count']} tokens ({token_info['method']}) to {output_file}"
+        )
+    elif output == "clipboard":
+        try:
+            copy(concatenated)
+            token_info = count_tokens(concatenated, target="cl100k_base")
+            click.echo(
+                f"Copied {token_info['count']} tokens ({token_info['method']}) to clipboard."
+            )
+        except Exception as e:
+            click.echo(f"Error copying to clipboard: {e}", err=True)
+    else:
+        click.echo(concatenated)
+
+
 def main():
     cli()
 
