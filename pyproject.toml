@@ -1,6 +1,6 @@
 [project]
 name = "contextualize"
-version = "0.0.4"
+version = "0.0.5"
 description = "LLM prompt/context preparation utility"
 readme = "README.md"
 authors = [
