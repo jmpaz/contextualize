@@ -75,6 +75,7 @@ class CommandReference:
                 range=None,
                 format=self.format,
                 label=label_str,
+                shell_cmd=self.command if self.format == "shell" else None,
             )
 
 
