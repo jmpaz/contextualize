@@ -58,6 +58,13 @@ A CLI (`cli.py`) is provided to print file contents to the console from the comm
   - **`--output`**: Output target (options: `console` (default), `clipboard`)
   - **`--output-file`**: Optional output file path
 
+- **`shell`**: Run arbitrary shell commands and capture their output
+  - **`commands`**: Positional arguments for one or more shell commands (e.g., `"ls --help"`, `"man waybar"`)
+  - **`-f, --format`**: Output format (`md`, `xml`, or `shell`; default is `shell`)
+  - **`-o, --output`**: Output target (`console` (default), `clipboard`)
+  - **`--output-file`**: Output file path (optional)
+  - **`--capture-stderr/--no-capture-stderr`**: Capture stderr along with stdout (defaults to `--capture-stderr`)
+
 #### Examples
 
 - **`cat`**:
@@ -73,3 +80,8 @@ A CLI (`cli.py`) is provided to print file contents to the console from the comm
 - **`map`**:
   - `contextualize map .` will generate and print a repository map for the current directory.
   - `contextualize map src/ tests/ -t 15000` will generate a repository map for files in the `src/` and `tests/` directories with a maximum of 15000 tokens.
+
+- **`shell`**:
+  - `contextualize shell "ls --help" "man waybar"` will execute the commands `ls --help` and `man waybar`, capture their output, and print the formatted results to the console in the default shell format.
+  - `contextualize shell "git status" --format md --output clipboard` will run `git status`, format its output in a code block and write the formatted output to the clipboard.
+  - `contextualize shell "ls -la" --no-capture-stderr --output-file output.txt` will execute `ls -la` without capturing stderr and write the formatted output to `output.txt`.
