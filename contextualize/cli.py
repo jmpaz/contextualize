@@ -1,7 +1,7 @@
 import click
 
 
-@click.group()
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli():
     """Contextualize CLI"""
     pass
