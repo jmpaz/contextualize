@@ -252,7 +252,7 @@ def shell_cmd(commands, format, label, output, output_file, capture_stderr):
     """
     from pyperclip import copy
 
-    from .commands import create_command_references
+    from .shell import create_command_references
     from .tokenize import count_tokens
 
     refs_data = create_command_references(
