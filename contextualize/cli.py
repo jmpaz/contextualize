@@ -227,12 +227,6 @@ def map_cmd(paths, max_tokens, output, format, output_file):
     help="Output format (md/xml/shell). Defaults to shell.",
 )
 @click.option(
-    "-l",
-    "--label",
-    default="cmd",
-    help="How to label each command (default is to show the entire command).",
-)
-@click.option(
     "-o",
     "--output",
     default="console",
@@ -244,7 +238,7 @@ def map_cmd(paths, max_tokens, output, format, output_file):
     default=True,
     help="Capture stderr along with stdout. Defaults to True.",
 )
-def shell_cmd(commands, format, label, output, output_file, capture_stderr):
+def shell_cmd(commands, format, output, output_file, capture_stderr):
     """
     Run arbitrary shell commands. Example:
 
@@ -258,7 +252,6 @@ def shell_cmd(commands, format, label, output, output_file, capture_stderr):
     refs_data = create_command_references(
         commands=commands,
         format=format,
-        label=label,
         capture_stderr=capture_stderr,
     )
     concatenated = refs_data["concatenated"]

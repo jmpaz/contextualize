@@ -23,18 +23,15 @@ class CommandReference:
         self,
         command: str,
         format: str = "shell",
-        label: str = "cmd",
         capture_stderr: bool = True,
     ):
         """
         :param command: The raw command string, e.g. "ls --help"
         :param format: "md"/"xml"/"shell"
-        :param label: Label style; "cmd" means show the entire command.
         :param capture_stderr: Whether to capture stderr as well.
         """
         self.command = command
         self.format = format
-        self.label = label or "cmd"
         self.capture_stderr = capture_stderr
 
         self.command_output = self.run_command()
@@ -61,20 +58,15 @@ class CommandReference:
             return f"Error running command {self.command}: {str(e)}\n"
 
     def get_contents(self) -> str:
-        """
-        Wrap the command output. For XML format, use custom tags;
-        otherwise, rely on the standard process_text function.
-        """
         if self.format == "xml":
             return f'<cmd exec="{self.command}">\n{self.command_output}\n</cmd>'
         else:
-            label_str = self.command if self.label == "cmd" else self.label
             return process_text(
                 text=self.command_output,
                 clean=False,
                 range=None,
                 format=self.format,
-                label=label_str,
+                label=self.command,
                 shell_cmd=self.command if self.format == "shell" else None,
             )
 
@@ -82,7 +74,6 @@ class CommandReference:
 def create_command_references(
     commands: List[str],
     format: str = "shell",
-    label: str = "cmd",
     capture_stderr: bool = True,
 ):
     """
@@ -91,9 +82,7 @@ def create_command_references(
     """
     cmd_refs = []
     for cmd in commands:
-        cmd_ref = CommandReference(
-            cmd, format=format, label=label, capture_stderr=capture_stderr
-        )
+        cmd_ref = CommandReference(cmd, format=format, capture_stderr=capture_stderr)
         cmd_refs.append(cmd_ref)
 
     concatenated = "\n\n".join(ref.output for ref in cmd_refs)
