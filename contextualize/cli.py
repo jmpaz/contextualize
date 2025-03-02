@@ -207,15 +207,26 @@ def fetch_cmd(issue, properties, output, output_file, config):
 @click.option("--output-file", type=click.Path(), help="Optional output file path")
 def map_cmd(paths, max_tokens, output, format, output_file):
     """Generate a repository map"""
-    from .repomap import repomap_cmd
+    from pyperclip import copy
 
-    repomap_cmd(
-        paths=paths,
-        max_tokens=max_tokens,
-        output=output,
-        fmt=format,
-        output_file=output_file,
-    )
+    from contextualize.repomap import generate_repo_map_data
+
+    result = generate_repo_map_data(paths, max_tokens, format)
+    if "error" in result:
+        click.echo(result["error"], err=True)
+        return
+
+    repo_map = result["repo_map"]
+
+    if output_file:
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(repo_map)
+        click.echo(result["summary"] + f" written to: {output_file}.")
+    elif output == "clipboard":
+        copy(repo_map)
+        click.echo(result["summary"] + " copied to clipboard.")
+    else:
+        click.echo(repo_map)
 
 
 @cli.command("shell")

@@ -1,5 +1,7 @@
 import os
 
+from contextualize.tokenize import count_tokens
+
 
 def generate_repo_map_data(paths, max_tokens, fmt):
     """
@@ -10,9 +12,7 @@ def generate_repo_map_data(paths, max_tokens, fmt):
       - error: Present if no map could be generated.
     """
     from aider.repomap import RepoMap, find_src_files
-    from contextualize.tokenize import count_tokens
 
-    # Gather files from provided paths.
     files = []
     for path in paths:
         if os.path.isdir(path):
@@ -20,7 +20,6 @@ def generate_repo_map_data(paths, max_tokens, fmt):
         else:
             files.append(path)
 
-    # Define an IO object that collects messages (instead of printing).
     class CollectorIO:
         def __init__(self):
             self.messages = []
@@ -42,7 +41,6 @@ def generate_repo_map_data(paths, max_tokens, fmt):
                 self.tool_warning(f"Error reading file {fname}: {str(e)}")
                 return ""
 
-    # Define a token counter that uses our token counting utility.
     class TokenCounter:
         def token_count(self, text):
             result = count_tokens(text, target="cl100k_base")
@@ -51,7 +49,6 @@ def generate_repo_map_data(paths, max_tokens, fmt):
     io = CollectorIO()
     token_counter = TokenCounter()
 
-    # Create the repo map using the RepoMap class.
     rm = RepoMap(map_tokens=max_tokens, main_model=token_counter, io=io)
     repo_map = rm.get_repo_map(chat_files=[], other_files=files)
 
@@ -59,7 +56,6 @@ def generate_repo_map_data(paths, max_tokens, fmt):
         error_message = "\n".join(io.messages) or "No repository map was generated."
         return {"error": error_message}
 
-    # Optionally adjust the format.
     if fmt == "shell":
         repo_map = f"❯ repo-map {' '.join(paths)}\n{repo_map}"
 
@@ -72,35 +68,3 @@ def generate_repo_map_data(paths, max_tokens, fmt):
         "summary": summary_str,
         "messages": io.messages,
     }
-
-
-def repomap_cmd(paths, max_tokens, output, fmt, output_file):
-    """
-    CLI command handler for generating a repository map.
-    It calls generate_repo_map_data() and then handles output according to the CLI options.
-    """
-    import click
-    from pyperclip import copy
-
-    result = generate_repo_map_data(paths, max_tokens, fmt)
-
-    # If an error occurred during generation, print it and exit.
-    if "error" in result:
-        click.echo(result["error"], err=True)
-        return
-
-    repo_map = result["repo_map"]
-    summary = result["summary"]
-
-    if output_file:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(repo_map)
-        click.echo(f"{summary} written to: {output_file}.")
-    elif output == "clipboard":
-        try:
-            copy(repo_map)
-            click.echo(f"{summary} copied to clipboard.")
-        except Exception as e:
-            click.echo(f"Error copying to clipboard: {e}", err=True)
-    else:
-        click.echo(repo_map)
