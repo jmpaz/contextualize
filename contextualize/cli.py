@@ -18,18 +18,29 @@ def cli():
     "-o", "--output", default="console", help="Output target (console/clipboard)"
 )
 @click.option("--output-file", type=click.Path(), help="Optional output file path")
-def cat_cmd(paths, ignore, format, label, output, output_file):
+@click.option(
+    "-w",
+    "--wrap",
+    "wrap_mode",
+    is_flag=False,
+    flag_value="md",
+    default=None,
+    help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
+)
+def cat_cmd(paths, ignore, format, label, output, output_file, wrap_mode):
     """Prepare and concatenate file references"""
     from pyperclip import copy
 
     from .reference import create_file_references
     from .tokenize import count_tokens
+    from .utils import wrap_text
 
     references = create_file_references(paths, ignore, format, label)["concatenated"]
+    final_output = wrap_text(references, wrap_mode)
 
     if output_file:
         with open(output_file, "w") as file:
-            file.write(references)
+            file.write(final_output)
         token_info = count_tokens(references, target="cl100k_base")
         click.echo(
             f"Copied {token_info['count']} tokens to file ({token_info['method']})."
@@ -37,7 +48,7 @@ def cat_cmd(paths, ignore, format, label, output, output_file):
         click.echo(f"Contents written to {output_file}")
     elif output == "clipboard":
         try:
-            copy(references)
+            copy(final_output)
             token_info = count_tokens(references, target="cl100k_base")
             click.echo(
                 f"Copied {token_info['count']} tokens to clipboard ({token_info['method']})."
@@ -45,7 +56,7 @@ def cat_cmd(paths, ignore, format, label, output, output_file):
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)
     else:
-        click.echo(references)
+        click.echo(final_output)
 
 
 @cli.command("ls")
@@ -120,13 +131,22 @@ def ls_cmd(paths, openai_encoding, anthropic_model, openai_model):
 @click.option("--output", default="console", help="Output target (console/clipboard)")
 @click.option("--output-file", type=click.Path(), help="Optional output file path")
 @click.option("--config", type=click.Path(), help="Path to config file")
-def fetch_cmd(issue, properties, output, output_file, config):
+@click.option(
+    "-w",
+    "--wrap",
+    "wrap_mode",
+    is_flag=False,
+    flag_value="md",
+    default=None,
+    help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
+)
+def fetch_cmd(issue, properties, output, output_file, config, wrap_mode):
     """Fetch and prepare Linear issues"""
     from pyperclip import copy
 
     from .external import InvalidTokenError, LinearClient
     from .tokenize import call_tiktoken
-    from .utils import read_config
+    from .utils import read_config, wrap_text
 
     config_data = read_config(config)
     try:
@@ -161,28 +181,28 @@ def fetch_cmd(issue, properties, output, output_file, config):
 
         issue_markdown = issue_obj.to_markdown(include_properties=include_properties)
         markdown_outputs.append(issue_markdown)
-
         token_info = call_tiktoken(issue_markdown)["count"]
         token_counts[issue_id] = token_info
         total_tokens += token_info
 
     markdown_output = "\n\n".join(markdown_outputs).strip()
+    final_output = wrap_text(markdown_output, wrap_mode)
 
     def write_output(content, dest, mode="w"):
         if dest == "clipboard":
             copy(content)
         else:
-            with open(dest, mode) as file:
+            with open(dest, mode, encoding="utf-8") as file:
                 file.write(content)
 
     if output_file:
-        write_output(markdown_output, output_file)
+        write_output(final_output, output_file)
         click.echo(f"Wrote {total_tokens} tokens to {output_file}")
         if len(issue_ids) > 1:
             for issue_id, count in token_counts.items():
                 click.echo(f"- {issue_id}: {count} tokens")
     elif output == "clipboard":
-        write_output(markdown_output, "clipboard")
+        write_output(final_output, "clipboard")
         if len(issue_ids) == 1:
             click.echo(f"Copied {total_tokens} tokens to clipboard.")
         else:
@@ -190,7 +210,7 @@ def fetch_cmd(issue, properties, output, output_file, config):
             for issue_id, count in token_counts.items():
                 click.echo(f"- {issue_id}: {count} tokens")
     else:
-        click.echo(markdown_output)
+        click.echo(final_output)
 
 
 @cli.command("map")
@@ -205,11 +225,22 @@ def fetch_cmd(issue, properties, output, output_file, config):
 @click.option("--output", default="console", help="Output target (console/clipboard)")
 @click.option("-f", "--format", default="plain", help="Output format (plain/shell)")
 @click.option("--output-file", type=click.Path(), help="Optional output file path")
-def map_cmd(paths, max_tokens, output, format, output_file):
+@click.option(
+    "-w",
+    "--wrap",
+    "wrap_mode",
+    is_flag=False,
+    flag_value="md",
+    default=None,
+    help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
+)
+def map_cmd(paths, max_tokens, output, format, output_file, wrap_mode):
     """Generate a repository map"""
     from pyperclip import copy
 
     from contextualize.repomap import generate_repo_map_data
+
+    from .utils import wrap_text
 
     result = generate_repo_map_data(paths, max_tokens, format)
     if "error" in result:
@@ -217,16 +248,17 @@ def map_cmd(paths, max_tokens, output, format, output_file):
         return
 
     repo_map = result["repo_map"]
+    final_output = wrap_text(repo_map, wrap_mode)
 
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
-            f.write(repo_map)
+            f.write(final_output)
         click.echo(result["summary"] + f" written to: {output_file}.")
     elif output == "clipboard":
-        copy(repo_map)
+        copy(final_output)
         click.echo(result["summary"] + " copied to clipboard.")
     else:
-        click.echo(repo_map)
+        click.echo(final_output)
 
 
 @cli.command("shell")
@@ -249,16 +281,26 @@ def map_cmd(paths, max_tokens, output, format, output_file):
     default=True,
     help="Capture stderr along with stdout. Defaults to True.",
 )
-def shell_cmd(commands, format, output, output_file, capture_stderr):
+@click.option(
+    "-w",
+    "--wrap",
+    "wrap_mode",
+    is_flag=False,
+    flag_value="md",
+    default=None,
+    help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
+)
+def shell_cmd(commands, format, output, output_file, capture_stderr, wrap_mode):
     """
     Run arbitrary shell commands. Example:
 
-        contextualize cmd "man waybar" "ls --help"
+        contextualize shell "man waybar" "ls --help"
     """
     from pyperclip import copy
 
     from .shell import create_command_references
     from .tokenize import count_tokens
+    from .utils import wrap_text
 
     refs_data = create_command_references(
         commands=commands,
@@ -266,17 +308,18 @@ def shell_cmd(commands, format, output, output_file, capture_stderr):
         capture_stderr=capture_stderr,
     )
     concatenated = refs_data["concatenated"]
+    final_output = wrap_text(concatenated, wrap_mode)
 
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
-            f.write(concatenated)
+            f.write(final_output)
         token_info = count_tokens(concatenated, target="cl100k_base")
         click.echo(
             f"Wrote {token_info['count']} tokens ({token_info['method']}) to {output_file}"
         )
     elif output == "clipboard":
         try:
-            copy(concatenated)
+            copy(final_output)
             token_info = count_tokens(concatenated, target="cl100k_base")
             click.echo(
                 f"Copied {token_info['count']} tokens ({token_info['method']}) to clipboard."
@@ -284,7 +327,7 @@ def shell_cmd(commands, format, output, output_file, capture_stderr):
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)
     else:
-        click.echo(concatenated)
+        click.echo(final_output)
 
 
 def main():
