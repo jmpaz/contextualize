@@ -41,3 +41,18 @@ def wrap_text(content: str, wrap_mode: str) -> str:
         return f"{fence}\n{content}\n{fence}"
 
     return content
+
+
+def add_prompt_wrappers(content, prompts):
+    """
+    If no prompt strings are provided, return content unchanged.
+    If one prompt string is provided, prepend it (without an extra blank line).
+    If two prompt strings are provided, prepend the first and append the second,
+    with a single blank line separating the appended prompt.
+    """
+    if not prompts:
+        return content
+    if len(prompts) == 1:
+        return f"{prompts[0]}\n{content}"
+    else:
+        return f"{prompts[0]}\n{content}\n\n{prompts[1]}"

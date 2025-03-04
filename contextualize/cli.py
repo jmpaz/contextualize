@@ -1,13 +1,33 @@
 import click
 
 
+def validate_prompt(ctx, param, value):
+    if len(value) > 2:
+        raise click.BadParameter("At most two prompt strings are allowed")
+    return value
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-def cli():
-    """Contextualize CLI"""
-    pass
+@click.option(
+    "-p",
+    "--prompt",
+    multiple=True,
+    type=str,
+    callback=validate_prompt,
+    help="Up to two prompt strings. Supply one --prompt to prepend, and a second --prompt to append (optional).",
+)
+@click.pass_context
+def cli(ctx, prompt):
+    """
+    Contextualize CLI
+    """
+    ctx.ensure_object(dict)
+    # Store prompt strings in context for use by subcommands
+    ctx.obj["prompt"] = list(prompt)
 
 
 @cli.command("cat")
+@click.pass_context
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option("--ignore", multiple=True, help="File(s) to ignore")
 @click.option("-f", "--format", default="md", help="Output format (md/xml/shell)")
@@ -27,19 +47,25 @@ def cli():
     default=None,
     help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
 )
-def cat_cmd(paths, ignore, format, label, output, output_file, wrap_mode):
-    """Prepare and concatenate file references"""
+def cat_cmd(ctx, paths, ignore, format, label, output, output_file, wrap_mode):
+    """
+    Prepare and concatenate file references
+    """
     from pyperclip import copy
 
     from .reference import create_file_references
     from .tokenize import count_tokens
-    from .utils import wrap_text
+    from .utils import add_prompt_wrappers, wrap_text
 
     references = create_file_references(paths, ignore, format, label)["concatenated"]
     final_output = wrap_text(references, wrap_mode)
 
+    # Insert prompt strings (if provided)
+    prompt_messages = ctx.obj.get("prompt", [])
+    final_output = add_prompt_wrappers(final_output, prompt_messages)
+
     if output_file:
-        with open(output_file, "w") as file:
+        with open(output_file, "w", encoding="utf-8") as file:
             file.write(final_output)
         token_info = count_tokens(references, target="cl100k_base")
         click.echo(
@@ -60,6 +86,7 @@ def cat_cmd(paths, ignore, format, label, output, output_file, wrap_mode):
 
 
 @cli.command("ls")
+@click.pass_context
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option(
     "--openai-encoding",
@@ -67,8 +94,10 @@ def cat_cmd(paths, ignore, format, label, output, output_file, wrap_mode):
 )
 @click.option("--openai-model", help="OpenAI model name for token counting")
 @click.option("--anthropic-model", help="Anthropic model to use for token counting")
-def ls_cmd(paths, openai_encoding, anthropic_model, openai_model):
-    """List token counts for files"""
+def ls_cmd(ctx, paths, openai_encoding, anthropic_model, openai_model):
+    """
+    List token counts for files
+    """
     import os
 
     from .reference import create_file_references
@@ -114,18 +143,27 @@ def ls_cmd(paths, openai_encoding, anthropic_model, openai_model):
         results.append((ref.path, result["count"]))
 
     results.sort(key=lambda x: x[1], reverse=True)
+    lines = []
     for path, count in results:
-        output_str = (
-            f"{path}: {count} tokens" if len(references) > 1 else f"{count} tokens"
-        )
-        click.echo(output_str, nl=len(references) != 1)
-        if len(references) == 1:
-            click.echo(f" ({method})")
+        if len(references) > 1:
+            lines.append(f"{path}: {count} tokens")
+        else:
+            lines.append(f"{count} tokens\n ({method})")
+
     if len(references) > 1:
-        click.echo(f"\nTotal: {total_tokens} tokens ({method})")
+        lines.append(f"\nTotal: {total_tokens} tokens ({method})")
+    output_str = "\n".join(lines).strip()
+
+    from .utils import add_prompt_wrappers
+
+    prompt_messages = ctx.obj.get("prompt", [])
+    output_str = add_prompt_wrappers(output_str, prompt_messages)
+
+    click.echo(output_str)
 
 
 @cli.command("fetch")
+@click.pass_context
 @click.argument("issue", nargs=-1)
 @click.option("--properties", help="Comma-separated list of properties to include")
 @click.option("--output", default="console", help="Output target (console/clipboard)")
@@ -140,13 +178,15 @@ def ls_cmd(paths, openai_encoding, anthropic_model, openai_model):
     default=None,
     help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
 )
-def fetch_cmd(issue, properties, output, output_file, config, wrap_mode):
-    """Fetch and prepare Linear issues"""
+def fetch_cmd(ctx, issue, properties, output, output_file, config, wrap_mode):
+    """
+    Fetch and prepare Linear issues
+    """
     from pyperclip import copy
 
     from .external import InvalidTokenError, LinearClient
     from .tokenize import call_tiktoken
-    from .utils import read_config, wrap_text
+    from .utils import add_prompt_wrappers, read_config, wrap_text
 
     config_data = read_config(config)
     try:
@@ -188,6 +228,9 @@ def fetch_cmd(issue, properties, output, output_file, config, wrap_mode):
     markdown_output = "\n\n".join(markdown_outputs).strip()
     final_output = wrap_text(markdown_output, wrap_mode)
 
+    prompt_messages = ctx.obj.get("prompt", [])
+    final_output = add_prompt_wrappers(final_output, prompt_messages)
+
     def write_output(content, dest, mode="w"):
         if dest == "clipboard":
             copy(content)
@@ -214,6 +257,7 @@ def fetch_cmd(issue, properties, output, output_file, config, wrap_mode):
 
 
 @cli.command("map")
+@click.pass_context
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option(
     "-t",
@@ -234,13 +278,15 @@ def fetch_cmd(issue, properties, output, output_file, config, wrap_mode):
     default=None,
     help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
 )
-def map_cmd(paths, max_tokens, output, format, output_file, wrap_mode):
-    """Generate a repository map"""
+def map_cmd(ctx, paths, max_tokens, output, format, output_file, wrap_mode):
+    """
+    Generate a repository map
+    """
     from pyperclip import copy
 
     from contextualize.repomap import generate_repo_map_data
 
-    from .utils import wrap_text
+    from .utils import add_prompt_wrappers, wrap_text
 
     result = generate_repo_map_data(paths, max_tokens, format)
     if "error" in result:
@@ -249,6 +295,9 @@ def map_cmd(paths, max_tokens, output, format, output_file, wrap_mode):
 
     repo_map = result["repo_map"]
     final_output = wrap_text(repo_map, wrap_mode)
+
+    prompt_messages = ctx.obj.get("prompt", [])
+    final_output = add_prompt_wrappers(final_output, prompt_messages)
 
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
@@ -262,6 +311,7 @@ def map_cmd(paths, max_tokens, output, format, output_file, wrap_mode):
 
 
 @cli.command("shell")
+@click.pass_context
 @click.argument("commands", nargs=-1, required=True)
 @click.option(
     "-f",
@@ -290,7 +340,7 @@ def map_cmd(paths, max_tokens, output, format, output_file, wrap_mode):
     default=None,
     help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
 )
-def shell_cmd(commands, format, output, output_file, capture_stderr, wrap_mode):
+def shell_cmd(ctx, commands, format, output, output_file, capture_stderr, wrap_mode):
     """
     Run arbitrary shell commands. Example:
 
@@ -300,7 +350,7 @@ def shell_cmd(commands, format, output, output_file, capture_stderr, wrap_mode):
 
     from .shell import create_command_references
     from .tokenize import count_tokens
-    from .utils import wrap_text
+    from .utils import add_prompt_wrappers, wrap_text
 
     refs_data = create_command_references(
         commands=commands,
@@ -309,6 +359,9 @@ def shell_cmd(commands, format, output, output_file, capture_stderr, wrap_mode):
     )
     concatenated = refs_data["concatenated"]
     final_output = wrap_text(concatenated, wrap_mode)
+
+    prompt_messages = ctx.obj.get("prompt", [])
+    final_output = add_prompt_wrappers(final_output, prompt_messages)
 
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
