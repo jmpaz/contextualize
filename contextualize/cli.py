@@ -1,199 +1,158 @@
 import click
+from pyperclip import copy
+
+from .tokenize import count_tokens
+from .utils import add_prompt_wrappers, read_config, wrap_text
 
 
 def validate_prompt(ctx, param, value):
+    """
+    Ensure at most two prompt strings are provided.
+    """
     if len(value) > 2:
-        raise click.BadParameter("At most two prompt strings are allowed")
+        raise click.BadParameter("At most two prompt strings are allowed.")
     return value
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.group(
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 @click.option(
     "-p",
     "--prompt",
     multiple=True,
-    type=str,
     callback=validate_prompt,
-    help="Up to two prompt strings. Supply one --prompt to prepend, and a second --prompt to append (optional).",
+    help=(
+        "Up to two prompt strings. Provide one to prepend, and "
+        "an optional second one to append (with a blank line)."
+    ),
 )
-@click.pass_context
-def cli(ctx, prompt):
-    """
-    Contextualize CLI
-    """
-    ctx.ensure_object(dict)
-    # Store prompt strings in context for use by subcommands
-    ctx.obj["prompt"] = list(prompt)
-
-
-@cli.command("cat")
-@click.pass_context
-@click.argument("paths", nargs=-1, type=click.Path(exists=True))
-@click.option("--ignore", multiple=True, help="File(s) to ignore")
-@click.option("-f", "--format", default="md", help="Output format (md/xml/shell)")
+@click.option("-w", "wrap_short", is_flag=True, help="Wrap output as 'md'.")
 @click.option(
-    "-l", "--label", default="relative", help="Label style (relative/name/ext)"
-)
-@click.option(
-    "-o", "--output", default="console", help="Output target (console/clipboard)"
-)
-@click.option("--output-file", type=click.Path(), help="Optional output file path")
-@click.option(
-    "-w",
     "--wrap",
     "wrap_mode",
     is_flag=False,
     flag_value="md",
     default=None,
-    help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
+    help=(
+        "Wrap output as 'md' or 'xml'. If used without a value, defaults to 'xml'. "
+        "If omitted, no wrapping is done."
+    ),
 )
-def cat_cmd(ctx, paths, ignore, format, label, output, output_file, wrap_mode):
+@click.option(
+    "-c",
+    "--copy",
+    is_flag=True,
+    help="Copy output to clipboard instead of printing to console. Prints labeled token count.",
+)
+@click.option(
+    "--write-file",
+    type=click.Path(),
+    help="Optional output file path (overrides clipboard/console output).",
+)
+@click.pass_context
+def cli(ctx, prompt, wrap_short, wrap_mode, copy, write_file):
     """
-    Prepare and concatenate file references
+    Contextualize CLI
     """
-    from pyperclip import copy
+    ctx.ensure_object(dict)
+    ctx.obj["prompt"] = prompt
+    ctx.obj["wrap_mode"] = "md" if wrap_short else wrap_mode
+    ctx.obj["copy"] = copy
+    ctx.obj["write_file"] = write_file
 
-    from .reference import create_file_references
-    from .tokenize import count_tokens
-    from .utils import add_prompt_wrappers, wrap_text
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit()
 
-    references = create_file_references(paths, ignore, format, label)["concatenated"]
-    final_output = wrap_text(references, wrap_mode)
 
-    # Insert prompt strings (if provided)
-    prompt_messages = ctx.obj.get("prompt", [])
-    final_output = add_prompt_wrappers(final_output, prompt_messages)
+@cli.result_callback()
+@click.pass_context
+def process_output(ctx, subcommand_output, *args, **kwargs):
+    """
+    Process subcommand output:
 
-    if output_file:
-        with open(output_file, "w", encoding="utf-8") as file:
-            file.write(final_output)
-        token_info = count_tokens(references, target="cl100k_base")
-        click.echo(
-            f"Copied {token_info['count']} tokens to file ({token_info['method']})."
-        )
-        click.echo(f"Contents written to {output_file}")
-    elif output == "clipboard":
+    1. If output is empty, do nothing.
+    2. Apply wrap mode.
+    3. Insert prompt string(s).
+    4. Count tokens on the fully composed text.
+    5. Write the final text to file, clipboard, or console.
+    """
+    if not subcommand_output:
+        return
+
+    raw_text = subcommand_output
+    wrapped_text = wrap_text(raw_text, ctx.obj["wrap_mode"])
+    final_output = add_prompt_wrappers(wrapped_text, ctx.obj["prompt"])
+
+    token_info = count_tokens(final_output, target="cl100k_base")
+    token_count = token_info["count"]
+    token_method = token_info["method"]
+
+    write_file = ctx.obj["write_file"]
+    copy_flag = ctx.obj["copy"]
+
+    if write_file:
+        with open(write_file, "w", encoding="utf-8") as f:
+            f.write(final_output)
+        click.echo(f"Wrote {token_count} tokens ({token_method}) to {write_file}")
+    elif copy_flag:
         try:
             copy(final_output)
-            token_info = count_tokens(references, target="cl100k_base")
-            click.echo(
-                f"Copied {token_info['count']} tokens to clipboard ({token_info['method']})."
-            )
+            click.echo(f"Copied {token_count} tokens ({token_method}) to clipboard.")
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)
     else:
         click.echo(final_output)
 
 
-@cli.command("ls")
-@click.pass_context
+@cli.command("cat")
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.option("--ignore", multiple=True, help="File(s) to ignore")
+@click.option("-f", "--format", default="md", help="Output format (md/xml/shell)")
 @click.option(
-    "--openai-encoding",
-    help="OpenAI encoding to use (e.g., 'cl100k_base', 'p50k_base', 'r50k_base')",
+    "-l",
+    "--label",
+    default="relative",
+    help="Label style for references (relative/name/ext)",
 )
-@click.option("--openai-model", help="OpenAI model name for token counting")
-@click.option("--anthropic-model", help="Anthropic model to use for token counting")
-def ls_cmd(ctx, paths, openai_encoding, anthropic_model, openai_model):
+@click.pass_context
+def cat_cmd(ctx, paths, ignore, format, label):
     """
-    List token counts for files
+    Prepare and concatenate file references (raw).
     """
-    import os
+    if not paths:
+        click.echo(ctx.get_help())
+        ctx.exit()
 
     from .reference import create_file_references
-    from .tokenize import call_tiktoken, count_tokens
 
-    references = create_file_references(paths)["refs"]
-    total_tokens = 0
-    method = None
-    results = []
-
-    if sum(bool(x) for x in [openai_encoding, anthropic_model, openai_model]) > 1:
-        click.echo(
-            "Error: Only one of --openai-encoding, --openai-model, or --anthropic-model can be specified",
-            err=True,
-        )
-        return
-
-    if openai_encoding:
-        target = openai_encoding
-    elif anthropic_model:
-        target = anthropic_model
-        if "ANTHROPIC_API_KEY" not in os.environ:
-            click.echo(
-                "Warning: ANTHROPIC_API_KEY not set in environment. Falling back to tiktoken.",
-                err=True,
-            )
-            target = "cl100k_base"
-    elif openai_model:
-        result = call_tiktoken("test", model_str=openai_model)
-        target = result["encoding"]
-    else:
-        target = (
-            "cl100k_base"
-            if "ANTHROPIC_API_KEY" not in os.environ
-            else "claude-3-5-sonnet-latest"
-        )
-
-    for ref in references:
-        result = count_tokens(ref.file_content, target=target)
-        total_tokens += int(result["count"])
-        if not method:
-            method = result["method"]
-        results.append((ref.path, result["count"]))
-
-    results.sort(key=lambda x: x[1], reverse=True)
-    lines = []
-    for path, count in results:
-        if len(references) > 1:
-            lines.append(f"{path}: {count} tokens")
-        else:
-            lines.append(f"{count} tokens\n ({method})")
-
-    if len(references) > 1:
-        lines.append(f"\nTotal: {total_tokens} tokens ({method})")
-    output_str = "\n".join(lines).strip()
-
-    from .utils import add_prompt_wrappers
-
-    prompt_messages = ctx.obj.get("prompt", [])
-    output_str = add_prompt_wrappers(output_str, prompt_messages)
-
-    click.echo(output_str)
+    refs = create_file_references(paths, ignore, format, label)
+    return refs["concatenated"]
 
 
 @cli.command("fetch")
-@click.pass_context
 @click.argument("issue", nargs=-1)
 @click.option("--properties", help="Comma-separated list of properties to include")
-@click.option("--output", default="console", help="Output target (console/clipboard)")
-@click.option("--output-file", type=click.Path(), help="Optional output file path")
 @click.option("--config", type=click.Path(), help="Path to config file")
-@click.option(
-    "-w",
-    "--wrap",
-    "wrap_mode",
-    is_flag=False,
-    flag_value="md",
-    default=None,
-    help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
-)
-def fetch_cmd(ctx, issue, properties, output, output_file, config, wrap_mode):
+@click.pass_context
+def fetch_cmd(ctx, issue, properties, config):
     """
-    Fetch and prepare Linear issues
+    Fetch and prepare Linear issues (returns raw Markdown).
     """
-    from pyperclip import copy
+    if not issue:
+        click.echo(ctx.get_help())
+        ctx.exit()
 
     from .external import InvalidTokenError, LinearClient
-    from .tokenize import call_tiktoken
-    from .utils import add_prompt_wrappers, read_config, wrap_text
 
     config_data = read_config(config)
     try:
         client = LinearClient(config_data["LINEAR_TOKEN"])
     except InvalidTokenError as e:
         click.echo(f"Error: {str(e)}", err=True)
-        return
+        return ""
 
     issue_ids = []
     for arg in issue:
@@ -203,61 +162,25 @@ def fetch_cmd(ctx, issue, properties, output, output_file, config, wrap_mode):
             issue_id = arg
         issue_ids.append(issue_id)
 
-    include_properties = (
+    include_props = (
         properties.split(",")
         if properties
         else config_data.get("FETCH_INCLUDE_PROPERTIES", [])
     )
 
     markdown_outputs = []
-    token_counts = {}
-    total_tokens = 0
-
     for issue_id in issue_ids:
         issue_obj = client.get_issue(issue_id)
         if issue_obj is None:
-            click.echo(f"Issue {issue_id} not found.", err=True)
+            markdown_outputs.append(f"Error: Issue '{issue_id}' not found.")
             continue
+        md = issue_obj.to_markdown(include_properties=include_props)
+        markdown_outputs.append(md)
 
-        issue_markdown = issue_obj.to_markdown(include_properties=include_properties)
-        markdown_outputs.append(issue_markdown)
-        token_info = call_tiktoken(issue_markdown)["count"]
-        token_counts[issue_id] = token_info
-        total_tokens += token_info
-
-    markdown_output = "\n\n".join(markdown_outputs).strip()
-    final_output = wrap_text(markdown_output, wrap_mode)
-
-    prompt_messages = ctx.obj.get("prompt", [])
-    final_output = add_prompt_wrappers(final_output, prompt_messages)
-
-    def write_output(content, dest, mode="w"):
-        if dest == "clipboard":
-            copy(content)
-        else:
-            with open(dest, mode, encoding="utf-8") as file:
-                file.write(content)
-
-    if output_file:
-        write_output(final_output, output_file)
-        click.echo(f"Wrote {total_tokens} tokens to {output_file}")
-        if len(issue_ids) > 1:
-            for issue_id, count in token_counts.items():
-                click.echo(f"- {issue_id}: {count} tokens")
-    elif output == "clipboard":
-        write_output(final_output, "clipboard")
-        if len(issue_ids) == 1:
-            click.echo(f"Copied {total_tokens} tokens to clipboard.")
-        else:
-            click.echo(f"Copied {total_tokens} tokens to clipboard:")
-            for issue_id, count in token_counts.items():
-                click.echo(f"- {issue_id}: {count} tokens")
-    else:
-        click.echo(final_output)
+    return "\n\n".join(markdown_outputs)
 
 
 @cli.command("map")
-@click.pass_context
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option(
     "-t",
@@ -266,52 +189,30 @@ def fetch_cmd(ctx, issue, properties, output, output_file, config, wrap_mode):
     default=10000,
     help="Maximum tokens for the repo map",
 )
-@click.option("--output", default="console", help="Output target (console/clipboard)")
-@click.option("-f", "--format", default="plain", help="Output format (plain/shell)")
-@click.option("--output-file", type=click.Path(), help="Optional output file path")
 @click.option(
-    "-w",
-    "--wrap",
-    "wrap_mode",
-    is_flag=False,
-    flag_value="md",
-    default=None,
-    help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
+    "-f",
+    "--format",
+    default="plain",
+    help="Output format for the repo map (plain/shell)",
 )
-def map_cmd(ctx, paths, max_tokens, output, format, output_file, wrap_mode):
+@click.pass_context
+def map_cmd(ctx, paths, max_tokens, format):
     """
-    Generate a repository map
+    Generate a repository map (raw).
     """
-    from pyperclip import copy
+    if not paths:
+        click.echo(ctx.get_help())
+        ctx.exit()
 
     from contextualize.repomap import generate_repo_map_data
 
-    from .utils import add_prompt_wrappers, wrap_text
-
     result = generate_repo_map_data(paths, max_tokens, format)
     if "error" in result:
-        click.echo(result["error"], err=True)
-        return
-
-    repo_map = result["repo_map"]
-    final_output = wrap_text(repo_map, wrap_mode)
-
-    prompt_messages = ctx.obj.get("prompt", [])
-    final_output = add_prompt_wrappers(final_output, prompt_messages)
-
-    if output_file:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(final_output)
-        click.echo(result["summary"] + f" written to: {output_file}.")
-    elif output == "clipboard":
-        copy(final_output)
-        click.echo(result["summary"] + " copied to clipboard.")
-    else:
-        click.echo(final_output)
+        return result["error"]
+    return result["repo_map"]
 
 
 @cli.command("shell")
-@click.pass_context
 @click.argument("commands", nargs=-1, required=True)
 @click.option(
     "-f",
@@ -320,67 +221,23 @@ def map_cmd(ctx, paths, max_tokens, output, format, output_file, wrap_mode):
     help="Output format (md/xml/shell). Defaults to shell.",
 )
 @click.option(
-    "-o",
-    "--output",
-    default="console",
-    help="Output target (console/clipboard). Defaults to console.",
-)
-@click.option("--output-file", type=click.Path(), help="Optional output file path")
-@click.option(
     "--capture-stderr/--no-capture-stderr",
     default=True,
     help="Capture stderr along with stdout. Defaults to True.",
 )
-@click.option(
-    "-w",
-    "--wrap",
-    "wrap_mode",
-    is_flag=False,
-    flag_value="md",
-    default=None,
-    help="Wrap output as 'md' or 'xml'. Defaults to 'xml' if used with no value.",
-)
-def shell_cmd(ctx, commands, format, output, output_file, capture_stderr, wrap_mode):
+@click.pass_context
+def shell_cmd(ctx, commands, format, capture_stderr):
     """
-    Run arbitrary shell commands. Example:
-
-        contextualize shell "man waybar" "ls --help"
+    Run arbitrary shell commands (returns raw combined output).
     """
-    from pyperclip import copy
-
     from .shell import create_command_references
-    from .tokenize import count_tokens
-    from .utils import add_prompt_wrappers, wrap_text
 
     refs_data = create_command_references(
         commands=commands,
         format=format,
         capture_stderr=capture_stderr,
     )
-    concatenated = refs_data["concatenated"]
-    final_output = wrap_text(concatenated, wrap_mode)
-
-    prompt_messages = ctx.obj.get("prompt", [])
-    final_output = add_prompt_wrappers(final_output, prompt_messages)
-
-    if output_file:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(final_output)
-        token_info = count_tokens(concatenated, target="cl100k_base")
-        click.echo(
-            f"Wrote {token_info['count']} tokens ({token_info['method']}) to {output_file}"
-        )
-    elif output == "clipboard":
-        try:
-            copy(final_output)
-            token_info = count_tokens(concatenated, target="cl100k_base")
-            click.echo(
-                f"Copied {token_info['count']} tokens ({token_info['method']}) to clipboard."
-            )
-        except Exception as e:
-            click.echo(f"Error copying to clipboard: {e}", err=True)
-    else:
-        click.echo(final_output)
+    return refs_data["concatenated"]
 
 
 def main():
