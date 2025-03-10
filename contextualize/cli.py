@@ -1,3 +1,5 @@
+import sys
+
 import click
 from pyperclip import copy
 
@@ -33,7 +35,7 @@ def validate_prompt(ctx, param, value):
     "--wrap",
     "wrap_mode",
     is_flag=False,
-    flag_value="md",
+    flag_value="xml",
     default=None,
     help=(
         "Wrap output as 'md' or 'xml'. If used without a value, defaults to 'xml'. "
@@ -62,23 +64,30 @@ def cli(ctx, prompt, wrap_short, wrap_mode, copy, write_file):
     ctx.obj["copy"] = copy
     ctx.obj["write_file"] = write_file
 
+    # handle piped input
     if ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
-        ctx.exit()
+        if not sys.stdin.isatty():
+            stdin_data = sys.stdin.read()
+            ctx.obj["stdin_data"] = stdin_data
+        else:
+            click.echo(ctx.get_help())
+            ctx.exit()
 
 
 @cli.result_callback()
 @click.pass_context
 def process_output(ctx, subcommand_output, *args, **kwargs):
     """
-    Process subcommand output:
-
-    1. If output is empty, do nothing.
-    2. Apply wrap mode.
-    3. Insert prompt string(s).
-    4. Count tokens on the fully composed text.
-    5. Write the final text to file, clipboard, or console.
+    Process subcommand output or piped input:
+      1. If output is empty, try to use any captured stdin.
+      2. Apply wrap mode.
+      3. Insert prompt string(s).
+      4. Count tokens on the fully composed text.
+      5. Write the final text to file, clipboard, or console.
     """
+    if not subcommand_output:
+        subcommand_output = ctx.obj.get("stdin_data", "")
+
     if not subcommand_output:
         return
 
