@@ -1,8 +1,12 @@
+# contextualize/cli.py
+
+import os
 import sys
 
 import click
 from pyperclip import copy
 
+from .crawl import Crawler
 from .tokenize import count_tokens
 from .utils import add_prompt_wrappers, read_config, wrap_text
 
@@ -247,6 +251,49 @@ def shell_cmd(ctx, commands, format, capture_stderr):
         capture_stderr=capture_stderr,
     )
     return refs_data["concatenated"]
+
+
+@cli.command("crawl")
+@click.argument("urls", nargs=-1, required=True)
+@click.option("--refresh-cache", is_flag=True, help="Refresh local crawl cache.")
+@click.option(
+    "--follow-external",
+    is_flag=True,
+    help="Allow crawling links on external domains (default: skip external).",
+)
+@click.option(
+    "--max-depth",
+    type=int,
+    default=2,
+    help="Maximum recursion depth for following linked pages (default: 2).",
+)
+@click.pass_context
+def crawl_cmd(ctx, urls, refresh_cache, follow_external, max_depth):
+    """
+    Recursively crawl one or more .txt or .md URLs.
+
+    - Validates that each URL ends with '.txt' or '.md'.
+    - If a .txt URL is encountered, its content is scanned for markdown links,
+      and those linked pages are crawled recursively.
+    - All fetched content is cached (default: ~/.local/share/contextualize/cache) unless
+      --refresh-cache is used.
+    - By default, only same-domain links are followed. Use --follow-external to also
+      crawl external links.
+    - --max-depth sets how deep we can recurse through linked pages.
+    - Finally, the collected content is wrapped into labeled references using either
+      XML (<ctx path="...">) or markdown fenced blocks.
+    """
+    crawler = Crawler(
+        cache_refresh=refresh_cache,
+        follow_external=follow_external,
+        max_depth=max_depth,
+    )
+
+    for url in urls:
+        crawler.crawl(url)
+
+    final_str = crawler.to_references(wrap_mode=ctx.obj["wrap_mode"])
+    return final_str
 
 
 def main():
