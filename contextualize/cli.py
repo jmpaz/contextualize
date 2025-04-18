@@ -116,6 +116,31 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         click.echo(final_output)
 
 
+@cli.command("payload")
+@click.argument(
+    "manifest_path",
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.pass_context
+def payload_cmd(ctx, manifest_path):
+    """
+    Render a context payload from the provided YAML manifest.
+    """
+    try:
+        from .payload import render_from_yaml
+    except ImportError:
+        raise click.ClickException(
+            "You need `pyyaml` installed (pip install contextualize[payload])"
+        )
+
+    # This will:
+    # 1. load manifest_path as YAML,
+    # 2. extract `components: [...]`,
+    # 3. assemble them into fenced blocks,
+    # 4. return that string.
+    return render_from_yaml(manifest_path)
+
+
 @cli.command("cat")
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option("--ignore", multiple=True, help="File(s) to ignore")
