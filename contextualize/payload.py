@@ -59,7 +59,6 @@ def assemble_payload(
         else:
             raise ValueError(f"Unsupported source type for '{label}': {kind}")
 
-        # use contextualize's wrap_text to fence this component as markdown
         fenced = wrap_text(body, "md")
         parts.append(f"{label}:\n{fenced}")
 
