@@ -27,7 +27,7 @@ def validate_prompt(ctx, param, value):
     callback=validate_prompt,
     help=(
         "Up to two prompt strings. Provide one to prepend, and "
-        "an optional second one to append (with a blank line)."
+        "an optional second one to append to command output."
     ),
 )
 @click.option("-w", "wrap_short", is_flag=True, help="Wrap output as 'md'.")
