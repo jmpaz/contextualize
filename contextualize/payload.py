@@ -1,95 +1,104 @@
-"""
-payload: assemble context payloads from a YAML manifest.
-
-Usage:
-    from contextualize.payload import render_payload, render_from_yaml
-
-    # manual components:
-    components = [
-      {"label": "description", "source": {"type": "file", "path": "data/desc.txt"}},
-      {"label": "notes",       "source": {"type": "inline", "content": "…"}}
-    ]
-    payload = render_payload(components)
-
-    # or load directly from YAML:
-    s = render_from_yaml("manifest.yaml")
-"""
-
 import os
 from typing import Any, Dict, List
 
 import yaml
 
-from .utils import wrap_text
+from .reference import FileReference
 
 
 def assemble_payload(
     components: List[Dict[str, Any]],
-    *,
-    base_dir: str | None = None,
+    base_dir: str,
 ) -> str:
     """
-    Given a list of {"label": str, "source": {"type": "file"|"inline", ...}},
-    return a string where each component is:
+    Given a list of components each with:
+      - name: str
+      - prompt: str
+      - files: List[str]
 
-      label:
-      ```
-      <content>
+    Return a string of:
+      prompt
+      <attachment label="name">
+      ```path/to/file1
+      <contents>
       ```
 
-    joined by blank lines.  (No outer <paste> wrapper here.)
+      ```path/to/file2
+      <contents>
+      ```
+      </attachment>
+    joined by blank lines.
     """
-    base = base_dir or os.getcwd()
     parts: List[str] = []
 
     for comp in components:
-        label = comp["label"]
-        src = comp["source"]
-        kind = src["type"]
+        name = comp.get("name")
+        prompt = comp.get("prompt", "").rstrip()
+        files = comp.get("files")
 
-        if kind == "file":
-            rel = src["path"]
-            path = rel if os.path.isabs(rel) else os.path.join(base, rel)
-            if not os.path.isfile(path):
-                raise FileNotFoundError(f"Component '{label}' file not found: {path}")
-            with open(path, "r", encoding="utf-8") as fh:
-                body = fh.read()
-        elif kind == "inline":
-            body = src.get("content", "")
-        else:
-            raise ValueError(f"Unsupported source type for '{label}': {kind}")
+        if not name or files is None:
+            raise ValueError(f"Each component needs 'name' and 'files': {comp}")
 
-        fenced = wrap_text(body, "md")
-        parts.append(f"{label}:\n{fenced}")
+        block: List[str] = []
+        if prompt:
+            block.append(prompt)
+
+        block.append(f'<attachment label="{name}">')
+
+        for i, relpath in enumerate(files):
+            fullpath = (
+                relpath if os.path.isabs(relpath) else os.path.join(base_dir, relpath)
+            )
+            if not os.path.exists(fullpath):
+                raise FileNotFoundError(
+                    f"Component '{name}' file not found: {fullpath}"
+                )
+
+            # produce fenced block with the filename as info string
+            ref = FileReference(fullpath, format="md", label="relative")
+            block.append(ref.output)
+
+            # blank line
+            if i < len(files) - 1:
+                block.append("")
+
+        block.append("</attachment>")
+        parts.append("\n".join(block))
 
     return "\n\n".join(parts)
 
 
 def render_from_yaml(
     manifest_path: str,
-    *,
-    base_dir: str | None = None,
 ) -> str:
     """
-    Load a YAML at `manifest_path` containing:
+    Load a YAML manifest of the form:
 
+      config:
+        root: /some/path   # optional; expands ~, defaults to manifest folder
       components:
-        - label: "..."
-          source:
-            type: file|inline
-            path: ...       # if file
-            content: "..."  # if inline
+        - name: …
+          prompt: …
+          files: [ … ]
 
-    and return assemble_payload(manifest['components']).
+    and return the assembled payload as a single Markdown string.
     """
     with open(manifest_path, "r", encoding="utf-8") as fh:
-        manifest = yaml.safe_load(fh)
+        data = yaml.safe_load(fh)
 
-    comps = manifest.get("components")
+    if not isinstance(data, dict):
+        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
+
+    # Determine base_dir: either config.root or the manifest’s directory
+    cfg = data.get("config", {})
+    root = cfg.get("root")
+    if root:
+        base_dir = os.path.expanduser(root)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(manifest_path))
+
+    comps = data.get("components")
     if not isinstance(comps, list):
-        raise ValueError(
-            f"YAML '{manifest_path}' must have a top‑level list under 'components'"
-        )
+        raise ValueError("'components' must be a list of items")
 
-    bd = base_dir or os.path.dirname(os.path.abspath(manifest_path))
-    return assemble_payload(comps, base_dir=bd)
+    return assemble_payload(comps, base_dir)
