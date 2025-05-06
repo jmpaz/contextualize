@@ -124,7 +124,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 @click.pass_context
 def payload_cmd(ctx, manifest_path):
     """
-    Render a context payload from the provided YAML manifest.
+    Render a context payload from a provided YAML manifest.
     """
     try:
         from .payload import render_from_yaml
