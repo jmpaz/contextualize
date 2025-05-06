@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 import yaml
 
-from .reference import FileReference
+from .reference import create_file_references
 
 
 def assemble_payload(
@@ -11,58 +11,57 @@ def assemble_payload(
     base_dir: str,
 ) -> str:
     """
-    Given a list of components each with:
-      - name: str
-      - prompt: str
-      - files: List[str]
-
-    Return a string of:
-      prompt
-      <attachment label="name">
-      ```path/to/file1
-      <contents>
-      ```
-
-      ```path/to/file2
-      <contents>
-      ```
-      </attachment>
-    joined by blank lines.
+    - If a component has a 'text' key, emit that text verbatim.
+    - Otherwise it must have 'name' and 'files':
+        optional 'prefix' (above the attachment) and 'suffix' (below).
+      Files and directories are expanded via create_file_references().
     """
     parts: List[str] = []
 
     for comp in components:
+        # 1) text‐only
+        if "text" in comp:
+            text = comp["text"].rstrip()
+            parts.append(text)
+            continue
+
+        # 2) file component
         name = comp.get("name")
-        prompt = comp.get("prompt", "").rstrip()
         files = comp.get("files")
+        if not name or not files:
+            raise ValueError(
+                f"Component must have either 'text' or both 'name' & 'files': {comp}"
+            )
 
-        if not name or files is None:
-            raise ValueError(f"Each component needs 'name' and 'files': {comp}")
+        prefix = comp.get("prefix", "").rstrip()
+        suffix = comp.get("suffix", "").lstrip()
 
+        # collect FileReference objects (recursing into directories)
+        all_refs = []
+        for rel in files:
+            full = rel if os.path.isabs(rel) else os.path.join(base_dir, rel)
+            if not os.path.exists(full):
+                raise FileNotFoundError(f"Component '{name}' path not found: {full}")
+            refs = create_file_references(
+                [full], ignore_paths=None, format="md", label="relative"
+            )["refs"]
+            all_refs.extend(refs)
+
+        # build block
         block: List[str] = []
-        if prompt:
-            block.append(prompt)
+        if prefix:
+            block.append(prefix)
 
         block.append(f'<attachment label="{name}">')
-
-        for i, relpath in enumerate(files):
-            fullpath = (
-                relpath if os.path.isabs(relpath) else os.path.join(base_dir, relpath)
-            )
-            if not os.path.exists(fullpath):
-                raise FileNotFoundError(
-                    f"Component '{name}' file not found: {fullpath}"
-                )
-
-            # produce fenced block with the filename as info string
-            ref = FileReference(fullpath, format="md", label="relative")
+        for idx, ref in enumerate(all_refs):
             block.append(ref.output)
-
-            # blank line
-            if i < len(files) - 1:
+            if idx < len(all_refs) - 1:
                 block.append("")
-
         block.append("</attachment>")
+
+        if suffix:
+            block.append(suffix)
+
         parts.append("\n".join(block))
 
     return "\n\n".join(parts)
@@ -72,16 +71,12 @@ def render_from_yaml(
     manifest_path: str,
 ) -> str:
     """
-    Load a YAML manifest of the form:
-
+    Load YAML with top-level:
       config:
-        root: /some/path   # optional; expands ~, defaults to manifest folder
+        root:  # optional, expands ~
       components:
-        - name: …
-          prompt: …
-          files: [ … ]
-
-    and return the assembled payload as a single Markdown string.
+        - text: ...
+        - name: ...; prefix/suffix?; files: [...]
     """
     with open(manifest_path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
@@ -89,16 +84,15 @@ def render_from_yaml(
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a mapping with 'config' and 'components'")
 
-    # Determine base_dir: either config.root or the manifest’s directory
     cfg = data.get("config", {})
-    root = cfg.get("root")
-    if root:
-        base_dir = os.path.expanduser(root)
+    if "root" in cfg:
+        raw = cfg["root"] or "~"
+        base_dir = os.path.expanduser(raw)
     else:
         base_dir = os.path.dirname(os.path.abspath(manifest_path))
 
     comps = data.get("components")
     if not isinstance(comps, list):
-        raise ValueError("'components' must be a list of items")
+        raise ValueError("'components' must be a list")
 
     return assemble_payload(comps, base_dir)
