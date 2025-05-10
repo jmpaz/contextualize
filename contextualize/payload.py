@@ -39,7 +39,12 @@ def assemble_payload(
         # collect FileReference objects (recursing into directories)
         all_refs = []
         for rel in files:
-            full = rel if os.path.isabs(rel) else os.path.join(base_dir, rel)
+            rel_expanded = os.path.expanduser(rel)
+            full = (
+                rel_expanded
+                if os.path.isabs(rel_expanded)
+                else os.path.join(base_dir, rel_expanded)
+            )
             if not os.path.exists(full):
                 raise FileNotFoundError(f"Component '{name}' path not found: {full}")
             refs = create_file_references(
