@@ -1,6 +1,16 @@
 import os
 
 
+def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(sample_size)
+        chunk.decode("utf-8")
+        return True
+    except (UnicodeDecodeError, OSError):
+        return False
+
+
 def create_file_references(paths, ignore_paths=None, format="md", label="relative"):
     """
     Build a list of file references from the specified paths.
@@ -29,7 +39,7 @@ def create_file_references(paths, ignore_paths=None, format="md", label="relativ
 
     for path in paths:
         if os.path.isfile(path):
-            if not is_ignored(path, ignore_patterns):
+            if not is_ignored(path, ignore_patterns) and _is_utf8_file(path):
                 file_references.append(FileReference(path, format=format, label=label))
         elif os.path.isdir(path):
             for root, dirs, files in os.walk(path):
@@ -40,7 +50,9 @@ def create_file_references(paths, ignore_paths=None, format="md", label="relativ
                 ]
                 for file in files:
                     file_path = os.path.join(root, file)
-                    if not is_ignored(file_path, ignore_patterns):
+                    if not is_ignored(file_path, ignore_patterns) and _is_utf8_file(
+                        file_path
+                    ):
                         file_references.append(
                             FileReference(file_path, format=format, label=label)
                         )
