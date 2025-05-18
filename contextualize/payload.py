@@ -15,13 +15,23 @@ def assemble_payload(
     - Otherwise it must have 'name' and 'files':
         optional 'prefix' (above the attachment) and 'suffix' (below).
       Files and directories are expanded via create_file_references().
+    - if 'wrap' key is present:
+        * wrap == "md" → wrap the inner content in a markdown code fence
+        * wrap == other string → wrap inner content in <wrap>…</wrap>
     """
     parts: List[str] = []
 
     for comp in components:
+        wrap_mode = comp.get("wrap")  # may be None, "md", or any tag name
+
         # 1) text‐only
         if "text" in comp:
             text = comp["text"].rstrip()
+            if wrap_mode:
+                if wrap_mode.lower() == "md":
+                    text = "```\n" + text + "\n```"
+                else:
+                    text = f"<{wrap_mode}>\n{text}\n</{wrap_mode}>"
             parts.append(text)
             continue
 
@@ -52,22 +62,28 @@ def assemble_payload(
             )["refs"]
             all_refs.extend(refs)
 
-        # build block
-        block: List[str] = []
-        if prefix:
-            block.append(prefix)
-
-        block.append(f'<attachment label="{name}">')
+        attachment_lines = [f'<attachment label="{name}">']
         for idx, ref in enumerate(all_refs):
-            block.append(ref.output)
+            attachment_lines.append(ref.output)
             if idx < len(all_refs) - 1:
-                block.append("")
-        block.append("</attachment>")
+                attachment_lines.append("")
+        attachment_lines.append("</attachment>")
+        inner = "\n".join(attachment_lines)
 
+        if wrap_mode:
+            if wrap_mode.lower() == "md":
+                inner = "```\n" + inner + "\n```"
+            else:
+                inner = f"<{wrap_mode}>\n{inner}\n</{wrap_mode}>"
+
+        block_lines: List[str] = []
+        if prefix:
+            block_lines.append(prefix)
+        block_lines.append(inner)
         if suffix:
-            block.append(suffix)
+            block_lines.append(suffix)
 
-        parts.append("\n".join(block))
+        parts.append("\n".join(block_lines))
 
     return "\n\n".join(parts)
 
@@ -82,6 +98,7 @@ def render_from_yaml(
       components:
         - text: ...
         - name: ...; prefix/suffix?; files: [...]
+        - wrap:  # optional
     """
     with open(manifest_path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
