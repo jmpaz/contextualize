@@ -24,6 +24,9 @@ or piped into another program:
 contextualize --prompt "what has changed in this patch?" shell "git diff --staged" | llm
 ```
 
+> [!TIP]
+> Commands can be aliased and composed/scripted/recalled freely in the shell.
+
 ## `cat`
 
 Collect file contents, with optional wrapping and labels.
