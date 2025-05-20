@@ -64,11 +64,10 @@ def cli(ctx, prompt, wrap_short, wrap_mode, copy, write_file):
     ctx.obj["copy"] = copy
     ctx.obj["write_file"] = write_file
 
-    # handle piped input
+    # capture piped input if no subcommand is invoked
     if ctx.invoked_subcommand is None:
         if not sys.stdin.isatty():
-            stdin_data = sys.stdin.read()
-            ctx.obj["stdin_data"] = stdin_data
+            ctx.obj["stdin_data"] = sys.stdin.read()
         else:
             click.echo(ctx.get_help())
             ctx.exit()
@@ -119,26 +118,58 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 @cli.command("payload")
 @click.argument(
     "manifest_path",
+    required=False,
     type=click.Path(exists=True, dir_okay=False),
 )
 @click.pass_context
 def payload_cmd(ctx, manifest_path):
     """
     Render a context payload from a provided YAML manifest.
+    If no path is given and stdin is piped, read the manifest from stdin.
     """
     try:
-        from .payload import render_from_yaml
+        import os
+
+        import yaml
+
+        from .payload import assemble_payload, render_from_yaml
     except ImportError:
         raise click.ClickException(
             "You need `pyyaml` installed (pip install contextualize[payload])"
         )
 
-    # This will:
-    # 1. load manifest_path as YAML,
-    # 2. extract `components: [...]`,
-    # 3. assemble them into fenced blocks,
-    # 4. return that string.
-    return render_from_yaml(manifest_path)
+    if manifest_path:
+        return render_from_yaml(manifest_path)
+
+    # attempt to read YAML from stdin
+    if sys.stdin.isatty():  # no input file and no piped data → show help
+        click.echo(ctx.get_help())
+        ctx.exit(1)
+
+    raw = sys.stdin.read()
+    try:
+        data = yaml.safe_load(raw)
+    except Exception as e:
+        raise click.ClickException(f"Invalid YAML on stdin: {e}")
+
+    if not isinstance(data, dict):
+        raise click.ClickException(
+            "Manifest must be a mapping with 'config' and 'components'"
+        )
+
+    # determine base directory
+    cfg = data.get("config", {})
+    if "root" in cfg:
+        base_dir = os.path.expanduser(cfg.get("root") or "~")
+    else:
+        base_dir = os.getcwd()
+
+    comps = data.get("components")
+    if not isinstance(comps, list):
+        raise click.ClickException("'components' must be a list")
+
+    # assemble and return the payload string
+    return assemble_payload(comps, base_dir)
 
 
 @cli.command("cat")
