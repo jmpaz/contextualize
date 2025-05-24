@@ -16,6 +16,65 @@ def validate_prompt(ctx, param, value):
     return value
 
 
+def preprocess_args():
+    """
+    Move forwardable options from after subcommand to before it.
+    """
+    if len(sys.argv) < 2:
+        return
+
+    subcommands = {"payload", "cat", "fetch", "map", "shell"}
+
+    # options that should be moved / which take values
+    forwardable = {"--prompt", "-p", "--wrap", "-w", "--copy", "-c", "--write-file"}
+    value_options = {"--prompt", "-p", "--wrap", "--write-file"}
+
+    # find subcommand position
+    subcommand_idx = None
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg in subcommands:
+            subcommand_idx = i
+            break
+        elif arg in value_options and i + 1 < len(sys.argv):
+            i += 2  # skip the option value
+        else:
+            i += 1
+
+    if subcommand_idx is None:
+        return
+
+    # extract forwardable options
+    to_move = []
+    remaining = []
+    i = subcommand_idx + 1
+
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg in forwardable:
+            to_move.append(arg)
+            if (  # check if this option takes a value
+                arg in value_options
+                and i + 1 < len(sys.argv)
+                and not sys.argv[i + 1].startswith("-")
+            ):
+                to_move.append(sys.argv[i + 1])
+                i += 1
+        else:
+            remaining.append(arg)
+        i += 1
+
+    # reconstruct sys.argv
+    if to_move:
+        sys.argv = (
+            sys.argv[:subcommand_idx] + to_move + [sys.argv[subcommand_idx]] + remaining
+        )
+
+
+preprocess_args()
+
+
 @click.group(
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help"]},
