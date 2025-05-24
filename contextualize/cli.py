@@ -53,24 +53,59 @@ def validate_prompt(ctx, param, value):
     type=click.Path(),
     help="Optional output file path (overrides clipboard/console output).",
 )
+@click.option(
+    "--position",
+    "output_position",
+    type=click.Choice(["append", "prepend"], case_sensitive=False),
+    default=None,
+    help="Where to place this command's output relative to piped stdin",
+)
+@click.option(
+    "--after", "-a", "append_flag", is_flag=True, help="same as --position append"
+)
+@click.option(
+    "--before", "-b", "prepend_flag", is_flag=True, help="same as --position prepend"
+)
 @click.pass_context
-def cli(ctx, prompt, wrap_short, wrap_mode, copy, write_file):
+def cli(
+    ctx,
+    prompt,
+    wrap_short,
+    wrap_mode,
+    copy,
+    write_file,
+    output_position,
+    append_flag,
+    prepend_flag,
+):
     """
-    Contextualize CLI
+    Contextualize CLI - model context preparation utility
     """
     ctx.ensure_object(dict)
     ctx.obj["prompt"] = prompt
     ctx.obj["wrap_mode"] = "md" if wrap_short else wrap_mode
     ctx.obj["copy"] = copy
     ctx.obj["write_file"] = write_file
+    if append_flag and prepend_flag:
+        raise click.BadParameter("use -a or -b, not both")
 
-    # capture piped input if no subcommand is invoked
-    if ctx.invoked_subcommand is None:
-        if not sys.stdin.isatty():
-            ctx.obj["stdin_data"] = sys.stdin.read()
-        else:
-            click.echo(ctx.get_help())
-            ctx.exit()
+    if append_flag:
+        output_pos = "append"
+    elif prepend_flag:
+        output_pos = "prepend"
+    else:
+        output_pos = output_position or "append"
+
+    ctx.obj["output_pos"] = output_pos
+
+    stdin_data = ""
+    if not sys.stdin.isatty():
+        stdin_data = sys.stdin.read()
+    ctx.obj["stdin_data"] = stdin_data
+
+    if ctx.invoked_subcommand is None and not stdin_data:
+        click.echo(ctx.get_help())
+        ctx.exit()
 
 
 @cli.result_callback()
@@ -84,15 +119,35 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
       4. Count tokens on the fully composed text.
       5. Write the final text to file, clipboard, or console.
     """
-    if not subcommand_output:
-        subcommand_output = ctx.obj.get("stdin_data", "")
+    stdin_data = ctx.obj.get("stdin_data", "")
+    position = ctx.obj.get("output_pos", "append")
 
-    if not subcommand_output:
+    if subcommand_output and stdin_data:
+        parts = (
+            [stdin_data, subcommand_output]
+            if position == "append"
+            else [subcommand_output, stdin_data]
+        )
+        raw_text = "\n".join(parts)
+    else:
+        raw_text = subcommand_output or stdin_data
+
+    if not raw_text:
         return
 
-    raw_text = subcommand_output
     wrapped_text = wrap_text(raw_text, ctx.obj["wrap_mode"])
-    final_output = add_prompt_wrappers(wrapped_text, ctx.obj["prompt"])
+    prompts = ctx.obj["prompt"]
+    no_subcmd = ctx.invoked_subcommand is None
+    # special-case: single -p with only stdin (no subcommand)
+    if len(prompts) == 1 and no_subcmd:
+        if ctx.obj["output_pos"] == "append":
+            final_output = f"{wrapped_text}\n{prompts[0]}"
+        else:
+            final_output = f"{prompts[0]}\n{wrapped_text}"
+    else:
+        # fall back to normal behavior (single prompt always appends,
+        # two prompts: first appends, second prepends)
+        final_output = add_prompt_wrappers(wrapped_text, prompts)
 
     token_info = count_tokens(final_output, target="cl100k_base")
     token_count = token_info["count"]
@@ -142,11 +197,12 @@ def payload_cmd(ctx, manifest_path):
         return render_from_yaml(manifest_path)
 
     # attempt to read YAML from stdin
-    if sys.stdin.isatty():  # no input file and no piped data → show help
+    stdin_data = ctx.obj.get("stdin_data", "")
+    if not stdin_data:  # no input file and no piped data → show help
         click.echo(ctx.get_help())
         ctx.exit(1)
 
-    raw = sys.stdin.read()
+    raw = stdin_data
     try:
         data = yaml.safe_load(raw)
     except Exception as e:
