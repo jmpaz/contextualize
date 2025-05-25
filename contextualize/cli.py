@@ -270,11 +270,14 @@ def payload_cmd(ctx, manifest_path):
     if manifest_path:
         return render_from_yaml(manifest_path)
 
-    # attempt to read YAML from stdin
+    # only use stdin when no manifest file is provided
     stdin_data = ctx.obj.get("stdin_data", "")
     if not stdin_data:  # no input file and no piped data → show help
         click.echo(ctx.get_help())
         ctx.exit(1)
+
+    # clear stdin_data since we're consuming it here
+    ctx.obj["stdin_data"] = ""
 
     raw = stdin_data
     try:
