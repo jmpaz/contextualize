@@ -180,33 +180,48 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     """
     stdin_data = ctx.obj.get("stdin_data", "")
     position = ctx.obj.get("output_pos", "append")
-
-    if subcommand_output and stdin_data:
-        parts = (
-            [stdin_data, subcommand_output]
-            if position == "append"
-            else [subcommand_output, stdin_data]
-        )
-        raw_text = "\n".join(parts)
-    else:
-        raw_text = subcommand_output or stdin_data
-
-    if not raw_text:
-        return
-
-    wrapped_text = wrap_text(raw_text, ctx.obj["wrap_mode"])
     prompts = ctx.obj["prompt"]
     no_subcmd = ctx.invoked_subcommand is None
-    # special-case: single -p with only stdin (no subcommand)
-    if len(prompts) == 1 and no_subcmd:
-        if ctx.obj["output_pos"] == "append":
-            final_output = f"{wrapped_text}\n{prompts[0]}"
+
+    if subcommand_output and stdin_data:
+        if position == "append":
+            raw_text = stdin_data + "\n\n" + subcommand_output
         else:
-            final_output = f"{prompts[0]}\n{wrapped_text}"
+            raw_text = subcommand_output + "\n\n" + stdin_data
+    elif subcommand_output:
+        raw_text = subcommand_output
+    elif stdin_data and no_subcmd:
+        # no subcommand, just processing stdin
+        raw_text = stdin_data
     else:
-        # fall back to normal behavior (single prompt always appends,
-        # two prompts: first appends, second prepends)
-        final_output = add_prompt_wrappers(wrapped_text, prompts)
+        return
+
+    if subcommand_output and stdin_data and prompts:
+        # we're in a pipeline with both input and output; apply wrapping/prompts only to the new content
+        wrapped_new_content = wrap_text(subcommand_output, ctx.obj["wrap_mode"])
+
+        if len(prompts) == 1:
+            prompted_content = f"{prompts[0]}\n{wrapped_new_content}"
+        else:
+            prompted_content = f"{prompts[0]}\n{wrapped_new_content}\n\n{prompts[1]}"
+
+        # combine with stdin
+        if position == "append":
+            final_output = stdin_data + "\n\n" + prompted_content
+        else:
+            final_output = prompted_content + "\n\n" + stdin_data
+    else:
+        # normal case: wrap everything and add prompts
+        wrapped_text = wrap_text(raw_text, ctx.obj["wrap_mode"])
+
+        # special case: stdin-only with single prompt
+        if len(prompts) == 1 and no_subcmd:
+            if ctx.obj["output_pos"] == "append":
+                final_output = f"{wrapped_text}\n{prompts[0]}"
+            else:
+                final_output = f"{prompts[0]}\n{wrapped_text}"
+        else:
+            final_output = add_prompt_wrappers(wrapped_text, prompts)
 
     token_info = count_tokens(final_output, target="cl100k_base")
     token_count = token_info["count"]
