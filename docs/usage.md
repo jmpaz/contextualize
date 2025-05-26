@@ -35,12 +35,17 @@ Collect file contents, with optional wrapping and labels.
 contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell] [--label relative|name|ext]
 ```
 
+`PATH` may also start with a git repo spec such as `gh:user/repo` or `https://host/repo.git:path`.
+The `.git` suffix is optional and the repo will be cloned to `~/.local/share/contextualize/cache/git/` on first use.
+
 | option | description |
 |--------|-------------|
 | `paths` | one or more files or directories |
 | `--ignore` | glob pattern(s) to skip |
 | `--format` | choose `md` (default), `xml`, or `shell` |
 | `--label` | how to label each attachment: `relative` (default), `name`, or `ext` |
+| `--git-pull` | update cached git repos referenced in paths |
+| `--git-reclone` | delete and re-clone cached git repos |
 
 
 ```bash
