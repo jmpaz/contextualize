@@ -35,4 +35,9 @@ All commands work with the global flags `--prompt`, `--wrap`, `--copy`, and `--w
 contextualize --copy --prompt "what does this do" cat contextualize/ README.md
 ```
 
+```bash
+# gather README from a remote repo (cached under ~/.local/share/contextualize/cache/git/)
+contextualize cat gh:jmpaz/contextualize:README.md
+```
+
 more examples and details are available in [`docs/usage.md`](docs/usage.md).

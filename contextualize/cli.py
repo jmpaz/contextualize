@@ -1,3 +1,4 @@
+import os
 import sys
 
 import click
@@ -306,7 +307,7 @@ def payload_cmd(ctx, manifest_path):
 
 
 @cli.command("cat")
-@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.argument("paths", nargs=-1, type=str)
 @click.option("--ignore", multiple=True, help="File(s) to ignore")
 @click.option("-f", "--format", default="md", help="Output format (md/xml/shell)")
 @click.option(
@@ -315,8 +316,10 @@ def payload_cmd(ctx, manifest_path):
     default="relative",
     help="Label style for references (relative/name/ext)",
 )
+@click.option("--git-pull", is_flag=True, help="Pull cached git repos")
+@click.option("--git-reclone", is_flag=True, help="Reclone cached git repos")
 @click.pass_context
-def cat_cmd(ctx, paths, ignore, format, label):
+def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone):
     """
     Prepare and concatenate file references (raw).
     """
@@ -324,9 +327,28 @@ def cat_cmd(ctx, paths, ignore, format, label):
         click.echo(ctx.get_help())
         ctx.exit()
 
+    from pathlib import Path
+
+    from .gitcache import ensure_repo, parse_git_target
     from .reference import create_file_references
 
-    refs = create_file_references(paths, ignore, format, label)
+    expanded: list[str] = []
+    for p in paths:
+        if os.path.exists(p):
+            expanded.append(p)
+            continue
+
+        tgt = parse_git_target(p)
+        if tgt:
+            repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
+            inner = Path(repo_dir)
+            if tgt.path:
+                inner = inner / tgt.path
+            expanded.append(str(inner))
+        else:
+            expanded.append(p)
+
+    refs = create_file_references(expanded, ignore, format, label)
     return refs["concatenated"]
 
 
