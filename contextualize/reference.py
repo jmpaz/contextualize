@@ -100,6 +100,15 @@ class FileReference:
 
     def get_label(self):
         if self.label == "relative":
+            from .gitcache import CACHE_ROOT
+
+            cache_root = os.path.join(CACHE_ROOT, "")
+            if self.path.startswith(cache_root):
+                rel = os.path.relpath(self.path, CACHE_ROOT)
+                parts = rel.split(os.sep)
+                if parts and parts[0] in ("github", "ext"):
+                    return os.path.join(*parts[1:])
+                return rel
             return self.path
         elif self.label == "name":
             return os.path.basename(self.path)
