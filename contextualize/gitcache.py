@@ -46,8 +46,6 @@ def parse_git_target(target: str) -> GitTarget | None:
     if not m:
         return None
     repo_url = m.group("url")
-    if not repo_url.endswith(".git"):
-        repo_url += ".git"
     rev = m.group("rev")
     path = m.group("path")
     host, repo = _get_host_and_repo(repo_url)
@@ -63,11 +61,27 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
     if not os.path.isdir(g.cache_dir):
         os.makedirs(os.path.dirname(g.cache_dir), exist_ok=True)
         # only use --depth 1 if we're not targeting a specific revision
-        clone_args = ["git", "clone"]
-        if not g.rev:
-            clone_args.extend(["--depth", "1"])
-        clone_args.extend([g.repo_url, g.cache_dir])
-        subprocess.run(clone_args, check=True, capture_output=True)
+        def do_clone(url: str) -> None:
+            clone_args = ["git", "clone"]
+            if not g.rev:
+                clone_args.extend(["--depth", "1"])
+            clone_args.extend([url, g.cache_dir])
+            subprocess.run(clone_args, check=True, capture_output=True)
+
+        try:
+            do_clone(g.repo_url)
+        except subprocess.CalledProcessError as err:
+            alt_url = None
+            if g.repo_url.endswith(".git"):
+                alt_url = g.repo_url[:-4]
+            else:
+                alt_url = g.repo_url + ".git"
+
+            try:
+                do_clone(alt_url)
+                g.repo_url = alt_url
+            except subprocess.CalledProcessError:
+                raise err
     elif pull:
         subprocess.run(
             ["git", "-C", g.cache_dir, "pull"], check=True, capture_output=True
