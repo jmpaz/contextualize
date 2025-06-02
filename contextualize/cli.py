@@ -341,10 +341,11 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone):
         tgt = parse_git_target(p)
         if tgt:
             repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
-            inner = Path(repo_dir)
             if tgt.path:
-                inner = inner / tgt.path
-            expanded.append(str(inner))
+                for sub in tgt.path.split(","):
+                    expanded.append(str(Path(repo_dir) / sub))
+            else:
+                expanded.append(str(Path(repo_dir)))
         else:
             expanded.append(p)
 
