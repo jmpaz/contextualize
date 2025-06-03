@@ -38,6 +38,9 @@ contextualize --copy --prompt "what does this do" cat contextualize/ README.md
 ```bash
 # gather README from a remote repo (cached under ~/.local/share/contextualize/cache/git/)
 contextualize cat gh:jmpaz/contextualize:README.md
+
+# gather multiple files/folder(s) from a repo
+contextualize cat https://git.sr.ht/~cismonx/bookmarkfs:README.md,doc
 ```
 
 more examples and details are available in [`docs/usage.md`](docs/usage.md).
