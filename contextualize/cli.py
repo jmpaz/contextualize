@@ -329,7 +329,7 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone):
 
     from pathlib import Path
 
-    from .gitcache import ensure_repo, parse_git_target
+    from .gitcache import ensure_repo, expand_git_paths, parse_git_target
     from .reference import create_file_references
 
     expanded: list[str] = []
@@ -342,8 +342,8 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone):
         if tgt:
             repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
             if tgt.path:
-                for sub in tgt.path.split(","):
-                    expanded.append(str(Path(repo_dir) / sub))
+                for item in expand_git_paths(repo_dir, tgt.path):
+                    expanded.append(str(Path(item)))
             else:
                 expanded.append(str(Path(repo_dir)))
         else:

@@ -173,3 +173,60 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
                     continue
 
     return g.cache_dir
+
+def _split_brace_options(s: str) -> list[str]:
+    opts = []
+    buf = ""
+    depth = 0
+    for ch in s:
+        if ch == "," and depth == 0:
+            opts.append(buf)
+            buf = ""
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        buf += ch
+    opts.append(buf)
+    return opts
+
+
+def brace_expand(pattern: str) -> list[str]:
+    m = re.search(r"\{", pattern)
+    if not m:
+        return [pattern]
+    start = m.start()
+    depth = 0
+    end = start
+    for i in range(start, len(pattern)):
+        if pattern[i] == "{":
+            depth += 1
+        elif pattern[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    inside = pattern[start + 1 : end]
+    rest = pattern[end + 1 :]
+    prefix = pattern[:start]
+    out = []
+    for opt in _split_brace_options(inside):
+        for expanded in brace_expand(opt + rest):
+            out.append(prefix + expanded)
+    return out
+
+
+def expand_git_paths(repo_dir: str, spec: str) -> list[str]:
+    from glob import glob
+
+    paths: list[str] = []
+    for part in spec.split(","):
+        for pat in brace_expand(part):
+            full = os.path.join(repo_dir, pat)
+            matches = glob(full, recursive=True)
+            if matches:
+                paths.extend(matches)
+            else:
+                paths.append(full)
+    return paths
