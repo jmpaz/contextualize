@@ -1,6 +1,6 @@
 # contextualize
 
-`contextualize` helps gather files and other text snippets for use with LLMs.
+`contextualize` is a CLI for assembling files and other text snippets for use with LLMs.
 
 <img src="https://github.com/jmpaz/contextualize/assets/30947643/01dbcec2-69fc-405a-8d91-0a00626f8946" width=80%>
 
@@ -30,17 +30,18 @@ uv tool install contextualize
 
 All commands work with the global flags `--prompt`, `--wrap`, `--copy`, and `--write-file`.
 
-```bash
-# example: gather a few files and copy to clipboard with a prefix
-contextualize --copy --prompt "what does this do" cat contextualize/ README.md
-```
+
+**Sample invocations (`cat`):**
 
 ```bash
-# gather README from a remote repo (cached under ~/.local/share/contextualize/cache/git/)
+# gather files and copy (individually wrapped + labelled, prefixed by '--prompt') to clipboard
+contextualize cat contextualize/ README.md --copy --prompt "how does this work?"
+
+# fetch a single file from a remote repo (cached under ~/.local/share/contextualize/cache/git/)
 contextualize cat gh:jmpaz/contextualize:README.md
 
 # gather multiple files/folder(s) from a repo
 contextualize cat https://git.sr.ht/~cismonx/bookmarkfs:README.md,doc
 ```
 
-more examples and details are available in [`docs/usage.md`](docs/usage.md).
+Details and more examples are available in [`docs/usage.md`](docs/usage.md).
