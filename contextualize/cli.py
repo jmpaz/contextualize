@@ -402,7 +402,7 @@ def fetch_cmd(ctx, issue, properties, config):
 
 
 @cli.command("map")
-@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.argument("paths", nargs=-1, type=str)
 @click.option(
     "-t",
     "--max-tokens",
@@ -410,14 +410,17 @@ def fetch_cmd(ctx, issue, properties, config):
     default=10000,
     help="Maximum tokens for the repo map",
 )
+@click.option("--ignore", multiple=True, help="File(s) to ignore")
 @click.option(
     "-f",
     "--format",
     default="plain",
     help="Output format for the repo map (plain/shell)",
 )
+@click.option("--git-pull", is_flag=True, help="Pull cached git repos")
+@click.option("--git-reclone", is_flag=True, help="Reclone cached git repos")
 @click.pass_context
-def map_cmd(ctx, paths, max_tokens, format):
+def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone):
     """
     Generate a repository map (raw).
     """
@@ -425,9 +428,30 @@ def map_cmd(ctx, paths, max_tokens, format):
         click.echo(ctx.get_help())
         ctx.exit()
 
+    from pathlib import Path
+
     from contextualize.repomap import generate_repo_map_data
 
-    result = generate_repo_map_data(paths, max_tokens, format)
+    from .gitcache import ensure_repo, expand_git_paths, parse_git_target
+
+    expanded: list[str] = []
+    for p in paths:
+        if os.path.exists(p):
+            expanded.append(p)
+            continue
+
+        tgt = parse_git_target(p)
+        if tgt:
+            repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
+            if tgt.path:
+                for item in expand_git_paths(repo_dir, tgt.path):
+                    expanded.append(str(Path(item)))
+            else:
+                expanded.append(str(Path(repo_dir)))
+        else:
+            expanded.append(p)
+
+    result = generate_repo_map_data(expanded, max_tokens, format, ignore)
     if "error" in result:
         return result["error"]
     return result["repo_map"]

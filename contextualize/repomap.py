@@ -2,8 +2,40 @@ import os
 
 from contextualize.tokenize import count_tokens
 
+from .reference import _is_utf8_file
 
-def generate_repo_map_data(paths, max_tokens, fmt):
+
+def _is_ignored(path: str, patterns: list[str]) -> bool:
+    from pathspec import PathSpec
+
+    spec = PathSpec.from_lines("gitwildmatch", patterns)
+    return spec.match_file(path)
+
+
+def _collect_files(paths: list[str], ignore_paths: list[str] | None) -> list[str]:
+    patterns = [".gitignore", "__pycache__/", "__init__.py"]
+    if ignore_paths:
+        for p in ignore_paths:
+            if os.path.isfile(p):
+                with open(p, "r", encoding="utf-8") as fh:
+                    patterns.extend(fh.read().splitlines())
+
+    files: list[str] = []
+    for path in paths:
+        if os.path.isfile(path):
+            if not _is_ignored(path, patterns) and _is_utf8_file(path):
+                files.append(path)
+        elif os.path.isdir(path):
+            for root, dirs, names in os.walk(path):
+                dirs[:] = [d for d in dirs if not _is_ignored(os.path.join(root, d), patterns)]
+                for name in names:
+                    fp = os.path.join(root, name)
+                    if not _is_ignored(fp, patterns) and _is_utf8_file(fp):
+                        files.append(fp)
+    return files
+
+
+def generate_repo_map_data(paths, max_tokens, fmt, ignore=None):
     """
     Generate a repository map and return a dict containing:
       - repo_map: The generated repository map as a string.
@@ -11,14 +43,9 @@ def generate_repo_map_data(paths, max_tokens, fmt):
       - messages: Any warnings/errors collected.
       - error: Present if no map could be generated.
     """
-    from aider.repomap import RepoMap, find_src_files
+    from aider.repomap import RepoMap
 
-    files = []
-    for path in paths:
-        if os.path.isdir(path):
-            files.extend(find_src_files(path))
-        else:
-            files.append(path)
+    files = _collect_files(paths, ignore)
 
     class CollectorIO:
         def __init__(self):

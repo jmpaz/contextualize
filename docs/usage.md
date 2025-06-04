@@ -32,7 +32,7 @@ contextualize --prompt "what has changed in this patch?" shell "git diff --stage
 Collect file contents, with optional wrapping and labels.
 
 ```
-contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell] [--label relative|name|ext]
+contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell] [--label relative|name|ext] [--git-pull] [--git-reclone]
 ```
 
 `PATH` may also start with a git repo spec such as `gh:user/repo` or `https://host/repo.git:path`.
@@ -55,6 +55,26 @@ contextualize -p "review:" -c \  # prepend "summarize:" to the output of cat; co
   cat -f xml \                   # wrap each file's content in '<paste>' tags
   pyproject.toml docs/           # extract content from pyproject.toml, docs/*
 ```
+
+
+### `map`
+
+Generate repository maps summarizing file structure.
+
+```
+contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format plain|shell] [--git-pull] [--git-reclone]
+```
+
+`PATH` accepts the same git repo specs as `cat`.
+
+| option | description |
+|--------|-------------|
+| `paths` | directories or files to include |
+| `--max-tokens` | limit map size for aider |
+| `--ignore` | glob pattern(s) to skip |
+| `--format` | choose `plain` (default) or `shell` |
+| `--git-pull` | update cached git repos referenced in paths |
+| `--git-reclone` | delete and re-clone cached git repos |
 
 
 ### `payload`
