@@ -26,6 +26,7 @@ def create_file_references(paths, ignore_paths=None, format="md", label="relativ
     file_references = []
     ignore_patterns = [
         ".gitignore",
+        ".git/",
         "__pycache__/",
         "__init__.py",
     ]
