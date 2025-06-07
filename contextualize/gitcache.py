@@ -29,6 +29,42 @@ def _get_host_and_repo(url: str) -> tuple[str, str]:
     return host, path
 
 
+def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
+    """Extract path and revision from target, returning (url, rev, path)."""
+    repo_url, rev, path = target, None, None
+
+    # path specifier
+    if ":" in target and not target.startswith("git@"):
+        colon_pos = target.rfind(":")
+        protocol_end = target.find("://")
+        if protocol_end != -1 and colon_pos > protocol_end + 2:
+            potential_path = target[colon_pos + 1 :]
+            if potential_path and (
+                not potential_path.isdigit() or "/" in potential_path
+            ):
+                path, repo_url = potential_path, target[:colon_pos]
+    elif target.startswith("git@") and target.count(":") > 1:
+        first_colon = target.find(":")
+        remainder = target[first_colon + 1 :]
+        last_colon = remainder.rfind(":")
+        if last_colon != -1 and remainder[last_colon + 1 :]:
+            path = remainder[last_colon + 1 :]
+            repo_url = target[: first_colon + 1 + last_colon]
+
+    # revision specifier
+    if "@" in repo_url and not repo_url.startswith("git@"):
+        at_pos = repo_url.rfind("@")
+        potential_rev = repo_url[at_pos + 1 :]
+        if potential_rev and "/" not in potential_rev:
+            rev, repo_url = potential_rev, repo_url[:at_pos]
+
+    # clean up .git suffix
+    if repo_url.startswith("http") and repo_url.endswith(".git"):
+        repo_url = repo_url[:-4]
+
+    return repo_url, rev, path
+
+
 def parse_git_target(target: str) -> GitTarget | None:
     if target.startswith("gh:"):
         rest = target[3:]
@@ -39,19 +75,15 @@ def parse_git_target(target: str) -> GitTarget | None:
         cache_dir = os.path.join(CACHE_ROOT, "github", *repo.split("/"))
         return GitTarget(repo_url, cache_dir, path or None, rev or None)
 
-    m = re.match(
-        r"(?P<url>(?:https?://|git@)[^:@]+(?::[0-9]+)?/[^:@]+?)(?:\.git)?(?:@(?P<rev>[^:]+))?(?::(?P<path>.*))?$",
-        target,
-    )
-    if not m:
+    repo_url, rev, path = _extract_path_and_rev(target)
+
+    if not (repo_url.startswith("http") or repo_url.startswith("git@")):
         return None
-    repo_url = m.group("url")
-    rev = m.group("rev")
-    path = m.group("path")
+
     host, repo = _get_host_and_repo(repo_url)
     root = "github" if host.endswith("github.com") else os.path.join("ext", host)
     cache_dir = os.path.join(CACHE_ROOT, root, *repo.split("/"))
-    return GitTarget(repo_url, cache_dir, path or None, rev or None)
+    return GitTarget(repo_url, cache_dir, path, rev)
 
 
 def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
@@ -60,6 +92,7 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
 
     if not os.path.isdir(g.cache_dir):
         os.makedirs(os.path.dirname(g.cache_dir), exist_ok=True)
+
         # only use --depth 1 if we're not targeting a specific revision
         def do_clone(url: str) -> None:
             clone_args = ["git", "clone"]
@@ -173,6 +206,7 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
                     continue
 
     return g.cache_dir
+
 
 def _split_brace_options(s: str) -> list[str]:
     opts = []
