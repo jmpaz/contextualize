@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 import yaml
 
+from .gitcache import ensure_repo, expand_git_paths, parse_git_target
 from .reference import create_file_references
 
 
@@ -48,19 +49,28 @@ def assemble_payload(
 
         # collect FileReference objects (recursing into directories)
         all_refs = []
-        for rel in files:
-            rel_expanded = os.path.expanduser(rel)
-            full = (
-                rel_expanded
-                if os.path.isabs(rel_expanded)
-                else os.path.join(base_dir, rel_expanded)
-            )
-            if not os.path.exists(full):
-                raise FileNotFoundError(f"Component '{name}' path not found: {full}")
-            refs = create_file_references(
-                [full], ignore_paths=None, format="md", label="relative"
-            )["refs"]
-            all_refs.extend(refs)
+        for spec in files:
+            spec = os.path.expanduser(spec)
+
+            tgt = parse_git_target(spec)
+            if tgt:
+                repo_dir = ensure_repo(tgt)
+                paths = (
+                    [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
+                )
+            else:
+                base = "" if os.path.isabs(spec) else base_dir
+                paths = expand_git_paths(base, spec)
+
+            for full in paths:
+                if not os.path.exists(full):
+                    raise FileNotFoundError(
+                        f"Component '{name}' path not found: {full}"
+                    )
+                refs = create_file_references(
+                    [full], ignore_paths=None, format="md", label="relative"
+                )["refs"]
+                all_refs.extend(refs)
 
         attachment_lines = [f'<attachment label="{name}">']
         for idx, ref in enumerate(all_refs):
