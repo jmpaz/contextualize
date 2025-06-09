@@ -34,29 +34,57 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
     repo_url, rev, path = target, None, None
 
     # path specifier
-    if ":" in target and not target.startswith("git@"):
-        colon_pos = target.rfind(":")
-        protocol_end = target.find("://")
-        if protocol_end != -1 and colon_pos > protocol_end + 2:
-            potential_path = target[colon_pos + 1 :]
-            if potential_path and (
-                not potential_path.isdigit() or "/" in potential_path
-            ):
-                path, repo_url = potential_path, target[:colon_pos]
-    elif target.startswith("git@") and target.count(":") > 1:
-        first_colon = target.find(":")
-        remainder = target[first_colon + 1 :]
-        last_colon = remainder.rfind(":")
-        if last_colon != -1 and remainder[last_colon + 1 :]:
-            path = remainder[last_colon + 1 :]
-            repo_url = target[: first_colon + 1 + last_colon]
+    if ":" in target:
+        if target.startswith("git@"):
+            # git@host:owner/repo
+            first_colon = target.find(":")
+            if target.count(":") > 1:
+                remainder = target[first_colon + 1 :]
+                last_colon = remainder.rfind(":")
+                if last_colon != -1 and remainder[last_colon + 1 :]:
+                    path = remainder[last_colon + 1 :]
+                    repo_url = target[: first_colon + 1 + last_colon]
+        else:
+            # http/https URLs - colon after protocol
+            colon_pos = target.rfind(":")
+            protocol_end = target.find("://")
+            if protocol_end != -1 and colon_pos > protocol_end + 2:
+                potential_path = target[colon_pos + 1 :]
+                if potential_path and (
+                    not potential_path.isdigit() or "/" in potential_path
+                ):
+                    path, repo_url = potential_path, target[:colon_pos]
 
     # revision specifier
-    if "@" in repo_url and not repo_url.startswith("git@"):
-        at_pos = repo_url.rfind("@")
-        potential_rev = repo_url[at_pos + 1 :]
+    # handle # first (takes precedence for specific commit hashes)
+    if "#" in repo_url:
+        hash_pos = repo_url.rfind("#")
+        potential_rev = repo_url[hash_pos + 1 :]
         if potential_rev and "/" not in potential_rev:
-            rev, repo_url = potential_rev, repo_url[:at_pos]
+            rev, repo_url = potential_rev, repo_url[:hash_pos]
+
+    # handle @ for branch/revision
+    if "@" in repo_url:
+        if repo_url.startswith("git@"):
+            # for git@ URLs, only look for @ after the first one
+            git_at_end = repo_url.find(":", 4)  # find colon after git@host
+            if git_at_end != -1:
+                remaining = repo_url[git_at_end + 1 :]
+                if "@" in remaining:
+                    at_pos = remaining.rfind("@")
+                    potential_rev = remaining[at_pos + 1 :]
+                    if potential_rev and "/" not in potential_rev:
+                        if not rev:
+                            rev = potential_rev
+                        repo_url = repo_url[: git_at_end + 1 + at_pos]
+        else:
+            # regular URLs
+            at_pos = repo_url.rfind("@")
+            potential_rev = repo_url[at_pos + 1 :]
+            if potential_rev and "/" not in potential_rev:
+                if not rev:
+                    rev = potential_rev
+                repo_url = repo_url[:at_pos]
 
     # clean up .git suffix
     if repo_url.startswith("http") and repo_url.endswith(".git"):
