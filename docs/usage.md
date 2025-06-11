@@ -107,6 +107,14 @@ running the command yields the composed payload.
 
 An upcoming release will add support for sections like `commands` and `maps` in addition to `files`.
 
+### content injection
+
+`--inject` replaces `{cx::...}` patterns inside target files with referenced content. targets can be HTTP URLs, git repos, or local paths. parameters can tweak labels and formats just like the `cat` command.
+
+```bash
+contextualize --inject cat index.md
+```
+
 
 ## Pipelines
 
