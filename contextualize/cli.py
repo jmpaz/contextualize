@@ -251,8 +251,11 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     required=False,
     type=click.Path(exists=True, dir_okay=False),
 )
+@click.option(
+    "--inject", is_flag=True, help="Process {cx::...} content injection patterns"
+)
 @click.pass_context
-def payload_cmd(ctx, manifest_path):
+def payload_cmd(ctx, manifest_path, inject):
     """
     Render a context payload from a provided YAML manifest.
     If no path is given and stdin is piped, read the manifest from stdin.
@@ -269,7 +272,18 @@ def payload_cmd(ctx, manifest_path):
         )
 
     if manifest_path:
-        return render_from_yaml(manifest_path)
+        payload_content = render_from_yaml(manifest_path)
+
+        # Apply content injection if requested
+        if inject:
+            try:
+                from .injection import inject_content_in_text
+
+                payload_content = inject_content_in_text(payload_content)
+            except Exception as e:
+                raise click.ClickException(f"Injection failed: {str(e)}")
+
+        return payload_content
 
     # only use stdin when no manifest file is provided
     stdin_data = ctx.obj.get("stdin_data", "")
@@ -303,7 +317,18 @@ def payload_cmd(ctx, manifest_path):
         raise click.ClickException("'components' must be a list")
 
     # assemble and return the payload string
-    return assemble_payload(comps, base_dir)
+    payload_content = assemble_payload(comps, base_dir)
+
+    # Apply content injection if requested
+    if inject:
+        try:
+            from .injection import inject_content_in_text
+
+            payload_content = inject_content_in_text(payload_content)
+        except Exception as e:
+            raise click.ClickException(f"Injection failed: {str(e)}")
+
+    return payload_content
 
 
 @cli.command("cat")
@@ -318,8 +343,11 @@ def payload_cmd(ctx, manifest_path):
 )
 @click.option("--git-pull", is_flag=True, help="Pull cached git repos")
 @click.option("--git-reclone", is_flag=True, help="Reclone cached git repos")
+@click.option(
+    "--inject", is_flag=True, help="Process {cx::...} content injection patterns"
+)
 @click.pass_context
-def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone):
+def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone, inject):
     """
     Prepare and concatenate file references (raw).
     """
@@ -350,7 +378,18 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone):
             expanded.append(p)
 
     refs = create_file_references(expanded, ignore, format, label)
-    return refs["concatenated"]
+    concatenated_content = refs["concatenated"]
+
+    # Apply content injection if requested
+    if inject:
+        try:
+            from .injection import inject_content_in_text
+
+            concatenated_content = inject_content_in_text(concatenated_content)
+        except Exception as e:
+            raise click.ClickException(f"Injection failed: {str(e)}")
+
+    return concatenated_content
 
 
 @cli.command("fetch")
