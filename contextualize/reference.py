@@ -11,9 +11,12 @@ def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
         return False
 
 
-def create_file_references(paths, ignore_paths=None, format="md", label="relative"):
+def create_file_references(
+    paths, ignore_paths=None, format="md", label="relative", inject=False, depth=5
+):
     """
     Build a list of file references from the specified paths.
+    if `inject` is true, {cx::...} markers are resolved before wrapping.
     """
 
     def is_ignored(path, gitignore_patterns):
@@ -41,7 +44,9 @@ def create_file_references(paths, ignore_paths=None, format="md", label="relativ
     for path in paths:
         if os.path.isfile(path):
             if not is_ignored(path, ignore_patterns) and _is_utf8_file(path):
-                file_references.append(FileReference(path, format=format, label=label))
+                file_references.append(
+                    FileReference(path, format=format, label=label, inject=inject, depth=depth)
+                )
         elif os.path.isdir(path):
             for root, dirs, files in os.walk(path):
                 dirs[:] = [
@@ -55,7 +60,9 @@ def create_file_references(paths, ignore_paths=None, format="md", label="relativ
                         file_path
                     ):
                         file_references.append(
-                            FileReference(file_path, format=format, label=label)
+                            FileReference(
+                                file_path, format=format, label=label, inject=inject, depth=depth
+                            )
                         )
 
     return {
@@ -73,13 +80,23 @@ def concat_refs(file_references):
 
 class FileReference:
     def __init__(
-        self, path, range=None, format="md", label="relative", clean_contents=False
+        self,
+        path,
+        range=None,
+        format="md",
+        label="relative",
+        clean_contents=False,
+        *,
+        inject=False,
+        depth=5,
     ):
         self.range = range
         self.path = path
         self.format = format
         self.label = label
         self.clean_contents = clean_contents
+        self.inject = inject
+        self.depth = depth
         self.file_content = ""
         self.output = self.get_contents()
 
@@ -90,6 +107,11 @@ class FileReference:
         except Exception as e:
             print(f"Error reading file {self.path}: {str(e)}")
             return ""
+
+        if self.inject:
+            from .injection import inject_content_in_text
+
+            self.file_content = inject_content_in_text(self.file_content, self.depth)
 
         return process_text(
             self.file_content,

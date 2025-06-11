@@ -272,17 +272,7 @@ def payload_cmd(ctx, manifest_path, inject):
         )
 
     if manifest_path:
-        payload_content = render_from_yaml(manifest_path)
-
-        # Apply content injection if requested
-        if inject:
-            try:
-                from .injection import inject_content_in_text
-
-                payload_content = inject_content_in_text(payload_content)
-            except Exception as e:
-                raise click.ClickException(f"Injection failed: {str(e)}")
-
+        payload_content = render_from_yaml(manifest_path, inject=inject)
         return payload_content
 
     # only use stdin when no manifest file is provided
@@ -317,17 +307,7 @@ def payload_cmd(ctx, manifest_path, inject):
         raise click.ClickException("'components' must be a list")
 
     # assemble and return the payload string
-    payload_content = assemble_payload(comps, base_dir)
-
-    # Apply content injection if requested
-    if inject:
-        try:
-            from .injection import inject_content_in_text
-
-            payload_content = inject_content_in_text(payload_content)
-        except Exception as e:
-            raise click.ClickException(f"Injection failed: {str(e)}")
-
+    payload_content = assemble_payload(comps, base_dir, inject=inject)
     return payload_content
 
 
@@ -377,19 +357,10 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone, inject):
         else:
             expanded.append(p)
 
-    refs = create_file_references(expanded, ignore, format, label)
-    concatenated_content = refs["concatenated"]
-
-    # Apply content injection if requested
-    if inject:
-        try:
-            from .injection import inject_content_in_text
-
-            concatenated_content = inject_content_in_text(concatenated_content)
-        except Exception as e:
-            raise click.ClickException(f"Injection failed: {str(e)}")
-
-    return concatenated_content
+    refs = create_file_references(
+        expanded, ignore, format, label, inject=inject, depth=5
+    )
+    return refs["concatenated"]
 
 
 @cli.command("fetch")

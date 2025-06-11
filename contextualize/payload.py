@@ -10,6 +10,9 @@ from .reference import create_file_references
 def assemble_payload(
     components: List[Dict[str, Any]],
     base_dir: str,
+    *,
+    inject: bool = False,
+    depth: int = 5,
 ) -> str:
     """
     - If a component has a 'text' key, emit that text verbatim.
@@ -19,6 +22,7 @@ def assemble_payload(
     - if 'wrap' key is present:
         * wrap == "md" → wrap the inner content in a markdown code fence
         * wrap == other string → wrap inner content in <wrap>…</wrap>
+    - if `inject` is true, resolve {cx::...} markers before wrapping files
     """
     parts: List[str] = []
 
@@ -68,7 +72,12 @@ def assemble_payload(
                         f"Component '{name}' path not found: {full}"
                     )
                 refs = create_file_references(
-                    [full], ignore_paths=None, format="md", label="relative"
+                    [full],
+                    ignore_paths=None,
+                    format="md",
+                    label="relative",
+                    inject=inject,
+                    depth=depth,
                 )["refs"]
                 all_refs.extend(refs)
 
@@ -100,6 +109,9 @@ def assemble_payload(
 
 def render_from_yaml(
     manifest_path: str,
+    *,
+    inject: bool = False,
+    depth: int = 5,
 ) -> str:
     """
     Load YAML with top-level:
@@ -127,4 +139,4 @@ def render_from_yaml(
     if not isinstance(comps, list):
         raise ValueError("'components' must be a list")
 
-    return assemble_payload(comps, base_dir)
+    return assemble_payload(comps, base_dir, inject=inject, depth=depth)
