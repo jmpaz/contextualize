@@ -338,10 +338,27 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone, inject):
     from pathlib import Path
 
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
-    from .reference import create_file_references
+    from .reference import URLReference, concat_refs, create_file_references
 
     expanded: list[str] = []
+    http_urls: list[str] = []
     for p in paths:
+        if p.startswith("http://") or p.startswith("https://"):
+            tgt = parse_git_target(p)
+            if tgt and (
+                tgt.path is not None
+                or tgt.repo_url.endswith(".git")
+                or tgt.repo_url != p
+            ):
+                repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
+                if tgt.path:
+                    for item in expand_git_paths(repo_dir, tgt.path):
+                        expanded.append(str(Path(item)))
+                else:
+                    expanded.append(str(Path(repo_dir)))
+            else:
+                http_urls.append(p)
+            continue
         if os.path.exists(p):
             expanded.append(p)
             continue
@@ -359,8 +376,14 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone, inject):
 
     refs = create_file_references(
         expanded, ignore, format, label, inject=inject, depth=5
-    )
-    return refs["concatenated"]
+    )["refs"]
+
+    for url in http_urls:
+        refs.append(
+            URLReference(url, format=format, label=label, inject=inject, depth=5)
+        )
+
+    return concat_refs(refs)
 
 
 @cli.command("fetch")

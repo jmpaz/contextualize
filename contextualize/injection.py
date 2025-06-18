@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from .gitcache import ensure_repo, expand_git_paths, parse_git_target
-from .reference import create_file_references, process_text
+from .reference import URLReference, create_file_references, process_text
 
 # match {cx:: ... } allowing braces within the target
 _PATTERN = re.compile(r"\{cx::((?:[^{}]|\{[^{}]*\})*)\}")
@@ -27,21 +27,14 @@ def _parse(piece: str) -> dict[str, Any]:
 
 def _http_fetch(url: str, name: str | None, depth: int) -> str:
     try:
-        import json
-
-        import requests
-
-        r = requests.get(url, timeout=30, headers={"User-Agent": "contextualize"})
-        r.raise_for_status()
-        text = r.text
-        if "json" in r.headers.get("Content-Type", ""):
-            try:
-                text = json.dumps(r.json(), indent=2)
-            except Exception:
-                pass
-        if depth > 0:
-            text = inject_content_in_text(text, depth)
-        return process_text(text, format="md", label=name or url)
+        ref = URLReference(
+            url,
+            format="md",
+            label=name or url,
+            inject=depth > 0,
+            depth=depth
+        )
+        return ref.output
     except Exception as e:
         raise Exception(f"http fetch failed for {url}: {e}")
 

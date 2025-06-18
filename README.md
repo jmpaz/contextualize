@@ -42,6 +42,9 @@ contextualize cat gh:jmpaz/contextualize:README.md
 
 # gather multiple files/folder(s) from a repo
 contextualize cat https://git.sr.ht/~cismonx/bookmarkfs:README.md,doc
+
+# fetch a single hosted UTF-8 file
+contextualize cat https://modelcontextprotocol.io/llms.txt
 ```
 
 Details and more examples are available in [`docs/usage.md`](docs/usage.md).
