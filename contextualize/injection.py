@@ -5,7 +5,8 @@ import re
 from typing import Any
 
 from .gitcache import ensure_repo, expand_git_paths, parse_git_target
-from .reference import URLReference, create_file_references, process_text
+from .reference import URLReference, create_file_references
+from .utils import wrap_text
 
 # match {cx:: ... } allowing braces within the target
 _PATTERN = re.compile(r"\{cx::((?:[^{}]|\{[^{}]*\})*)\}")
@@ -16,7 +17,7 @@ def _parse(piece: str) -> dict[str, Any]:
     opts: dict[str, str | None] = {}
     target_parts: list[str] = []
     for part in parts:
-        m = re.fullmatch(r'(filename|params|root)=(?:"([^\"]*)"|([^\"]*))', part)
+        m = re.fullmatch(r'(filename|params|root|wrap)=(?:"([^\"]*)"|([^\"]*))', part)
         if m:
             opts[m.group(1)] = m.group(2) or m.group(3)
         else:
@@ -25,21 +26,29 @@ def _parse(piece: str) -> dict[str, Any]:
     return opts
 
 
-def _http_fetch(url: str, name: str | None, depth: int) -> str:
+def _http_fetch(url: str, name: str | None, depth: int, wrap: str | None = None) -> str:
     try:
         ref = URLReference(
             url,
             format="md",
             label=name or url,
             inject=depth > 0,
-            depth=depth
+            depth=depth,
         )
-        return ref.output
+        result = ref.output
+
+        # apply wrap format to entire result if specified
+        if wrap:
+            result = wrap_text(result, wrap)
+
+        return result
     except Exception as e:
         raise Exception(f"http fetch failed for {url}: {e}")
 
 
-def _git_fetch(target: str, params: str | None, depth: int) -> str:
+def _git_fetch(
+    target: str, params: str | None, depth: int, wrap: str | None = None
+) -> str:
     git_opts = params.split() if params else []
     fmt = "md"
     lbl = "relative"
@@ -56,11 +65,21 @@ def _git_fetch(target: str, params: str | None, depth: int) -> str:
         raise Exception(f"invalid git target: {target}")
     repo = ensure_repo(tgt, pull=pull, reclone=reclone)
     paths = [repo] if not tgt.path else expand_git_paths(repo, tgt.path)
-    refs = create_file_references(paths, format=fmt, label=lbl, inject=True, depth=depth)
-    return refs["concatenated"]
+    refs = create_file_references(
+        paths, format=fmt, label=lbl, inject=True, depth=depth
+    )
+    result = refs["concatenated"]
+
+    # apply wrap format to entire result if specified
+    if wrap:
+        result = wrap_text(result, wrap)
+
+    return result
 
 
-def _local_fetch(path: str, root: str | None, params: str | None, depth: int) -> str:
+def _local_fetch(
+    path: str, root: str | None, params: str | None, depth: int, wrap: str | None = None
+) -> str:
     fmt = "md"
     lbl = "relative"
     if params:
@@ -77,22 +96,32 @@ def _local_fetch(path: str, root: str | None, params: str | None, depth: int) ->
     existing = [p for p in paths if os.path.exists(p)]
     if not existing:
         raise Exception(f"path not found: {path}")
-    refs = create_file_references(existing, format=fmt, label=lbl, inject=True, depth=depth)
-    return refs["concatenated"]
+    refs = create_file_references(
+        existing, format=fmt, label=lbl, inject=True, depth=depth
+    )
+    result = refs["concatenated"]
+
+    # apply wrap format to entire result if specified
+    if wrap:
+        result = wrap_text(result, wrap)
+
+    return result
 
 
 def _process(opts: dict[str, Any], depth: int) -> str:
     tgt = opts.get("target") or ""
     if tgt.startswith("http://") or tgt.startswith("https://"):
         try:
-            return _http_fetch(tgt, opts.get("filename"), depth)
+            return _http_fetch(tgt, opts.get("filename"), depth, opts.get("wrap"))
         except Exception:
             if parse_git_target(tgt):
-                return _git_fetch(tgt, opts.get("params"), depth)
+                return _git_fetch(tgt, opts.get("params"), depth, opts.get("wrap"))
             raise
     if parse_git_target(tgt):
-        return _git_fetch(tgt, opts.get("params"), depth)
-    return _local_fetch(tgt, opts.get("root"), opts.get("params"), depth)
+        return _git_fetch(tgt, opts.get("params"), depth, opts.get("wrap"))
+    return _local_fetch(
+        tgt, opts.get("root"), opts.get("params"), depth, opts.get("wrap")
+    )
 
 
 def inject_content_in_text(text: str, depth: int = 5) -> str:
@@ -105,4 +134,3 @@ def inject_content_in_text(text: str, depth: int = 5) -> str:
 
     new = _PATTERN.sub(repl, text)
     return inject_content_in_text(new, depth - 1) if _PATTERN.search(new) else new
-
