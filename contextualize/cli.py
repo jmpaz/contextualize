@@ -340,48 +340,33 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone, inject):
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
     from .reference import URLReference, concat_refs, create_file_references
 
-    expanded: list[str] = []
-    http_urls: list[str] = []
+    def add_file_refs(paths_list):
+        """Helper to add file references for a list of paths"""
+        file_refs = create_file_references(paths_list, ignore, format, label, inject=inject, depth=5)["refs"]
+        refs.extend(file_refs)
+
+    refs = []
     for p in paths:
         if p.startswith("http://") or p.startswith("https://"):
             tgt = parse_git_target(p)
-            if tgt and (
-                tgt.path is not None
-                or tgt.repo_url.endswith(".git")
-                or tgt.repo_url != p
-            ):
+            if tgt and (tgt.path is not None or tgt.repo_url.endswith(".git") or tgt.repo_url != p):
                 repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
-                if tgt.path:
-                    for item in expand_git_paths(repo_dir, tgt.path):
-                        expanded.append(str(Path(item)))
-                else:
-                    expanded.append(str(Path(repo_dir)))
+                expanded_paths = [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)] if tgt.path else [str(Path(repo_dir))]
+                for path in expanded_paths:
+                    add_file_refs([path])
             else:
-                http_urls.append(p)
-            continue
-        if os.path.exists(p):
-            expanded.append(p)
-            continue
-
-        tgt = parse_git_target(p)
-        if tgt:
-            repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
-            if tgt.path:
-                for item in expand_git_paths(repo_dir, tgt.path):
-                    expanded.append(str(Path(item)))
-            else:
-                expanded.append(str(Path(repo_dir)))
+                refs.append(URLReference(p, format=format, label=label, inject=inject, depth=5))
+        elif os.path.exists(p):
+            add_file_refs([p])
         else:
-            expanded.append(p)
-
-    refs = create_file_references(
-        expanded, ignore, format, label, inject=inject, depth=5
-    )["refs"]
-
-    for url in http_urls:
-        refs.append(
-            URLReference(url, format=format, label=label, inject=inject, depth=5)
-        )
+            tgt = parse_git_target(p)
+            if tgt:
+                repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
+                expanded_paths = [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)] if tgt.path else [str(Path(repo_dir))]
+                for path in expanded_paths:
+                    add_file_refs([path])
+            else:
+                add_file_refs([p])
 
     return concat_refs(refs)
 
