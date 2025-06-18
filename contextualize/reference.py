@@ -1,4 +1,6 @@
 import os
+from dataclasses import dataclass
+from urllib.parse import urlparse
 
 
 def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
@@ -42,7 +44,13 @@ def create_file_references(
                     ignore_patterns.extend(file.read().splitlines())
 
     for path in paths:
-        if os.path.isfile(path):
+        if path.startswith("http://") or path.startswith("https://"):
+            file_references.append(
+                URLReference(
+                    path, format=format, label=label, inject=inject, depth=depth
+                )
+            )
+        elif os.path.isfile(path):
             if not is_ignored(path, ignore_patterns) and _is_utf8_file(path):
                 file_references.append(
                     FileReference(path, format=format, label=label, inject=inject, depth=depth)
@@ -139,6 +147,47 @@ class FileReference:
             return os.path.splitext(self.path)[1]
         else:
             return ""
+
+
+@dataclass
+class URLReference:
+    url: str
+    format: str = "md"
+    label: str = "relative"
+    inject: bool = False
+    depth: int = 5
+
+    def __post_init__(self) -> None:
+        self.output = self.get_contents()
+
+    def get_label(self) -> str:
+        path = urlparse(self.url).path
+        if self.label == "relative":
+            return self.url
+        if self.label == "name":
+            return os.path.basename(path)
+        if self.label == "ext":
+            return os.path.splitext(path)[1]
+        return ""
+
+    def get_contents(self) -> str:
+        import json
+
+        import requests
+
+        r = requests.get(self.url, timeout=30, headers={"User-Agent": "contextualize"})
+        r.raise_for_status()
+        text = r.text
+        if "json" in r.headers.get("Content-Type", ""):
+            try:
+                text = json.dumps(r.json(), indent=2)
+            except Exception:
+                pass
+        if self.inject:
+            from .injection import inject_content_in_text
+
+            text = inject_content_in_text(text, self.depth)
+        return process_text(text, format=self.format, label=self.get_label())
 
 
 def process_text(text, clean=False, range=None, format="md", label="", shell_cmd=None):
