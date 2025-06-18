@@ -91,7 +91,12 @@ def _local_fetch(path: str, root: str | None, params: str | None, depth: int) ->
 def _process(opts: dict[str, Any], depth: int) -> str:
     tgt = opts.get("target") or ""
     if tgt.startswith("http://") or tgt.startswith("https://"):
-        return _http_fetch(tgt, opts.get("filename"), depth)
+        try:
+            return _http_fetch(tgt, opts.get("filename"), depth)
+        except Exception:
+            if parse_git_target(tgt):
+                return _git_fetch(tgt, opts.get("params"), depth)
+            raise
     if parse_git_target(tgt):
         return _git_fetch(tgt, opts.get("params"), depth)
     return _local_fetch(tgt, opts.get("root"), opts.get("params"), depth)
