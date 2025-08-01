@@ -215,8 +215,8 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         # normal case: wrap everything and add prompts
         wrapped_text = wrap_text(raw_text, ctx.obj["wrap_mode"])
 
-        # special case: stdin-only with single prompt
-        if len(prompts) == 1 and no_subcmd:
+        # handle position parameter for single prompt cases
+        if len(prompts) == 1:
             if ctx.obj["output_pos"] == "append":
                 final_output = f"{wrapped_text}\n{prompts[0]}"
             else:
@@ -281,7 +281,7 @@ def payload_cmd(ctx, manifest_path, inject):
         click.echo(ctx.get_help())
         ctx.exit(1)
 
-    # clear stdin_data since we're consuming it here
+    # clear stdin_data since we're consuming it here - the YAML manifest shouldn't be positioned with the output
     ctx.obj["stdin_data"] = ""
 
     raw = stdin_data
