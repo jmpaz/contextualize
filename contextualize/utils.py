@@ -20,10 +20,11 @@ def read_config(custom_path=None):
         return {}
 
 
-def wrap_text(content: str, wrap_mode: str) -> str:
+def wrap_text(content: str, wrap_mode: str, filename: str | None = None) -> str:
     """
     Wrap the given content according to wrap_mode ('xml' or 'md').
     If wrap_mode is None or empty string, return content unmodified.
+    For 'md' mode, filename can be included in the code fence.
     """
     if not wrap_mode:
         return content
@@ -37,8 +38,10 @@ def wrap_text(content: str, wrap_mode: str) -> str:
 
         fence_len = longest + 2 if longest >= 3 else 3
         fence = "`" * fence_len
+        
+        fence_header = fence + (filename if filename else "")
 
-        return f"{fence}\n{content}\n{fence}"
+        return f"{fence_header}\n{content}\n{fence}"
 
     return content
 

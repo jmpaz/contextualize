@@ -30,16 +30,15 @@ def _http_fetch(url: str, name: str | None, depth: int, wrap: str | None = None)
     try:
         ref = URLReference(
             url,
-            format="md",
+            format="raw",
             label=name or url,
             inject=depth > 0,
             depth=depth,
         )
         result = ref.output
 
-        # apply wrap format to entire result if specified
-        if wrap:
-            result = wrap_text(result, wrap)
+        wrap_format = wrap or "md"
+        result = wrap_text(result, wrap_format, name)
 
         return result
     except Exception as e:
