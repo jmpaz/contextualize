@@ -77,7 +77,12 @@ def _git_fetch(
 
 
 def _local_fetch(
-    path: str, root: str | None, params: str | None, depth: int, wrap: str | None = None
+    path: str,
+    root: str | None,
+    params: str | None,
+    depth: int,
+    wrap: str | None = None,
+    filename: str | None = None,
 ) -> str:
     fmt = "md"
     lbl = "relative"
@@ -95,14 +100,16 @@ def _local_fetch(
     existing = [p for p in paths if os.path.exists(p)]
     if not existing:
         raise Exception(f"path not found: {path}")
+
+    label = filename if filename and len(existing) == 1 else lbl
     refs = create_file_references(
-        existing, format=fmt, label=lbl, inject=True, depth=depth
+        existing, format=fmt, label=label, inject=True, depth=depth
     )
     result = refs["concatenated"]
 
     # apply wrap format to entire result if specified
     if wrap:
-        result = wrap_text(result, wrap)
+        result = wrap_text(result, wrap, filename)
 
     return result
 
@@ -119,7 +126,12 @@ def _process(opts: dict[str, Any], depth: int) -> str:
     if parse_git_target(tgt):
         return _git_fetch(tgt, opts.get("params"), depth, opts.get("wrap"))
     return _local_fetch(
-        tgt, opts.get("root"), opts.get("params"), depth, opts.get("wrap")
+        tgt,
+        opts.get("root"),
+        opts.get("params"),
+        depth,
+        opts.get("wrap"),
+        opts.get("filename"),
     )
 
 

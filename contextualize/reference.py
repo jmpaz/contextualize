@@ -53,7 +53,9 @@ def create_file_references(
         elif os.path.isfile(path):
             if not is_ignored(path, ignore_patterns) and _is_utf8_file(path):
                 file_references.append(
-                    FileReference(path, format=format, label=label, inject=inject, depth=depth)
+                    FileReference(
+                        path, format=format, label=label, inject=inject, depth=depth
+                    )
                 )
         elif os.path.isdir(path):
             for root, dirs, files in os.walk(path):
@@ -69,7 +71,11 @@ def create_file_references(
                     ):
                         file_references.append(
                             FileReference(
-                                file_path, format=format, label=label, inject=inject, depth=depth
+                                file_path,
+                                format=format,
+                                label=label,
+                                inject=inject,
+                                depth=depth,
                             )
                         )
 
@@ -146,7 +152,7 @@ class FileReference:
         elif self.label == "ext":
             return os.path.splitext(self.path)[1]
         else:
-            return ""
+            return self.label
 
 
 @dataclass
@@ -168,7 +174,7 @@ class URLReference:
             return os.path.basename(path)
         if self.label == "ext":
             return os.path.splitext(path)[1]
-        return ""
+        return self.label
 
     def get_contents(self) -> str:
         import json
