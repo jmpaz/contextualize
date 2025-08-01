@@ -1,10 +1,29 @@
 import os
+import re
 from typing import Any, Dict, List
 
 import yaml
 
 from .gitcache import ensure_repo, expand_git_paths, parse_git_target
-from .reference import create_file_references
+from .reference import URLReference, create_file_references
+from .utils import wrap_text
+
+
+def _parse_url_spec(spec: str) -> dict[str, Any]:
+    """Parse URL spec like 'https://example.com::filename=file.py::wrap=md' into options dict."""
+    parts = spec.split("::")
+    opts: dict[str, str | None] = {}
+    target_parts: list[str] = []
+
+    for part in parts:
+        m = re.fullmatch(r'(filename|params|root|wrap)=(?:"([^"]*)"|([^"]*))', part)
+        if m:
+            opts[m.group(1)] = m.group(2) or m.group(3)
+        else:
+            target_parts.append(part)
+
+    opts["target"] = "::".join(target_parts)
+    return opts
 
 
 def assemble_payload(
@@ -56,30 +75,86 @@ def assemble_payload(
         for spec in files:
             spec = os.path.expanduser(spec)
 
-            tgt = parse_git_target(spec)
-            if tgt:
-                repo_dir = ensure_repo(tgt)
-                paths = (
-                    [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
-                )
-            else:
-                base = "" if os.path.isabs(spec) else base_dir
-                paths = expand_git_paths(base, spec)
+            if spec.startswith("http://") or spec.startswith("https://"):
+                opts = _parse_url_spec(spec)
+                url = opts.get("target", spec)
+                filename = opts.get("filename")
+                wrap = opts.get("wrap")
 
-            for full in paths:
-                if not os.path.exists(full):
-                    raise FileNotFoundError(
-                        f"Component '{name}' path not found: {full}"
+                # try as git target first, fall back to URL
+                tgt = parse_git_target(url)
+                if tgt and (
+                    tgt.path is not None
+                    or tgt.repo_url.endswith(".git")
+                    or tgt.repo_url != url
+                ):
+                    repo_dir = ensure_repo(tgt)
+                    paths = (
+                        [repo_dir]
+                        if not tgt.path
+                        else expand_git_paths(repo_dir, tgt.path)
                     )
-                refs = create_file_references(
-                    [full],
-                    ignore_paths=None,
-                    format="md",
-                    label="relative",
-                    inject=inject,
-                    depth=depth,
-                )["refs"]
-                all_refs.extend(refs)
+                    for full in paths:
+                        if not os.path.exists(full):
+                            raise FileNotFoundError(
+                                f"Component '{name}' path not found: {full}"
+                            )
+                        refs = create_file_references(
+                            [full],
+                            ignore_paths=None,
+                            format="md",
+                            label="relative",
+                            inject=inject,
+                            depth=depth,
+                        )["refs"]
+                        all_refs.extend(refs)
+                else:
+                    url_ref = URLReference(
+                        url,
+                        format="raw",
+                        label=filename or url,
+                        inject=inject,
+                        depth=depth,
+                    )
+
+                    wrap_format = wrap or "md"
+                    wrapped_content = wrap_text(
+                        url_ref.output, wrap_format, filename or url
+                    )
+
+                    class SimpleReference:
+                        def __init__(self, output: str):
+                            self.output = output
+
+                    all_refs.append(SimpleReference(wrapped_content))
+            else:
+                # handle git targets and local files
+                tgt = parse_git_target(spec)
+                if tgt:
+                    repo_dir = ensure_repo(tgt)
+                    paths = (
+                        [repo_dir]
+                        if not tgt.path
+                        else expand_git_paths(repo_dir, tgt.path)
+                    )
+                else:
+                    base = "" if os.path.isabs(spec) else base_dir
+                    paths = expand_git_paths(base, spec)
+
+                for full in paths:
+                    if not os.path.exists(full):
+                        raise FileNotFoundError(
+                            f"Component '{name}' path not found: {full}"
+                        )
+                    refs = create_file_references(
+                        [full],
+                        ignore_paths=None,
+                        format="md",
+                        label="relative",
+                        inject=inject,
+                        depth=depth,
+                    )["refs"]
+                    all_refs.extend(refs)
 
         attachment_lines = [f'<attachment label="{name}">']
         for idx, ref in enumerate(all_refs):
