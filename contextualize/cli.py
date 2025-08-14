@@ -326,8 +326,31 @@ def payload_cmd(ctx, manifest_path, inject):
 @click.option(
     "--inject", is_flag=True, help="Process {cx::...} content injection patterns"
 )
+@click.option(
+    "--link-depth",
+    type=int,
+    default=0,
+    help="Follow Markdown links this many levels deep.",
+)
+@click.option(
+    "--link-scope",
+    type=click.Choice(["first", "all"], case_sensitive=False),
+    default="first",
+    help="Resolve links starting from only the first input ('first') or all inputs ('all').",
+)
 @click.pass_context
-def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone, inject):
+def cat_cmd(
+    ctx,
+    paths,
+    ignore,
+    format,
+    label,
+    git_pull,
+    git_reclone,
+    inject,
+    link_depth,
+    link_scope,
+):
     """
     Prepare and concatenate file references (raw).
     """
@@ -338,35 +361,63 @@ def cat_cmd(ctx, paths, ignore, format, label, git_pull, git_reclone, inject):
     from pathlib import Path
 
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
+    from .mdlinks import add_markdown_link_refs
     from .reference import URLReference, concat_refs, create_file_references
 
     def add_file_refs(paths_list):
         """Helper to add file references for a list of paths"""
-        file_refs = create_file_references(paths_list, ignore, format, label, inject=inject, depth=5)["refs"]
+        file_refs = create_file_references(
+            paths_list, ignore, format, label, inject=inject, depth=5
+        )["refs"]
         refs.extend(file_refs)
 
     refs = []
     for p in paths:
         if p.startswith("http://") or p.startswith("https://"):
             tgt = parse_git_target(p)
-            if tgt and (tgt.path is not None or tgt.repo_url.endswith(".git") or tgt.repo_url != p):
+            if tgt and (
+                tgt.path is not None
+                or tgt.repo_url.endswith(".git")
+                or tgt.repo_url != p
+            ):
                 repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
-                expanded_paths = [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)] if tgt.path else [str(Path(repo_dir))]
+                expanded_paths = (
+                    [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)]
+                    if tgt.path
+                    else [str(Path(repo_dir))]
+                )
                 for path in expanded_paths:
                     add_file_refs([path])
             else:
-                refs.append(URLReference(p, format=format, label=label, inject=inject, depth=5))
+                refs.append(
+                    URLReference(p, format=format, label=label, inject=inject, depth=5)
+                )
         elif os.path.exists(p):
             add_file_refs([p])
         else:
             tgt = parse_git_target(p)
             if tgt:
                 repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
-                expanded_paths = [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)] if tgt.path else [str(Path(repo_dir))]
+                expanded_paths = (
+                    [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)]
+                    if tgt.path
+                    else [str(Path(repo_dir))]
+                )
                 for path in expanded_paths:
                     add_file_refs([path])
             else:
                 add_file_refs([p])
+
+    # resolve markdown links
+    if link_depth > 0:
+        refs[:] = add_markdown_link_refs(
+            refs,
+            link_depth=link_depth,
+            scope=link_scope,
+            format_=format,
+            label=label,
+            inject=inject,
+        )
 
     return concat_refs(refs)
 
