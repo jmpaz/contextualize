@@ -1,8 +1,9 @@
 import os
 import re
-from typing import Iterable, List, Optional, Set, Tuple
+from collections import defaultdict
 
 from .reference import FileReference, _is_utf8_file, create_file_references
+from .tokenize import count_tokens
 
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s#]+)\)")  # ignore anchors/fragments
 
@@ -19,7 +20,7 @@ def _strip_fenced_code(md: str) -> str:
     return "\n".join(out)
 
 
-def _extract_local_hrefs(md: str) -> List[str]:
+def _extract_local_hrefs(md):
     """Return hrefs that look local (no scheme/mailto), as written."""
     md = _strip_fenced_code(md)
     hrefs = []
@@ -34,12 +35,9 @@ def _extract_local_hrefs(md: str) -> List[str]:
     return hrefs
 
 
-def _resolve_to_path(href: str, base_dir: str) -> Optional[str]:
-    """
-    Resolve a local href to a UTF-8 file path. Prefer '<href>.md' in same dir,
-    then '<href>' verbatim. Supports absolute/relative hrefs.
-    """
-    candidates: List[str] = []
+def _resolve_to_path(href, base_dir):
+    """Resolve a local href to a UTF-8 file path."""
+    candidates = []
     if os.path.isabs(href):
         candidates.extend([href, href + ".md"])
     else:
@@ -56,15 +54,14 @@ def _resolve_to_path(href: str, base_dir: str) -> Optional[str]:
     return None
 
 
-def _collect_linked_paths(
-    seed_path: str, seed_content: str, max_depth: int, seen: Set[str]
-) -> List[str]:
+def _collect_linked_paths(seed_path, seed_content, max_depth, seen):
     """
     BFS from seed file following Markdown links up to max_depth.
     'seen' prevents re-crawl across all depths/seeds.
     """
-    queue: List[Tuple[str, str, int]] = [(seed_path, seed_content, 0)]
-    found: List[str] = []
+    queue = [(seed_path, seed_content, 0)]
+    found = []
+    trace_items = []
 
     while queue:
         path, content, depth = queue.pop(0)
@@ -78,35 +75,166 @@ def _collect_linked_paths(
                 continue
             seen.add(tgt)
             found.append(tgt)
+            trace_items.append((tgt, path, depth + 1))
             try:
                 with open(tgt, "r", encoding="utf-8") as fh:
                     queue.append((tgt, fh.read(), depth + 1))
             except Exception:
                 pass
 
-    return found
+    return found, trace_items
+
+
+def format_trace_output(
+    input_refs, trace_items, skipped_paths=None, skip_impact=None, common_prefix=None
+):
+    if not input_refs and not trace_items:
+        return ""
+
+    all_paths = [r.path for r in input_refs] + [item[0] for item in trace_items]
+    if skipped_paths:
+        all_paths.extend(skipped_paths)
+
+    common_prefix = common_prefix or os.path.dirname(
+        os.path.commonpath(all_paths) if all_paths else ""
+    )
+
+    def format_path(path, ref=None, source=None):
+        rel_path = (
+            path[len(common_prefix) :].lstrip(os.sep)
+            if common_prefix and path.startswith(common_prefix)
+            else path
+        )
+
+        result = rel_path
+        if ref and hasattr(ref, "file_content"):
+            token_info = count_tokens(ref.file_content)
+            if not source:
+                result = f"{rel_path} ({token_info['count']} tokens)"
+            else:
+                result = f"{rel_path} ({token_info['count']})"
+
+        if source:
+            source_name = os.path.basename(source)
+            result += f" ← {source_name}"
+
+        return result
+
+    lines = ["Inputs:"]
+    for ref in input_refs:
+        lines.append(f"  {format_path(ref.path, ref)}")
+
+    by_depth = defaultdict(list)
+    for tgt, src, depth in trace_items:
+        by_depth[depth].append((tgt, src))
+
+    for depth in sorted(by_depth.keys()):
+        lines.append(f"\nDiscovered (depth {depth}):")
+        for tgt, src in sorted(by_depth[depth]):
+            lines.append(f"  {format_path(tgt, FileReference(tgt), src)}")
+
+    if skipped_paths:
+        lines.append("\nSkipped:")
+        for path in sorted(skipped_paths):
+            if skip_impact and path in skip_impact:
+                impact = skip_impact[path]
+                file_tokens = impact["file_tokens"]
+                downstream_files = impact["downstream_files"]
+                downstream_tokens = impact["downstream_tokens"]
+
+                if downstream_files > 0:
+                    lines.append(
+                        f"  {format_path(path)} → blocked {downstream_files} files ({downstream_tokens} tokens)"
+                    )
+                else:
+                    lines.append(f"  {format_path(path)} ({file_tokens} tokens)")
+            else:
+                lines.append(f"  {format_path(path)}")
+
+    return "\n".join(lines)
+
+
+def count_downstream(path, content, depth, seen_set=None):
+    """Count how many files would be discovered downstream from a skipped file."""
+    if seen_set is None:
+        seen_set = set([os.path.abspath(path)])
+    else:
+        seen_set = seen_set.copy()
+
+    queue = [(path, content, 0)]
+    found_files = []
+    total_tokens = 0
+
+    while queue:
+        current_path, current_content, current_depth = queue.pop(0)
+        if current_depth >= depth:
+            continue
+
+        base_dir = os.path.dirname(current_path)
+        for href in _extract_local_hrefs(current_content):
+            target = _resolve_to_path(href, base_dir)
+            if not target or target in seen_set:
+                continue
+
+            seen_set.add(target)
+            found_files.append(target)
+
+            try:
+                with open(target, "r", encoding="utf-8") as fh:
+                    content = fh.read()
+                    token_info = count_tokens(content)
+                    total_tokens += token_info["count"]
+                    queue.append((target, content, current_depth + 1))
+            except Exception:
+                pass
+
+    return len(found_files), total_tokens
 
 
 def add_markdown_link_refs(
-    refs: List[FileReference],
+    refs,
     *,
-    link_depth: int,
-    scope: str = "all",
-    format_: str = "md",
-    label: str = "relative",
-    inject: bool = False,
-) -> List:
+    link_depth,
+    scope="all",
+    format_="md",
+    label="relative",
+    inject=False,
+    link_skip=None,
+):
     """
     Discover Markdown-linked files and append them as additional refs.
     - link_depth: max hop count (0 = off)
     - scope: follow links from only the first file ("first") or from all initial files ("all")
     """
     if link_depth <= 0 or not refs:
-        return refs
+        return refs, []
 
-    import os
+    seen = set()
 
-    seen: Set[str] = set()
+    skipped_paths = []
+    skip_impact = {}
+    if link_skip:
+        for path in link_skip:
+            abs_path = os.path.abspath(path)
+            if os.path.exists(abs_path):
+                try:
+                    with open(abs_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                        token_info = count_tokens(content)
+                        downstream_count, downstream_tokens = count_downstream(
+                            abs_path, content, link_depth, seen
+                        )
+                        skip_impact[abs_path] = {
+                            "file_tokens": token_info["count"],
+                            "downstream_files": downstream_count,
+                            "downstream_tokens": downstream_tokens,
+                        }
+                except Exception:
+                    pass
+
+                seen.add(abs_path)
+                skipped_paths.append(abs_path)
+
     for r in refs:
         if isinstance(r, FileReference):
             seen.add(os.path.abspath(r.path))
@@ -119,14 +247,18 @@ def add_markdown_link_refs(
         seeds = [s for s in seeds if s is not None]
 
     # collect new paths
-    to_add: List[str] = []
+    to_add = []
+    trace_items = []
+
     for seed in seeds:
-        to_add.extend(
-            _collect_linked_paths(seed.path, seed.file_content, link_depth, seen)
+        paths, new_traces = _collect_linked_paths(
+            seed.path, seed.file_content, link_depth, seen
         )
+        to_add.extend(paths)
+        trace_items.extend(new_traces)
 
     if not to_add:
-        return refs
+        return refs, trace_items, skip_impact
 
     # materialize new paths as normal file references
     more = create_file_references(
@@ -138,5 +270,4 @@ def add_markdown_link_refs(
         depth=link_depth,
     )["refs"]
     refs.extend(more)
-    return refs
-
+    return refs, trace_items, skip_impact

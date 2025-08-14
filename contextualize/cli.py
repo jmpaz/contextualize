@@ -230,18 +230,28 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 
     write_file = ctx.obj["write_file"]
     copy_flag = ctx.obj["copy"]
+    trace_output = ctx.obj.get("trace_output")
 
     if write_file:
         with open(write_file, "w", encoding="utf-8") as f:
             f.write(final_output)
+        if trace_output:
+            click.echo(trace_output)
+            click.echo("\n-----\n")
         click.echo(f"Wrote {token_count} tokens ({token_method}) to {write_file}")
     elif copy_flag:
         try:
             copy(final_output)
+            if trace_output:
+                click.echo(trace_output)
+                click.echo("\n-----\n")
             click.echo(f"Copied {token_count} tokens ({token_method}) to clipboard.")
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)
     else:
+        if trace_output:
+            click.echo(trace_output)
+            click.echo("\n-----\n")
         click.echo(final_output)
 
 
@@ -333,9 +343,19 @@ def payload_cmd(ctx, manifest_path, inject):
     help="Follow Markdown links this many levels deep.",
 )
 @click.option(
+    "--link-skip",
+    multiple=True,
+    help="Paths to skip when resolving Markdown links. Can be specified multiple times.",
+)
+@click.option(
+    "--trace",
+    is_flag=True,
+    help="Show paths crawled during execution.",
+)
+@click.option(
     "--link-scope",
     type=click.Choice(["first", "all"], case_sensitive=False),
-    default="first",
+    default="all",
     help="Resolve links starting from only the first input ('first') or all inputs ('all').",
 )
 @click.pass_context
@@ -350,6 +370,8 @@ def cat_cmd(
     inject,
     link_depth,
     link_scope,
+    link_skip,
+    trace,
 ):
     """
     Prepare and concatenate file references (raw).
@@ -361,8 +383,13 @@ def cat_cmd(
     from pathlib import Path
 
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
-    from .mdlinks import add_markdown_link_refs
-    from .reference import URLReference, concat_refs, create_file_references
+    from .mdlinks import add_markdown_link_refs, format_trace_output
+    from .reference import (
+        FileReference,
+        URLReference,
+        concat_refs,
+        create_file_references,
+    )
 
     def add_file_refs(paths_list):
         """Helper to add file references for a list of paths"""
@@ -408,18 +435,33 @@ def cat_cmd(
             else:
                 add_file_refs([p])
 
+    skipped_paths = [os.path.abspath(p) for p in link_skip] if link_skip else []
+    trace_items = []
+    skip_impact = {}
+
+    input_refs = [r for r in refs if isinstance(r, FileReference)]
+
     # resolve markdown links
     if link_depth > 0:
-        refs[:] = add_markdown_link_refs(
+        refs[:], trace_items, skip_impact = add_markdown_link_refs(
             refs,
             link_depth=link_depth,
             scope=link_scope,
             format_=format,
             label=label,
             inject=inject,
+            link_skip=link_skip,
         )
 
-    return concat_refs(refs)
+    result = concat_refs(refs)
+
+    if trace:
+        trace_output = format_trace_output(
+            input_refs, trace_items, skipped_paths, skip_impact
+        )
+        ctx.obj["trace_output"] = trace_output
+
+    return result
 
 
 @cli.command("fetch")
