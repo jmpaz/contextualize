@@ -99,43 +99,47 @@ def format_trace_output(
         os.path.commonpath(all_paths) if all_paths else ""
     )
 
-    def format_path(path, ref=None, source=None):
-        rel_path = (
+    formatted_inputs = []
+    formatted_discovered = {}
+    formatted_skipped = []
+
+    def get_rel_path(path):
+        return (
             path[len(common_prefix) :].lstrip(os.sep)
             if common_prefix and path.startswith(common_prefix)
             else path
         )
 
-        result = rel_path
-        if ref and hasattr(ref, "file_content"):
-            token_info = count_tokens(ref.file_content)
-            if not source:
-                result = f"{rel_path} ({token_info['count']} tokens)"
-            else:
-                result = f"{rel_path} ({token_info['count']})"
-
-        if source:
-            source_name = os.path.basename(source)
-            result += f" ← {source_name}"
-
-        return result
-
-    lines = ["Inputs:"]
     for ref in input_refs:
-        lines.append(f"  {format_path(ref.path, ref)}")
+        rel_path = get_rel_path(ref.path)
+        token_count = (
+            count_tokens(ref.file_content)["count"]
+            if hasattr(ref, "file_content")
+            else 0
+        )
+        formatted_inputs.append((rel_path, token_count, None))
 
     by_depth = defaultdict(list)
     for tgt, src, depth in trace_items:
         by_depth[depth].append((tgt, src))
 
     for depth in sorted(by_depth.keys()):
-        lines.append(f"\nDiscovered (depth {depth}):")
+        depth_items = []
         for tgt, src in sorted(by_depth[depth]):
-            lines.append(f"  {format_path(tgt, FileReference(tgt), src)}")
+            ref = FileReference(tgt)
+            rel_path = get_rel_path(tgt)
+            token_count = (
+                count_tokens(ref.file_content)["count"]
+                if hasattr(ref, "file_content")
+                else 0
+            )
+            source_name = os.path.basename(src)
+            depth_items.append((rel_path, token_count, source_name))
+        formatted_discovered[depth] = depth_items
 
     if skipped_paths:
-        lines.append("\nSkipped:")
         for path in sorted(skipped_paths):
+            rel_path = get_rel_path(path)
             if skip_impact and path in skip_impact:
                 impact = skip_impact[path]
                 file_tokens = impact["file_tokens"]
@@ -143,13 +147,46 @@ def format_trace_output(
                 downstream_tokens = impact["downstream_tokens"]
 
                 if downstream_files > 0:
-                    lines.append(
-                        f"  {format_path(path)} → blocked {downstream_files} files ({downstream_tokens} tokens)"
+                    formatted_skipped.append(
+                        (rel_path, file_tokens, downstream_files, downstream_tokens)
                     )
                 else:
-                    lines.append(f"  {format_path(path)} ({file_tokens} tokens)")
+                    formatted_skipped.append((rel_path, file_tokens, 0, 0))
             else:
-                lines.append(f"  {format_path(path)}")
+                formatted_skipped.append((rel_path, 0, 0, 0))
+
+    lines = ["Inputs:"]
+    for rel_path, token_count, _ in formatted_inputs:
+        lines.append(f"  {rel_path} ({token_count} tokens)")
+
+    for depth in sorted(formatted_discovered.keys()):
+        lines.append(f"\nDiscovered (depth {depth}):")
+
+        path_token_widths = [
+            len(f"{p} ({t})") for p, t, _ in formatted_discovered[depth]
+        ]
+        max_path_token_width = max(path_token_widths, default=0)
+
+        for rel_path, token_count, source_name in formatted_discovered[depth]:
+            path_with_tokens = f"{rel_path} ({token_count})"
+            padding = max_path_token_width - len(path_with_tokens)
+
+            lines.append(f"  {path_with_tokens}{' ' * padding} ← {source_name}")
+
+    if formatted_skipped:
+        lines.append("\nSkipped:")
+        for (
+            rel_path,
+            file_tokens,
+            downstream_files,
+            downstream_tokens,
+        ) in formatted_skipped:
+            if downstream_files > 0:
+                lines.append(
+                    f"  {rel_path} → {downstream_files} additional files ({downstream_tokens} tokens)"
+                )
+            else:
+                lines.append(f"  {rel_path} ({file_tokens} tokens)")
 
     return "\n".join(lines)
 
