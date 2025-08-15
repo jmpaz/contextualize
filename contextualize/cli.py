@@ -291,23 +291,30 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         )
 
     if manifest_path:
-        payload_content, input_refs, trace_items, base_dir = render_from_yaml_with_mdlinks(
-            manifest_path, inject=inject
+        payload_content, input_refs, trace_items, base_dir = (
+            render_from_yaml_with_mdlinks(manifest_path, inject=inject)
         )
         if trace:
+            stdin_data = ctx.obj.get("stdin_data", "")
             trace_output = format_trace_output(
-                input_refs, trace_items, skipped_paths=None, skip_impact=None, common_prefix=base_dir
+                input_refs,
+                trace_items,
+                skipped_paths=None,
+                skip_impact=None,
+                common_prefix=base_dir,
+                stdin_data=stdin_data if stdin_data else None,
             )
             ctx.obj["trace_output"] = trace_output
         return payload_content
 
     # only use stdin when no manifest file is provided
     stdin_data = ctx.obj.get("stdin_data", "")
-    if not stdin_data:  # no input file and no piped data → show help
+    if not stdin_data:
         click.echo(ctx.get_help())
         ctx.exit(1)
 
-    # clear stdin_data since we're consuming it here - the YAML manifest shouldn't be positioned with the output
+    # preserve stdin for trace output
+    original_stdin = stdin_data
     ctx.obj["stdin_data"] = ""
 
     raw = stdin_data
@@ -321,7 +328,6 @@ def payload_cmd(ctx, manifest_path, inject, trace):
             "Manifest must be a mapping with 'config' and 'components'"
         )
 
-    # assemble and return the payload string with mdlinks
     try:
         payload_content, input_refs, trace_items, base_dir = (
             assemble_payload_with_mdlinks_from_data(data, os.getcwd(), inject=inject)
@@ -331,7 +337,12 @@ def payload_cmd(ctx, manifest_path, inject, trace):
 
     if trace:
         trace_output = format_trace_output(
-            input_refs, trace_items, skipped_paths=None, skip_impact=None, common_prefix=base_dir
+            input_refs,
+            trace_items,
+            skipped_paths=None,
+            skip_impact=None,
+            common_prefix=base_dir,
+            stdin_data=None,
         )
         ctx.obj["trace_output"] = trace_output
 
@@ -473,8 +484,14 @@ def cat_cmd(
     result = concat_refs(refs)
 
     if trace:
+        stdin_data = ctx.obj.get("stdin_data", "")
         trace_output = format_trace_output(
-            input_refs, trace_items, skipped_paths, skip_impact
+            input_refs,
+            trace_items,
+            skipped_paths,
+            skip_impact,
+            common_prefix=None,
+            stdin_data=stdin_data if stdin_data else None,
         )
         ctx.obj["trace_output"] = trace_output
 

@@ -86,9 +86,14 @@ def _collect_linked_paths(seed_path, seed_content, max_depth, seen):
 
 
 def format_trace_output(
-    input_refs, trace_items, skipped_paths=None, skip_impact=None, common_prefix=None
+    input_refs,
+    trace_items,
+    skipped_paths=None,
+    skip_impact=None,
+    common_prefix=None,
+    stdin_data=None,
 ):
-    if not input_refs and not trace_items:
+    if not input_refs and not trace_items and not stdin_data:
         return ""
 
     all_paths = [r.path for r in input_refs] + [item[0] for item in trace_items]
@@ -156,6 +161,11 @@ def format_trace_output(
                 formatted_skipped.append((rel_path, 0, 0, 0))
 
     lines = ["Inputs:"]
+
+    if stdin_data:
+        stdin_token_count = count_tokens(stdin_data)["count"]
+        lines.append(f"  stdin ({stdin_token_count} tokens)")
+
     for rel_path, token_count, _ in formatted_inputs:
         lines.append(f"  {rel_path} ({token_count} tokens)")
 
