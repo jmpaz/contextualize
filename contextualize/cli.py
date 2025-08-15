@@ -264,8 +264,13 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 @click.option(
     "--inject", is_flag=True, help="Process {cx::...} content injection patterns"
 )
+@click.option(
+    "--trace",
+    is_flag=True,
+    help="Show paths crawled during Markdown link resolution.",
+)
 @click.pass_context
-def payload_cmd(ctx, manifest_path, inject):
+def payload_cmd(ctx, manifest_path, inject, trace):
     """
     Render a context payload from a provided YAML manifest.
     If no path is given and stdin is piped, read the manifest from stdin.
@@ -275,14 +280,25 @@ def payload_cmd(ctx, manifest_path, inject):
 
         import yaml
 
-        from .payload import assemble_payload, render_from_yaml
+        from .mdlinks import format_trace_output
+        from .payload import (
+            assemble_payload_with_mdlinks_from_data,
+            render_from_yaml_with_mdlinks,
+        )
     except ImportError:
         raise click.ClickException(
             "You need `pyyaml` installed (pip install contextualize[payload])"
         )
 
     if manifest_path:
-        payload_content = render_from_yaml(manifest_path, inject=inject)
+        payload_content, input_refs, trace_items, base_dir = render_from_yaml_with_mdlinks(
+            manifest_path, inject=inject
+        )
+        if trace:
+            trace_output = format_trace_output(
+                input_refs, trace_items, skipped_paths=None, skip_impact=None, common_prefix=base_dir
+            )
+            ctx.obj["trace_output"] = trace_output
         return payload_content
 
     # only use stdin when no manifest file is provided
@@ -305,19 +321,20 @@ def payload_cmd(ctx, manifest_path, inject):
             "Manifest must be a mapping with 'config' and 'components'"
         )
 
-    # determine base directory
-    cfg = data.get("config", {})
-    if "root" in cfg:
-        base_dir = os.path.expanduser(cfg.get("root") or "~")
-    else:
-        base_dir = os.getcwd()
+    # assemble and return the payload string with mdlinks
+    try:
+        payload_content, input_refs, trace_items, base_dir = (
+            assemble_payload_with_mdlinks_from_data(data, os.getcwd(), inject=inject)
+        )
+    except Exception as e:
+        raise click.ClickException(str(e))
 
-    comps = data.get("components")
-    if not isinstance(comps, list):
-        raise click.ClickException("'components' must be a list")
+    if trace:
+        trace_output = format_trace_output(
+            input_refs, trace_items, skipped_paths=None, skip_impact=None, common_prefix=base_dir
+        )
+        ctx.obj["trace_output"] = trace_output
 
-    # assemble and return the payload string
-    payload_content = assemble_payload(comps, base_dir, inject=inject)
     return payload_content
 
 

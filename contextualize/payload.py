@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 import yaml
 
 from .gitcache import ensure_repo, expand_git_paths, parse_git_target
+from .mdlinks import add_markdown_link_refs
 from .reference import URLReference, create_file_references
 from .utils import wrap_text
 
@@ -72,6 +73,7 @@ def assemble_payload(
 
         # collect FileReference objects (recursing into directories)
         all_refs = []
+        input_file_refs = []
         for spec in files:
             spec = os.path.expanduser(spec)
 
@@ -108,6 +110,7 @@ def assemble_payload(
                             depth=depth,
                         )["refs"]
                         all_refs.extend(refs)
+                        input_file_refs.extend(refs)
                 else:
                     url_ref = URLReference(
                         url,
@@ -155,6 +158,7 @@ def assemble_payload(
                         depth=depth,
                     )["refs"]
                     all_refs.extend(refs)
+                    input_file_refs.extend(refs)
 
         attachment_lines = [f'<attachment label="{name}">']
         for idx, ref in enumerate(all_refs):
@@ -180,6 +184,183 @@ def assemble_payload(
         parts.append("\n".join(block_lines))
 
     return "\n\n".join(parts)
+
+
+def assemble_payload_with_mdlinks(
+    components: List[Dict[str, Any]],
+    base_dir: str,
+    *,
+    inject: bool = False,
+    depth: int = 5,
+    link_depth_default: int = 0,
+    link_scope_default: str = "all",
+):
+    """
+    Assemble payload like assemble_payload, but also resolve Markdown links per component.
+    Returns a tuple of (payload_text, input_refs, trace_items, base_dir).
+    - link_depth_default/link_scope_default can be overridden per component via
+      keys 'link-depth' and 'link-scope'.
+    """
+    parts: List[str] = []
+    all_input_refs = []
+    all_trace_items = []
+
+    for comp in components:
+        wrap_mode = comp.get("wrap")
+
+        # text-only component passthrough
+        if "text" in comp:
+            text = comp["text"].rstrip()
+            if wrap_mode:
+                if wrap_mode.lower() == "md":
+                    text = "```\n" + text + "\n```"
+                else:
+                    text = f"<{wrap_mode}>\n{text}\n</{wrap_mode}>"
+            parts.append(text)
+            continue
+
+        name = comp.get("name")
+        files = comp.get("files")
+        if not name or not files:
+            raise ValueError(
+                f"Component must have either 'text' or both 'name' & 'files': {comp}"
+            )
+
+        prefix = comp.get("prefix", "").rstrip()
+        suffix = comp.get("suffix", "").lstrip()
+
+        # collect base FileReferences first
+        base_refs = []
+        for spec in files:
+            spec = os.path.expanduser(spec)
+
+            if spec.startswith("http://") or spec.startswith("https://"):
+                opts = _parse_url_spec(spec)
+                url = opts.get("target", spec)
+                filename = opts.get("filename")
+                wrap = opts.get("wrap")
+
+                tgt = parse_git_target(url)
+                if tgt and (
+                    tgt.path is not None
+                    or tgt.repo_url.endswith(".git")
+                    or tgt.repo_url != url
+                ):
+                    repo_dir = ensure_repo(tgt)
+                    paths = (
+                        [repo_dir]
+                        if not tgt.path
+                        else expand_git_paths(repo_dir, tgt.path)
+                    )
+                    for full in paths:
+                        if not os.path.exists(full):
+                            raise FileNotFoundError(
+                                f"Component '{name}' path not found: {full}"
+                            )
+                        refs = create_file_references(
+                            [full],
+                            ignore_paths=None,
+                            format="md",
+                            label="relative",
+                            inject=inject,
+                            depth=depth,
+                        )["refs"]
+                        base_refs.extend(refs)
+                else:
+                    url_ref = URLReference(
+                        url,
+                        format="raw",
+                        label=filename or url,
+                        inject=inject,
+                        depth=depth,
+                    )
+
+                    wrap_format = wrap or "md"
+                    wrapped_content = wrap_text(
+                        url_ref.output, wrap_format, filename or url
+                    )
+
+                    class SimpleReference:
+                        def __init__(self, output: str):
+                            self.output = output
+
+                    base_refs.append(SimpleReference(wrapped_content))
+            else:
+                tgt = parse_git_target(spec)
+                if tgt:
+                    repo_dir = ensure_repo(tgt)
+                    paths = (
+                        [repo_dir]
+                        if not tgt.path
+                        else expand_git_paths(repo_dir, tgt.path)
+                    )
+                else:
+                    base = "" if os.path.isabs(spec) else base_dir
+                    paths = expand_git_paths(base, spec)
+
+                for full in paths:
+                    if not os.path.exists(full):
+                        raise FileNotFoundError(
+                            f"Component '{name}' path not found: {full}"
+                        )
+                    refs = create_file_references(
+                        [full],
+                        ignore_paths=None,
+                        format="md",
+                        label="relative",
+                        inject=inject,
+                        depth=depth,
+                    )["refs"]
+                    base_refs.extend(refs)
+
+        # link resolution
+        comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
+        comp_link_scope = (comp.get("link-scope", link_scope_default) or "all").lower()
+
+        refs_for_attachment = list(base_refs)
+        # capture seeds for overall trace (only file refs)
+        input_refs = [r for r in base_refs if hasattr(r, "path")]
+        all_input_refs.extend(input_refs)
+
+        if comp_link_depth > 0:
+            refs_for_attachment, comp_trace_items, _skip_impact = (
+                add_markdown_link_refs(
+                    refs_for_attachment,
+                    link_depth=comp_link_depth,
+                    scope=comp_link_scope,
+                    format_="md",
+                    label="relative",
+                    inject=inject,
+                    link_skip=None,
+                )
+            )
+            all_trace_items.extend(comp_trace_items)
+
+        # build attachment block
+        attachment_lines = [f'<attachment label="{name}">']
+        for idx, ref in enumerate(refs_for_attachment):
+            attachment_lines.append(ref.output)
+            if idx < len(refs_for_attachment) - 1:
+                attachment_lines.append("")
+        attachment_lines.append("</attachment>")
+        inner = "\n".join(attachment_lines)
+
+        if wrap_mode:
+            if wrap_mode.lower() == "md":
+                inner = "```\n" + inner + "\n```"
+            else:
+                inner = f"<{wrap_mode}>\n{inner}\n</{wrap_mode}>"
+
+        block_lines: List[str] = []
+        if prefix:
+            block_lines.append(prefix)
+        block_lines.append(inner)
+        if suffix:
+            block_lines.append(suffix)
+
+        parts.append("\n".join(block_lines))
+
+    return "\n\n".join(parts), all_input_refs, all_trace_items, base_dir
 
 
 def render_from_yaml(
@@ -215,3 +396,84 @@ def render_from_yaml(
         raise ValueError("'components' must be a list")
 
     return assemble_payload(comps, base_dir, inject=inject, depth=depth)
+
+
+def render_from_yaml_with_mdlinks(
+    manifest_path: str,
+    *,
+    inject: bool = False,
+    depth: int = 5,
+):
+    """
+    Load YAML and assemble payload with mdlinks.
+    Respects top-level config keys:
+      - root: base directory for relative paths
+      - link-depth: default depth for Markdown link traversal
+      - link-scope: "first" or "all" (default: all)
+    Returns (payload_text, input_refs, trace_items, base_dir).
+    """
+    with open(manifest_path, "r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+
+    if not isinstance(data, dict):
+        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
+
+    cfg = data.get("config", {})
+    if "root" in cfg:
+        raw = cfg.get("root") or "~"
+        base_dir = os.path.expanduser(raw)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(manifest_path))
+
+    comps = data.get("components")
+    if not isinstance(comps, list):
+        raise ValueError("'components' must be a list")
+
+    link_depth_default = int(cfg.get("link-depth", 0) or 0)
+    link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
+
+    return assemble_payload_with_mdlinks(
+        comps,
+        base_dir,
+        inject=inject,
+        depth=depth,
+        link_depth_default=link_depth_default,
+        link_scope_default=link_scope_default,
+    )
+
+
+def assemble_payload_with_mdlinks_from_data(
+    data: Dict[str, Any],
+    manifest_cwd: str,
+    *,
+    inject: bool = False,
+    depth: int = 5,
+):
+    """
+    Assemble from an already-parsed YAML mapping (used for stdin case).
+    Returns (payload_text, input_refs, trace_items, base_dir).
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
+
+    cfg = data.get("config", {})
+    if "root" in cfg:
+        base_dir = os.path.expanduser(cfg.get("root") or "~")
+    else:
+        base_dir = manifest_cwd
+
+    comps = data.get("components")
+    if not isinstance(comps, list):
+        raise ValueError("'components' must be a list")
+
+    link_depth_default = int(cfg.get("link-depth", 0) or 0)
+    link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
+
+    return assemble_payload_with_mdlinks(
+        comps,
+        base_dir,
+        inject=inject,
+        depth=depth,
+        link_depth_default=link_depth_default,
+        link_scope_default=link_scope_default,
+    )
