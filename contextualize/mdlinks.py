@@ -108,6 +108,10 @@ def format_trace_output(
     formatted_discovered = {}
     formatted_skipped = []
 
+    seen_files = set()
+    for ref in input_refs:
+        seen_files.add(os.path.abspath(ref.path))
+
     def get_rel_path(path):
         return (
             path[len(common_prefix) :].lstrip(os.sep)
@@ -131,13 +135,22 @@ def format_trace_output(
     for depth in sorted(by_depth.keys()):
         depth_items = []
         for tgt, src in sorted(by_depth[depth]):
-            ref = FileReference(tgt)
+            abs_tgt = os.path.abspath(tgt)
             rel_path = get_rel_path(tgt)
-            token_count = (
-                count_tokens(ref.file_content)["count"]
-                if hasattr(ref, "file_content")
-                else 0
-            )
+
+            is_duplicate = abs_tgt in seen_files
+            if not is_duplicate:
+                # only compute tokens for new files
+                ref = FileReference(tgt)
+                token_count = (
+                    count_tokens(ref.file_content)["count"]
+                    if hasattr(ref, "file_content")
+                    else 0
+                )
+                seen_files.add(abs_tgt)
+            else:
+                token_count = None
+
             source_name = os.path.basename(src)
             depth_items.append((rel_path, token_count, source_name))
         formatted_discovered[depth] = depth_items
@@ -172,13 +185,19 @@ def format_trace_output(
     for depth in sorted(formatted_discovered.keys()):
         lines.append(f"\nDiscovered (depth {depth}):")
 
-        path_token_widths = [
-            len(f"{p} ({t})") for p, t, _ in formatted_discovered[depth]
-        ]
+        path_token_widths = []
+        for p, t, _ in formatted_discovered[depth]:
+            if t is None:
+                path_token_widths.append(len(f"{p} (✓)"))
+            else:
+                path_token_widths.append(len(f"{p} ({t})"))
         max_path_token_width = max(path_token_widths, default=0)
 
         for rel_path, token_count, source_name in formatted_discovered[depth]:
-            path_with_tokens = f"{rel_path} ({token_count})"
+            if token_count is None:
+                path_with_tokens = f"{rel_path} (✓)"
+            else:
+                path_with_tokens = f"{rel_path} ({token_count})"
             padding = max_path_token_width - len(path_with_tokens)
 
             lines.append(f"  {path_with_tokens}{' ' * padding} ← {source_name}")
