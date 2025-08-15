@@ -249,10 +249,10 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)
     else:
-        if trace_output:
-            click.echo(trace_output)
-            click.echo("\n-----\n")
         click.echo(final_output)
+        if trace_output:
+            click.echo("\n-----\n")
+            click.echo(trace_output)
 
 
 @cli.command("payload")
