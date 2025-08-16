@@ -27,8 +27,17 @@ def preprocess_args():
     subcommands = {"payload", "cat", "fetch", "map", "shell"}
 
     # options that should be moved / which take values
-    forwardable = {"--prompt", "-p", "--wrap", "-w", "--copy", "-c", "--write-file"}
-    value_options = {"--prompt", "-p", "--wrap", "--write-file"}
+    forwardable = {
+        "--prompt",
+        "-p",
+        "--wrap",
+        "-w",
+        "--copy",
+        "-c",
+        "--write-file",
+        "--copy-segments",
+    }
+    value_options = {"--prompt", "-p", "--wrap", "--write-file", "--copy-segments"}
 
     # find subcommand position
     subcommand_idx = None
@@ -109,6 +118,11 @@ preprocess_args()
     help="Copy output to clipboard instead of printing to console. Prints labeled token count.",
 )
 @click.option(
+    "--copy-segments",
+    type=int,
+    help="Copy output in segments with max tokens per segment. Mutually exclusive with --copy.",
+)
+@click.option(
     "--write-file",
     type=click.Path(),
     help="Optional output file path (overrides clipboard/console output).",
@@ -133,6 +147,7 @@ def cli(
     wrap_short,
     wrap_mode,
     copy,
+    copy_segments,
     write_file,
     output_position,
     append_flag,
@@ -145,9 +160,12 @@ def cli(
     ctx.obj["prompt"] = prompt
     ctx.obj["wrap_mode"] = "md" if wrap_short else wrap_mode
     ctx.obj["copy"] = copy
+    ctx.obj["copy_segments"] = copy_segments
     ctx.obj["write_file"] = write_file
     if append_flag and prepend_flag:
         raise click.BadParameter("use -a or -b, not both")
+    if copy and copy_segments:
+        raise click.BadParameter("--copy and --copy-segments are mutually exclusive")
 
     if append_flag:
         output_pos = "append"
@@ -230,6 +248,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 
     write_file = ctx.obj["write_file"]
     copy_flag = ctx.obj["copy"]
+    copy_segments = ctx.obj.get("copy_segments")
     trace_output = ctx.obj.get("trace_output")
 
     if write_file:
@@ -239,6 +258,46 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
             click.echo(trace_output)
             click.echo("\n-----\n")
         click.echo(f"Wrote {token_count} tokens ({token_method}) to {write_file}")
+    elif copy_segments:
+        from .utils import build_segment, segment_output, wait_for_enter
+
+        segments = segment_output(raw_text, copy_segments, ctx.obj.get("format", "md"))
+        if not segments:
+            click.echo("No content to copy.", err=True)
+            return
+
+        try:
+            for i, (segment_text, _) in enumerate(segments, 1):
+                final_segment = build_segment(
+                    segment_text,
+                    ctx.obj["wrap_mode"],
+                    prompts,
+                    ctx.obj["output_pos"],
+                    i,
+                    len(segments),
+                )
+
+                copy(final_segment)
+                tokens = count_tokens(final_segment, target="cl100k_base")["count"]
+
+                if i == 1:
+                    msg = f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard ({token_method})"
+                else:
+                    msg = f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard"
+
+                if i < len(segments):
+                    click.echo(msg + "...", nl=False)
+                    if not wait_for_enter():
+                        click.echo("\nCopying interrupted.", err=True)
+                        break
+                else:
+                    click.echo(msg + ".")
+            else:
+                if trace_output:
+                    click.echo("\n-----\n")
+                    click.echo(trace_output)
+        except Exception as e:
+            click.echo(f"Error copying to clipboard: {e}", err=True)
     elif copy_flag:
         try:
             copy(final_output)
@@ -275,6 +334,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     Render a context payload from a provided YAML manifest.
     If no path is given and stdin is piped, read the manifest from stdin.
     """
+    ctx.obj["format"] = "md"  # for segmentation
     try:
         import os
 
@@ -286,9 +346,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
             render_from_yaml_with_mdlinks,
         )
     except ImportError:
-        raise click.ClickException(
-            "You need `pyyaml` installed (pip install contextualize[payload])"
-        )
+        raise click.ClickException("pyyaml is required")
 
     if manifest_path:
         payload_content, input_refs, trace_items, base_dir = (
@@ -408,6 +466,8 @@ def cat_cmd(
         click.echo(ctx.get_help())
         ctx.exit()
 
+    ctx.obj["format"] = format  # for segmentation
+
     from pathlib import Path
 
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
@@ -511,6 +571,8 @@ def fetch_cmd(ctx, issue, properties, config):
         click.echo(ctx.get_help())
         ctx.exit()
 
+    ctx.obj["format"] = "md"  # fetch returns markdown
+
     from .external import InvalidTokenError, LinearClient
 
     config_data = read_config(config)
@@ -573,6 +635,8 @@ def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone):
         click.echo(ctx.get_help())
         ctx.exit()
 
+    ctx.obj["format"] = format  # for segmentation
+
     from pathlib import Path
 
     from contextualize.repomap import generate_repo_map_data
@@ -620,6 +684,7 @@ def shell_cmd(ctx, commands, format, capture_stderr):
     """
     Run arbitrary shell commands (returns raw combined output).
     """
+    ctx.obj["format"] = format  # for segmentation
     from .shell import create_command_references
 
     refs_data = create_command_references(

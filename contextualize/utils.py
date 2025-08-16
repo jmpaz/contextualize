@@ -38,7 +38,7 @@ def wrap_text(content: str, wrap_mode: str, filename: str | None = None) -> str:
 
         fence_len = longest + 2 if longest >= 3 else 3
         fence = "`" * fence_len
-        
+
         fence_header = fence + (filename if filename else "")
 
         return f"{fence_header}\n{content}\n{fence}"
@@ -59,3 +59,92 @@ def add_prompt_wrappers(content, prompts):
         return f"{prompts[0]}\n{content}"
     else:
         return f"{prompts[0]}\n{content}\n\n{prompts[1]}"
+
+
+def segment_output(text, max_tokens, format_hint):
+    """Split text into segments without breaking files."""
+    import re
+
+    from .tokenize import count_tokens
+
+    if format_hint == "xml":
+        files = re.findall(r"<file path='[^']*'>.*?</file>", text, re.DOTALL)
+        remaining = re.sub(
+            r"<file path='[^']*'>.*?</file>", "|||FILE|||", text, flags=re.DOTALL
+        )
+        parts = remaining.split("|||FILE|||")
+        result = []
+        for i, part in enumerate(parts):
+            if part.strip():
+                result.append(part)
+            if i < len(files):
+                result.append(files[i])
+        files = result
+    elif format_hint in ("md", "markdown", "plain"):
+        pattern = r"(^```[^\n]*\n.*?\n```$)"
+        files = re.split(pattern, text, flags=re.MULTILINE | re.DOTALL)
+        files = [f for f in files if f.strip()]
+    elif format_hint == "shell":
+        files = re.split(r"(?=^❯ )", text, flags=re.MULTILINE)
+        files = [f for f in files if f.strip()]
+    else:
+        files = text.split("\n\n")
+
+    segments = []
+    current = []
+    current_tokens = 0
+
+    for file_content in files:
+        tokens = count_tokens(file_content, target="cl100k_base")["count"]
+
+        if tokens > max_tokens:
+            if current:
+                segments.append(("\n\n".join(current), current_tokens))
+                current, current_tokens = [], 0
+            segments.append((file_content, tokens))
+        elif current_tokens + tokens + (100 if current else 0) > max_tokens:
+            if current:
+                segments.append(("\n\n".join(current), current_tokens))
+            current, current_tokens = [file_content], tokens
+        else:
+            current.append(file_content)
+            current_tokens += tokens + (100 if len(current) > 1 else 0)
+
+    if current:
+        segments.append(("\n\n".join(current), current_tokens))
+
+    return segments
+
+
+def wait_for_enter():
+    """Wait for Enter key press, return False if interrupted."""
+    try:
+        with open("/dev/tty", "r") as tty:
+            tty.readline()
+        return True
+
+    except (KeyboardInterrupt, EOFError, OSError):
+        return False
+
+
+def build_segment(text, wrap_mode, prompts, output_pos, index, total):
+    """Build a segment with appropriate wrapping and prompts."""
+    wrapped = wrap_text(text, wrap_mode)
+
+    if not prompts:
+        return wrapped
+
+    is_first = index == 1
+    is_last = index == total
+
+    if len(prompts) == 1:
+        if output_pos == "append" and is_last:
+            return f"{wrapped}\n{prompts[0]}"
+        elif output_pos != "append" and is_first:
+            return f"{prompts[0]}\n{wrapped}"
+    elif len(prompts) == 2:
+        prefix = f"{prompts[0]}\n" if is_first else ""
+        suffix = f"\n\n{prompts[1]}" if is_last else ""
+        return f"{prefix}{wrapped}{suffix}"
+
+    return wrapped
