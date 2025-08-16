@@ -14,7 +14,7 @@ def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
 
 
 def create_file_references(
-    paths, ignore_paths=None, format="md", label="relative", inject=False, depth=5
+    paths, ignore_paths=None, format="md", label="relative", inject=False, depth=5, trace_collector=None
 ):
     """
     Build a list of file references from the specified paths.
@@ -47,14 +47,14 @@ def create_file_references(
         if path.startswith("http://") or path.startswith("https://"):
             file_references.append(
                 URLReference(
-                    path, format=format, label=label, inject=inject, depth=depth
+                    path, format=format, label=label, inject=inject, depth=depth, trace_collector=trace_collector
                 )
             )
         elif os.path.isfile(path):
             if not is_ignored(path, ignore_patterns) and _is_utf8_file(path):
                 file_references.append(
                     FileReference(
-                        path, format=format, label=label, inject=inject, depth=depth
+                        path, format=format, label=label, inject=inject, depth=depth, trace_collector=trace_collector
                     )
                 )
         elif os.path.isdir(path):
@@ -76,6 +76,7 @@ def create_file_references(
                                 label=label,
                                 inject=inject,
                                 depth=depth,
+                                trace_collector=trace_collector,
                             )
                         )
 
@@ -103,6 +104,7 @@ class FileReference:
         *,
         inject=False,
         depth=5,
+        trace_collector=None,
     ):
         self.range = range
         self.path = path
@@ -111,21 +113,20 @@ class FileReference:
         self.clean_contents = clean_contents
         self.inject = inject
         self.depth = depth
-        self.file_content = ""
+        self.trace_collector = trace_collector
+        self.file_content = self.original_file_content = ""
         self.output = self.get_contents()
 
     def get_contents(self):
         try:
             with open(self.path, "r", encoding="utf-8") as file:
-                self.file_content = file.read()
+                self.file_content = self.original_file_content = file.read()
         except Exception as e:
             print(f"Error reading file {self.path}: {str(e)}")
             return ""
-
         if self.inject:
             from .injection import inject_content_in_text
-
-            self.file_content = inject_content_in_text(self.file_content, self.depth)
+            self.file_content = inject_content_in_text(self.file_content, self.depth, self.trace_collector, self.path)
 
         return process_text(
             self.file_content,
@@ -162,6 +163,7 @@ class URLReference:
     label: str = "relative"
     inject: bool = False
     depth: int = 5
+    trace_collector: list = None
 
     def __post_init__(self) -> None:
         self.output = self.get_contents()
@@ -192,7 +194,7 @@ class URLReference:
         if self.inject:
             from .injection import inject_content_in_text
 
-            text = inject_content_in_text(text, self.depth)
+            text = inject_content_in_text(text, self.depth, self.trace_collector, self.url)
         return process_text(text, format=self.format, label=self.get_label())
 
 

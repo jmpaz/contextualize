@@ -349,9 +349,14 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         raise click.ClickException("pyyaml is required")
 
     if manifest_path:
-        payload_content, input_refs, trace_items, base_dir, skipped_paths, skip_impact = (
-            render_from_yaml_with_mdlinks(manifest_path, inject=inject)
-        )
+        (
+            payload_content,
+            input_refs,
+            trace_items,
+            base_dir,
+            skipped_paths,
+            skip_impact,
+        ) = render_from_yaml_with_mdlinks(manifest_path, inject=inject)
         if trace:
             stdin_data = ctx.obj.get("stdin_data", "")
             trace_output = format_trace_output(
@@ -361,6 +366,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
                 skip_impact=skip_impact,
                 common_prefix=base_dir,
                 stdin_data=stdin_data if stdin_data else None,
+                injection_traces=None,  # TODO: add injection trace support for payload
             )
             ctx.obj["trace_output"] = trace_output
         return payload_content
@@ -387,9 +393,14 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         )
 
     try:
-        payload_content, input_refs, trace_items, base_dir, skipped_paths, skip_impact = (
-            assemble_payload_with_mdlinks_from_data(data, os.getcwd(), inject=inject)
-        )
+        (
+            payload_content,
+            input_refs,
+            trace_items,
+            base_dir,
+            skipped_paths,
+            skip_impact,
+        ) = assemble_payload_with_mdlinks_from_data(data, os.getcwd(), inject=inject)
     except Exception as e:
         raise click.ClickException(str(e))
 
@@ -401,6 +412,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
             skip_impact=skip_impact,
             common_prefix=base_dir,
             stdin_data=None,
+            injection_traces=None,  # TODO: add injection trace support for payload
         )
         ctx.obj["trace_output"] = trace_output
 
@@ -479,12 +491,21 @@ def cat_cmd(
         create_file_references,
     )
 
+    injection_trace_items = [] if inject and trace else None
+
     def add_file_refs(paths_list):
         """Helper to add file references for a list of paths"""
-        file_refs = create_file_references(
-            paths_list, ignore, format, label, inject=inject, depth=5
-        )["refs"]
-        refs.extend(file_refs)
+        refs.extend(
+            create_file_references(
+                paths_list,
+                ignore,
+                format,
+                label,
+                inject=inject,
+                depth=5,
+                trace_collector=injection_trace_items,
+            )["refs"]
+        )
 
     refs = []
     for p in paths:
@@ -505,7 +526,14 @@ def cat_cmd(
                     add_file_refs([path])
             else:
                 refs.append(
-                    URLReference(p, format=format, label=label, inject=inject, depth=5)
+                    URLReference(
+                        p,
+                        format=format,
+                        label=label,
+                        inject=inject,
+                        depth=5,
+                        trace_collector=injection_trace_items,
+                    )
                 )
         elif os.path.exists(p):
             add_file_refs([p])
@@ -552,6 +580,7 @@ def cat_cmd(
             skip_impact,
             common_prefix=None,
             stdin_data=stdin_data if stdin_data else None,
+            injection_traces=injection_trace_items,
         )
         ctx.obj["trace_output"] = trace_output
 

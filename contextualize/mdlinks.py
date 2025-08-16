@@ -1,6 +1,8 @@
 import os
+import os.path
 import re
 from collections import defaultdict
+from urllib.parse import urlparse
 
 from .reference import FileReference, _is_utf8_file, create_file_references
 from .tokenize import count_tokens
@@ -92,8 +94,9 @@ def format_trace_output(
     skip_impact=None,
     common_prefix=None,
     stdin_data=None,
+    injection_traces=None,
 ):
-    if not input_refs and not trace_items and not stdin_data:
+    if not input_refs and not trace_items and not stdin_data and not injection_traces:
         return ""
 
     all_paths = [r.path for r in input_refs] + [item[0] for item in trace_items]
@@ -121,12 +124,18 @@ def format_trace_output(
 
     for ref in input_refs:
         rel_path = get_rel_path(ref.path)
-        token_count = (
-            count_tokens(ref.file_content)["count"]
-            if hasattr(ref, "file_content")
-            else 0
-        )
-        formatted_inputs.append((rel_path, token_count, None))
+        original_content = getattr(ref, "original_file_content", None)
+        final_content = getattr(ref, "file_content", "")
+
+        if original_content and original_content != final_content:
+            original_tokens = count_tokens(original_content)["count"]
+            final_tokens = count_tokens(final_content)["count"]
+            token_display = (original_tokens, final_tokens)
+        else:
+            token_count = count_tokens(final_content)["count"] if final_content else 0
+            token_display = token_count
+
+        formatted_inputs.append((rel_path, token_display, None))
 
     by_depth = defaultdict(list)
     for tgt, src, depth in trace_items:
@@ -140,7 +149,6 @@ def format_trace_output(
 
             is_duplicate = abs_tgt in seen_files
             if not is_duplicate:
-                # only compute tokens for new files
                 ref = FileReference(tgt)
                 token_count = (
                     count_tokens(ref.file_content)["count"]
@@ -179,8 +187,12 @@ def format_trace_output(
         stdin_token_count = count_tokens(stdin_data)["count"]
         lines.append(f"  stdin ({stdin_token_count} tokens)")
 
-    for rel_path, token_count, _ in formatted_inputs:
-        lines.append(f"  {rel_path} ({token_count} tokens)")
+    for rel_path, token_display, _ in formatted_inputs:
+        if isinstance(token_display, tuple):
+            original, final = token_display
+            lines.append(f"  {rel_path} ({original} → {final} tokens)")
+        else:
+            lines.append(f"  {rel_path} ({token_display} tokens)")
 
     for depth in sorted(formatted_discovered.keys()):
         lines.append(f"\nDiscovered (depth {depth}):")
@@ -210,12 +222,70 @@ def format_trace_output(
             downstream_files,
             downstream_tokens,
         ) in formatted_skipped:
-            if downstream_files > 0:
-                lines.append(
-                    f"  {rel_path} → {downstream_files} additional files ({downstream_tokens} tokens)"
+            lines.append(
+                f"  {rel_path} → {downstream_files} additional files ({downstream_tokens} tokens)"
+                if downstream_files > 0
+                else f"  {rel_path} ({file_tokens} tokens)"
+            )
+
+    if injection_traces:
+        lines.append("\nInjected:")
+        injections_by_source = defaultdict(list)
+        for trace in injection_traces:
+            if trace[0] == "injection":
+                _, target, source, pattern, tokens = trace
+                injections_by_source[source].append((target, pattern, tokens))
+
+        for source in sorted(injections_by_source.keys()):
+            source_rel = (
+                source[len(common_prefix) :].lstrip(os.sep)
+                if common_prefix and source.startswith(common_prefix)
+                else source
+            )
+            for target, pattern, tokens in injections_by_source[source]:
+                if pattern.startswith("{cx::") and pattern.endswith("}"):
+                    content_part = pattern[5:-1]
+                    display_pattern = (
+                        "{cx::" + content_part[:35] + "...}"
+                        if len(content_part) > 40
+                        else pattern
+                    )
+                else:
+                    display_pattern = pattern
+
+                if target.startswith(("http://", "https://")):
+                    parsed = urlparse(target)
+                    if len(target) > 60:
+                        path_parts = parsed.path.split("/")
+                        display_target = (
+                            f"{parsed.netloc}/.../{path_parts[-1][:20]}"
+                            if len(path_parts) > 3
+                            else target[:57] + "..."
+                        )
+                    else:
+                        display_target = target
+                elif target.startswith("git@") or ".git" in target:
+                    display_target = target
+                else:
+                    home = os.path.expanduser("~")
+                    if target.startswith(home):
+                        display_target = "~" + target[len(home) :]
+                    else:
+                        display_target = (
+                            target[len(common_prefix) :].lstrip(os.sep)
+                            if common_prefix and target.startswith(common_prefix)
+                            else target
+                        )
+
+                home = os.path.expanduser("~")
+                source_display = (
+                    "~" + source_rel[len(home) :]
+                    if source_rel.startswith(home)
+                    else source_rel
                 )
-            else:
-                lines.append(f"  {rel_path} ({file_tokens} tokens)")
+                lines.append(
+                    f"  {display_target} ({tokens} tokens) ← {display_pattern} in {source_display}"
+                )
 
     return "\n".join(lines)
 
