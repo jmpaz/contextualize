@@ -194,16 +194,16 @@ def assemble_payload_with_mdlinks(
     depth: int = 5,
     link_depth_default: int = 0,
     link_scope_default: str = "all",
+    link_skip_default: List[str] = None,
 ):
     """
     Assemble payload like assemble_payload, but also resolve Markdown links per component.
-    Returns a tuple of (payload_text, input_refs, trace_items, base_dir).
-    - link_depth_default/link_scope_default can be overridden per component via
-      keys 'link-depth' and 'link-scope'.
     """
     parts: List[str] = []
     all_input_refs = []
     all_trace_items = []
+    all_skipped_paths = set()
+    all_skip_impact = {}
 
     for comp in components:
         wrap_mode = comp.get("wrap")
@@ -317,13 +317,26 @@ def assemble_payload_with_mdlinks(
         comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
         comp_link_scope = (comp.get("link-scope", link_scope_default) or "all").lower()
 
+        comp_link_skip = comp.get("link-skip", link_skip_default)
+        if comp_link_skip is None:
+            comp_link_skip = []
+        elif isinstance(comp_link_skip, str):
+            comp_link_skip = [comp_link_skip]
+
+        resolved_link_skip = []
+        for skip_path in comp_link_skip:
+            skip_path = os.path.expanduser(skip_path)
+            if not os.path.isabs(skip_path):
+                skip_path = os.path.join(base_dir, skip_path)
+            resolved_link_skip.append(skip_path)
+
         refs_for_attachment = list(base_refs)
         # capture seeds for overall trace (only file refs)
         input_refs = [r for r in base_refs if hasattr(r, "path")]
         all_input_refs.extend(input_refs)
 
         if comp_link_depth > 0:
-            refs_for_attachment, comp_trace_items, _skip_impact = (
+            refs_for_attachment, comp_trace_items, comp_skip_impact = (
                 add_markdown_link_refs(
                     refs_for_attachment,
                     link_depth=comp_link_depth,
@@ -331,10 +344,19 @@ def assemble_payload_with_mdlinks(
                     format_="md",
                     label="relative",
                     inject=inject,
-                    link_skip=None,
+                    link_skip=resolved_link_skip if resolved_link_skip else None,
                 )
             )
             all_trace_items.extend(comp_trace_items)
+
+            if resolved_link_skip:
+                for skip_path in resolved_link_skip:
+                    abs_skip_path = os.path.abspath(skip_path)
+                    if os.path.exists(abs_skip_path):
+                        all_skipped_paths.add(abs_skip_path)
+
+            if comp_skip_impact:
+                all_skip_impact.update(comp_skip_impact)
 
         # build attachment block
         attachment_lines = [f'<attachment label="{name}">']
@@ -360,7 +382,14 @@ def assemble_payload_with_mdlinks(
 
         parts.append("\n".join(block_lines))
 
-    return "\n\n".join(parts), all_input_refs, all_trace_items, base_dir
+    return (
+        "\n\n".join(parts),
+        all_input_refs,
+        all_trace_items,
+        base_dir,
+        list(all_skipped_paths),
+        all_skip_impact,
+    )
 
 
 def render_from_yaml(
@@ -410,7 +439,8 @@ def render_from_yaml_with_mdlinks(
       - root: base directory for relative paths
       - link-depth: default depth for Markdown link traversal
       - link-scope: "first" or "all" (default: all)
-    Returns (payload_text, input_refs, trace_items, base_dir).
+      - link-skip: list of paths to skip when resolving Markdown links
+    Returns (payload_text, input_refs, trace_items, base_dir, skipped_paths, skip_impact).
     """
     with open(manifest_path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
@@ -431,6 +461,9 @@ def render_from_yaml_with_mdlinks(
 
     link_depth_default = int(cfg.get("link-depth", 0) or 0)
     link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
+    link_skip_default = cfg.get("link-skip", [])
+    if isinstance(link_skip_default, str):
+        link_skip_default = [link_skip_default]
 
     return assemble_payload_with_mdlinks(
         comps,
@@ -439,6 +472,7 @@ def render_from_yaml_with_mdlinks(
         depth=depth,
         link_depth_default=link_depth_default,
         link_scope_default=link_scope_default,
+        link_skip_default=link_skip_default,
     )
 
 
@@ -451,7 +485,7 @@ def assemble_payload_with_mdlinks_from_data(
 ):
     """
     Assemble from an already-parsed YAML mapping (used for stdin case).
-    Returns (payload_text, input_refs, trace_items, base_dir).
+    Returns (payload_text, input_refs, trace_items, base_dir, skipped_paths, skip_impact).
     """
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a mapping with 'config' and 'components'")
@@ -468,6 +502,9 @@ def assemble_payload_with_mdlinks_from_data(
 
     link_depth_default = int(cfg.get("link-depth", 0) or 0)
     link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
+    link_skip_default = cfg.get("link-skip", [])
+    if isinstance(link_skip_default, str):
+        link_skip_default = [link_skip_default]
 
     return assemble_payload_with_mdlinks(
         comps,
@@ -476,4 +513,5 @@ def assemble_payload_with_mdlinks_from_data(
         depth=depth,
         link_depth_default=link_depth_default,
         link_scope_default=link_scope_default,
+        link_skip_default=link_skip_default,
     )

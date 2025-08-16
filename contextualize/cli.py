@@ -349,7 +349,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         raise click.ClickException("pyyaml is required")
 
     if manifest_path:
-        payload_content, input_refs, trace_items, base_dir = (
+        payload_content, input_refs, trace_items, base_dir, skipped_paths, skip_impact = (
             render_from_yaml_with_mdlinks(manifest_path, inject=inject)
         )
         if trace:
@@ -357,8 +357,8 @@ def payload_cmd(ctx, manifest_path, inject, trace):
             trace_output = format_trace_output(
                 input_refs,
                 trace_items,
-                skipped_paths=None,
-                skip_impact=None,
+                skipped_paths=skipped_paths,
+                skip_impact=skip_impact,
                 common_prefix=base_dir,
                 stdin_data=stdin_data if stdin_data else None,
             )
@@ -387,7 +387,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         )
 
     try:
-        payload_content, input_refs, trace_items, base_dir = (
+        payload_content, input_refs, trace_items, base_dir, skipped_paths, skip_impact = (
             assemble_payload_with_mdlinks_from_data(data, os.getcwd(), inject=inject)
         )
     except Exception as e:
@@ -397,8 +397,8 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         trace_output = format_trace_output(
             input_refs,
             trace_items,
-            skipped_paths=None,
-            skip_impact=None,
+            skipped_paths=skipped_paths,
+            skip_impact=skip_impact,
             common_prefix=base_dir,
             stdin_data=None,
         )
