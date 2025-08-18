@@ -325,12 +325,48 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     "--inject", is_flag=True, help="Process {cx::...} content injection patterns"
 )
 @click.option(
+    "--local-wrap",
+    "local_wrap_mode",
+    is_flag=False,
+    flag_value="xml",
+    default=None,
+    help=(
+        "Wrap each payload as 'md' or 'xml'. Omit to disable local wrapping; passing with no value uses 'xml'. "
+        "Applied per-payload before global wrapping/prompts."
+    ),
+)
+@click.option(
+    "--local-prompt",
+    "local_prompts",
+    multiple=True,
+    help=(
+        "Prepend a line directly above each payload (can be provided multiple times; maps by index). "
+        "If provided once together with --note (multiple), each payload gets '<local-prompt><note[i]>' respectively."
+    ),
+)
+@click.option(
+    "--note",
+    "notes",
+    multiple=True,
+    help=(
+        "Optional per-payload note strings (specify multiple). Used with --local-prompt to label payloads."
+    ),
+)
+@click.option(
     "--trace",
     is_flag=True,
     help="Show paths crawled during Markdown link resolution.",
 )
 @click.pass_context
-def payload_cmd(ctx, manifest_paths, inject, trace):
+def payload_cmd(
+    ctx,
+    manifest_paths,
+    inject,
+    local_wrap_mode,
+    local_prompts,
+    notes,
+    trace,
+):
     """
     Render context payload(s) from one or more YAML manifests.
     - Accepts multiple manifest paths.
@@ -394,6 +430,26 @@ def payload_cmd(ctx, manifest_paths, inject, trace):
             all_skipped_paths.update(skipped_paths or [])
             if skip_impact:
                 all_skip_impact.update(skip_impact)
+
+        # Apply per-payload local wrapping/prompting if requested
+        if local_wrap_mode or local_prompts:
+            processed = []
+            for idx, payload in enumerate(all_payloads):
+                text = payload
+                if local_wrap_mode:
+                    text = wrap_text(text, local_wrap_mode)
+                if local_prompts:
+                    # If exactly one local prompt provided and notes are present, append notes[idx] to it
+                    # and only apply to payloads that have a corresponding note.
+                    if len(local_prompts) == 1 and notes:
+                        if idx < len(notes):
+                            label_line = f"{local_prompts[0]}{notes[idx]}"
+                            text = f"{label_line}\n{text}"
+                    # If multiple local prompts provided, map by index; missing indices get no prompt.
+                    elif idx < len(local_prompts):
+                        text = f"{local_prompts[idx]}\n{text}"
+                processed.append(text)
+            all_payloads = processed
 
         if trace:
             # Build per-payload traces with cross-payload deduping (✓)
@@ -514,6 +570,23 @@ def payload_cmd(ctx, manifest_paths, inject, trace):
         all_skipped_paths.update(skipped_paths or [])
         if skip_impact:
             all_skip_impact.update(skip_impact)
+
+    # Apply per-payload local wrapping/prompting if requested
+    if local_wrap_mode or local_prompts:
+        processed = []
+        for idx, payload in enumerate(all_payloads):
+            text = payload
+            if local_wrap_mode:
+                text = wrap_text(text, local_wrap_mode)
+            if local_prompts:
+                if len(local_prompts) == 1 and notes:
+                    if idx < len(notes):
+                        label_line = f"{local_prompts[0]}{notes[idx]}"
+                        text = f"{label_line}\n{text}"
+                elif idx < len(local_prompts):
+                    text = f"{local_prompts[idx]}\n{text}"
+            processed.append(text)
+        all_payloads = processed
 
     if trace:
         # Per-payload traces with cross-payload dedupe
