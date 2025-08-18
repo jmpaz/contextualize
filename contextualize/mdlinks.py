@@ -138,12 +138,34 @@ def format_trace_output(
         formatted_inputs.append((rel_path, token_display, None))
 
     by_depth = defaultdict(list)
+    parent_map = {}
     for tgt, src, depth in trace_items:
         by_depth[depth].append((tgt, src))
+        abs_tgt = os.path.abspath(tgt)
+        abs_src = os.path.abspath(src)
+        if abs_tgt not in parent_map:
+            parent_map[abs_tgt] = abs_src
+
+    def build_source_chain(abs_target_path, max_len=None):
+        """
+        Return a display string like 'a.md ← b.md ← c.md' from immediate → seed.
+        """
+        chain_parts = []
+        seen_chain = set()
+        cur = abs_target_path
+        while cur in parent_map and cur not in seen_chain:
+            seen_chain.add(cur)
+            parent = parent_map[cur]
+            display = os.path.basename(get_rel_path(parent))
+            chain_parts.append(display)
+            cur = parent
+            if max_len is not None and len(chain_parts) >= max_len:
+                break
+        return " ← ".join(chain_parts)
 
     for depth in sorted(by_depth.keys()):
         depth_items = []
-        for tgt, src in sorted(by_depth[depth]):
+        for tgt, _src in sorted(by_depth[depth]):
             abs_tgt = os.path.abspath(tgt)
             rel_path = get_rel_path(tgt)
 
@@ -159,8 +181,8 @@ def format_trace_output(
             else:
                 token_count = None
 
-            source_name = os.path.basename(src)
-            depth_items.append((rel_path, token_count, source_name))
+            chain = build_source_chain(abs_tgt, max_len=depth)
+            depth_items.append((rel_path, token_count, chain))
         formatted_discovered[depth] = depth_items
 
     if skipped_paths:
@@ -205,14 +227,15 @@ def format_trace_output(
                 path_token_widths.append(len(f"{p} ({t})"))
         max_path_token_width = max(path_token_widths, default=0)
 
-        for rel_path, token_count, source_name in formatted_discovered[depth]:
+        for rel_path, token_count, source_chain in formatted_discovered[depth]:
             if token_count is None:
                 path_with_tokens = f"{rel_path} (✓)"
             else:
                 path_with_tokens = f"{rel_path} ({token_count})"
             padding = max_path_token_width - len(path_with_tokens)
 
-            lines.append(f"  {path_with_tokens}{' ' * padding} ← {source_name}")
+            arrow_and_chain = f" ← {source_chain}" if source_chain else ""
+            lines.append(f"  {path_with_tokens}{' ' * padding}{arrow_and_chain}")
 
     if formatted_skipped:
         lines.append("\nSkipped:")
