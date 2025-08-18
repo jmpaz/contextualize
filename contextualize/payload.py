@@ -227,6 +227,7 @@ def assemble_payload_with_mdlinks(
     link_depth_default: int = 0,
     link_scope_default: str = "all",
     link_skip_default: List[str] = None,
+    global_seen: Optional[set] = None,
 ):
     """
     Assemble payload like assemble_payload, but also resolve Markdown links per component.
@@ -394,16 +395,15 @@ def assemble_payload_with_mdlinks(
                 else comp_link_depth
             )
             if effective_link_depth > 0:
-                expanded_refs, comp_trace_items, comp_skip_impact = (
-                    add_markdown_link_refs(
-                        seed_refs,
-                        link_depth=effective_link_depth,
-                        scope=per_file_link_scope,
-                        format_="md",
-                        label="relative",
-                        inject=inject,
-                        link_skip=resolved_link_skip if resolved_link_skip else None,
-                    )
+                expanded_refs, comp_trace_items, comp_skip_impact = add_markdown_link_refs(
+                    seed_refs,
+                    link_depth=effective_link_depth,
+                    scope=per_file_link_scope,
+                    format_="md",
+                    label="relative",
+                    inject=inject,
+                    link_skip=resolved_link_skip if resolved_link_skip else None,
+                    seen=global_seen,
                 )
                 refs_for_attachment.extend(expanded_refs)
                 all_trace_items.extend(comp_trace_items)
@@ -492,6 +492,7 @@ def render_from_yaml_with_mdlinks(
     *,
     inject: bool = False,
     depth: int = 5,
+    global_seen: Optional[set] = None,
 ):
     """
     Load YAML and assemble payload with mdlinks.
@@ -533,6 +534,7 @@ def render_from_yaml_with_mdlinks(
         link_depth_default=link_depth_default,
         link_scope_default=link_scope_default,
         link_skip_default=link_skip_default,
+        global_seen=global_seen,
     )
 
 
@@ -542,6 +544,7 @@ def assemble_payload_with_mdlinks_from_data(
     *,
     inject: bool = False,
     depth: int = 5,
+    global_seen: Optional[set] = None,
 ):
     """
     Assemble from an already-parsed YAML mapping (used for stdin case).
@@ -574,4 +577,5 @@ def assemble_payload_with_mdlinks_from_data(
         link_depth_default=link_depth_default,
         link_scope_default=link_scope_default,
         link_skip_default=link_skip_default,
+        global_seen=global_seen,
     )

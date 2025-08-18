@@ -316,7 +316,8 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 
 @cli.command("payload")
 @click.argument(
-    "manifest_path",
+    "manifest_paths",
+    nargs=-1,
     required=False,
     type=click.Path(exists=True, dir_okay=False),
 )
@@ -329,10 +330,12 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     help="Show paths crawled during Markdown link resolution.",
 )
 @click.pass_context
-def payload_cmd(ctx, manifest_path, inject, trace):
+def payload_cmd(ctx, manifest_paths, inject, trace):
     """
-    Render a context payload from a provided YAML manifest.
-    If no path is given and stdin is piped, read the manifest from stdin.
+    Render context payload(s) from one or more YAML manifests.
+    - Accepts multiple manifest paths.
+    - If no paths are given and stdin is piped, reads one or more YAML manifests from stdin.
+    - When multiple payloads are produced, they are joined with a double newline.
     """
     ctx.obj["format"] = "md"  # for segmentation
     try:
@@ -348,28 +351,95 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     except ImportError:
         raise click.ClickException("pyyaml is required")
 
-    if manifest_path:
-        (
-            payload_content,
-            input_refs,
-            trace_items,
-            base_dir,
-            skipped_paths,
-            skip_impact,
-        ) = render_from_yaml_with_mdlinks(manifest_path, inject=inject)
-        if trace:
-            stdin_data = ctx.obj.get("stdin_data", "")
-            trace_output = format_trace_output(
+    def _dedupe_input_refs(refs):
+        seen = set()
+        out = []
+        for r in refs:
+            p = getattr(r, "path", None)
+            if not p:
+                out.append(r)
+                continue
+            ap = os.path.abspath(p)
+            if ap in seen:
+                continue
+            seen.add(ap)
+            out.append(r)
+        return out
+
+    # Shared 'seen' set for Markdown link traversal across multiple payloads
+    shared_seen = set()
+
+    # Collectors for trace data across all payloads
+    all_payloads = []
+    all_input_refs = []
+    all_trace_items = []
+    all_skipped_paths = set()
+    all_skip_impact = {}
+    base_dirs = []
+
+    if manifest_paths:
+        for mp in manifest_paths:
+            (
+                payload_content,
                 input_refs,
                 trace_items,
-                skipped_paths=skipped_paths,
-                skip_impact=skip_impact,
-                common_prefix=base_dir,
-                stdin_data=stdin_data if stdin_data else None,
-                injection_traces=None,  # TODO: add injection trace support for payload
-            )
-            ctx.obj["trace_output"] = trace_output
-        return payload_content
+                base_dir,
+                skipped_paths,
+                skip_impact,
+            ) = render_from_yaml_with_mdlinks(mp, inject=inject, global_seen=shared_seen)
+            all_payloads.append(payload_content)
+            all_input_refs.extend(input_refs)
+            all_trace_items.extend(trace_items)
+            base_dirs.append(base_dir)
+            all_skipped_paths.update(skipped_paths or [])
+            if skip_impact:
+                all_skip_impact.update(skip_impact)
+
+        if trace:
+            # Build per-payload traces with cross-payload deduping (✓)
+            trace_outputs = []
+            previously_seen = set()
+            multi = len(manifest_paths) > 1
+
+            # Pre-compute per-manifest slices from our accumulators
+            # We rebuild by re-rendering each manifest with shared_seen to get its local refs
+            for idx, mp in enumerate(manifest_paths):
+                # Rebuild trace data for this payload WITHOUT global cross-payload seen,
+                # so depth and traversal remain identical to a standalone run.
+                (
+                    _content,
+                    input_refs,
+                    trace_items,
+                    base_dir,
+                    skipped_paths,
+                    skip_impact,
+                ) = render_from_yaml_with_mdlinks(mp, inject=inject, global_seen=None)
+
+                tr = format_trace_output(
+                    input_refs,
+                    trace_items,
+                    skipped_paths=sorted(set(skipped_paths)) if skipped_paths else None,
+                    skip_impact=skip_impact if skip_impact else None,
+                    common_prefix=None,
+                    stdin_data=None,
+                    injection_traces=None,
+                    global_seen=previously_seen,
+                    heading=(
+                        f"Payload {idx+1}/{len(manifest_paths)}" if multi else None
+                    ),
+                )
+                trace_outputs.append(tr)
+
+                # update previously_seen with inputs and discovered targets
+                for r in input_refs:
+                    if hasattr(r, "path"):
+                        previously_seen.add(os.path.abspath(r.path))
+                for tgt, _src, _depth in trace_items:
+                    previously_seen.add(os.path.abspath(tgt))
+
+            ctx.obj["trace_output"] = "\n\n---\n\n".join(trace_outputs)
+
+        return "\n\n".join(all_payloads)
 
     # only use stdin when no manifest file is provided
     stdin_data = ctx.obj.get("stdin_data", "")
@@ -381,42 +451,111 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     original_stdin = stdin_data
     ctx.obj["stdin_data"] = ""
 
-    raw = stdin_data
-    try:
-        data = yaml.safe_load(raw)
-    except Exception as e:
-        raise click.ClickException(f"Invalid YAML on stdin: {e}")
+    raw = stdin_data.strip()
 
-    if not isinstance(data, dict):
-        raise click.ClickException(
-            "Manifest must be a mapping with 'config' and 'components'"
-        )
+    # Prefer heuristic split (double-newline boundary before a new top-level 'config:')
+    # to honor the contract that chained payloads are separated by a blank line.
+    import re as _re
+    docs = []
+    if "---" not in raw:
+        config_hits = len(_re.findall(r"(?m)^(?:\s*)config:\s*(?:$)", raw))
+        if config_hits >= 2 or "\n\nconfig:" in raw:
+            chunks = _re.split(r"\n{2,}(?=config:\s*(?:\n|$))", raw, flags=_re.MULTILINE)
+            chunks = [c.strip() for c in chunks if c.strip()]
+            for idx, chunk in enumerate(chunks, 1):
+                try:
+                    d = yaml.safe_load(chunk)
+                    if d is not None:
+                        docs.append(d)
+                except Exception as e:
+                    raise click.ClickException(
+                        f"Invalid YAML on stdin (chunk {idx}): {e}"
+                    )
 
-    try:
-        (
-            payload_content,
-            input_refs,
-            trace_items,
-            base_dir,
-            skipped_paths,
-            skip_impact,
-        ) = assemble_payload_with_mdlinks_from_data(data, os.getcwd(), inject=inject)
-    except Exception as e:
-        raise click.ClickException(str(e))
+    # If heuristic split didn't find multiple manifests, fall back to YAML multi-doc
+    if not docs:
+        try:
+            for d in yaml.safe_load_all(raw):
+                if d is None:
+                    continue
+                docs.append(d)
+        except Exception as e:
+            raise click.ClickException(f"Invalid YAML on stdin: {e}")
+
+    if not docs:
+        raise click.ClickException("No YAML manifests found on stdin")
+
+    for d in docs:
+        if not isinstance(d, dict):
+            raise click.ClickException(
+                "Each manifest must be a mapping with 'config' and 'components'"
+            )
+
+    # Build each manifest with shared link traversal dedupe
+    for d in docs:
+        try:
+            (
+                payload_content,
+                input_refs,
+                trace_items,
+                base_dir,
+                skipped_paths,
+                skip_impact,
+            ) = assemble_payload_with_mdlinks_from_data(
+                d, os.getcwd(), inject=inject, global_seen=shared_seen
+            )
+        except Exception as e:
+            raise click.ClickException(str(e))
+
+        all_payloads.append(payload_content)
+        all_input_refs.extend(input_refs)
+        all_trace_items.extend(trace_items)
+        base_dirs.append(base_dir)
+        all_skipped_paths.update(skipped_paths or [])
+        if skip_impact:
+            all_skip_impact.update(skip_impact)
 
     if trace:
-        trace_output = format_trace_output(
-            input_refs,
-            trace_items,
-            skipped_paths=skipped_paths,
-            skip_impact=skip_impact,
-            common_prefix=base_dir,
-            stdin_data=None,
-            injection_traces=None,  # TODO: add injection trace support for payload
-        )
-        ctx.obj["trace_output"] = trace_output
+        # Per-payload traces with cross-payload dedupe
+        trace_outputs = []
+        previously_seen = set()
+        multi = len(docs) > 1
+        for idx, d in enumerate(docs):
+            (
+                _content,
+                input_refs,
+                trace_items,
+                base_dir,
+                skipped_paths,
+                skip_impact,
+            ) = assemble_payload_with_mdlinks_from_data(
+                # Rebuild trace data for this payload WITHOUT global cross-payload seen,
+                # so depth and traversal remain identical to a standalone run.
+                d, os.getcwd(), inject=inject, global_seen=None
+            )
 
-    return payload_content
+            tr = format_trace_output(
+                input_refs,
+                trace_items,
+                skipped_paths=sorted(set(skipped_paths)) if skipped_paths else None,
+                skip_impact=skip_impact if skip_impact else None,
+                common_prefix=None,
+                stdin_data=None,
+                injection_traces=None,
+                global_seen=previously_seen,
+                heading=(f"Payload {idx+1}/{len(docs)}" if multi else None),
+            )
+            trace_outputs.append(tr)
+
+            for r in input_refs:
+                if hasattr(r, "path"):
+                    previously_seen.add(os.path.abspath(r.path))
+            for tgt, _src, _depth in trace_items:
+                previously_seen.add(os.path.abspath(tgt))
+
+        ctx.obj["trace_output"] = "\n\n---\n\n".join(trace_outputs)
+
+    return "\n\n".join(all_payloads)
 
 
 @cli.command("cat")

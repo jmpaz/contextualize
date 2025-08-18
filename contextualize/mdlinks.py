@@ -95,6 +95,8 @@ def format_trace_output(
     common_prefix=None,
     stdin_data=None,
     injection_traces=None,
+    global_seen=None,
+    heading=None,
 ):
     if not input_refs and not trace_items and not stdin_data and not injection_traces:
         return ""
@@ -112,6 +114,13 @@ def format_trace_output(
     formatted_skipped = []
 
     seen_files = set()
+    # seed with previously seen files (for multi-payload dedupe)
+    if global_seen:
+        for p in global_seen:
+            try:
+                seen_files.add(os.path.abspath(p))
+            except Exception:
+                pass
     for ref in input_refs:
         seen_files.add(os.path.abspath(ref.path))
 
@@ -126,14 +135,19 @@ def format_trace_output(
         rel_path = get_rel_path(ref.path)
         original_content = getattr(ref, "original_file_content", None)
         final_content = getattr(ref, "file_content", "")
+        abs_path = os.path.abspath(ref.path)
 
-        if original_content and original_content != final_content:
-            original_tokens = count_tokens(original_content)["count"]
-            final_tokens = count_tokens(final_content)["count"]
-            token_display = (original_tokens, final_tokens)
+        # if already seen globally, show as duplicate ✓
+        if global_seen and abs_path in {os.path.abspath(p) for p in global_seen}:
+            token_display = None
         else:
-            token_count = count_tokens(final_content)["count"] if final_content else 0
-            token_display = token_count
+            if original_content and original_content != final_content:
+                original_tokens = count_tokens(original_content)["count"]
+                final_tokens = count_tokens(final_content)["count"]
+                token_display = (original_tokens, final_tokens)
+            else:
+                token_count = count_tokens(final_content)["count"] if final_content else 0
+                token_display = token_count
 
         formatted_inputs.append((rel_path, token_display, None))
 
@@ -203,14 +217,19 @@ def format_trace_output(
             else:
                 formatted_skipped.append((rel_path, 0, 0, 0))
 
-    lines = ["Inputs:"]
+    if heading:
+        lines = [f"\x1b[1m{heading}\x1b[0m", "Inputs:"]
+    else:
+        lines = ["Inputs:"]
 
     if stdin_data:
         stdin_token_count = count_tokens(stdin_data)["count"]
         lines.append(f"  stdin ({stdin_token_count} tokens)")
 
     for rel_path, token_display, _ in formatted_inputs:
-        if isinstance(token_display, tuple):
+        if token_display is None:
+            lines.append(f"  {rel_path} (✓)")
+        elif isinstance(token_display, tuple):
             original, final = token_display
             lines.append(f"  {rel_path} ({original} → {final} tokens)")
         else:
@@ -359,6 +378,7 @@ def add_markdown_link_refs(
     label="relative",
     inject=False,
     link_skip=None,
+    seen=None,
 ):
     """
     Discover Markdown-linked files and append them as additional refs.
@@ -368,7 +388,9 @@ def add_markdown_link_refs(
     if link_depth <= 0 or not refs:
         return refs, []
 
-    seen = set()
+    # allow a shared 'seen' set to be provided by caller so multiple
+    # payloads can share traversal state and dedupe across runs
+    seen = set() if seen is None else seen
 
     skipped_paths = []
     skip_impact = {}
