@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -11,7 +11,7 @@ from .utils import wrap_text
 
 
 def _parse_url_spec(spec: str) -> dict[str, Any]:
-    """Parse URL spec like 'https://example.com::filename=file.py::wrap=md' into options dict."""
+    """Parse URL spec like 'https://example.com::filename=file.py::wrap=md' into an options dict."""
     parts = spec.split("::")
     opts: dict[str, str | None] = {}
     target_parts: list[str] = []
@@ -27,6 +27,45 @@ def _parse_url_spec(spec: str) -> dict[str, Any]:
     return opts
 
 
+class _SimpleReference:
+    def __init__(self, output: str):
+        self.output = output
+
+
+def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
+    if isinstance(spec, dict):
+        raw = spec.get("path") or spec.get("target") or spec.get("url")
+        if not raw or not isinstance(raw, str):
+            raise ValueError(
+                f"Invalid file spec mapping; expected 'path' string: {spec}"
+            )
+        return raw, spec
+    if isinstance(spec, str):
+        return spec, {}
+    raise ValueError(
+        f"Invalid file spec; expected string or mapping, got: {type(spec)}"
+    )
+
+
+def _wrapped_url_reference(
+    url: str,
+    *,
+    filename: Optional[str],
+    wrap: Optional[str],
+    inject: bool,
+    depth: int,
+) -> _SimpleReference:
+    url_ref = URLReference(
+        url,
+        format="raw",
+        label=filename or url,
+        inject=inject,
+        depth=depth,
+    )
+    wrapped = wrap_text(url_ref.output, wrap or "md", filename or url)
+    return _SimpleReference(wrapped)
+
+
 def assemble_payload(
     components: List[Dict[str, Any]],
     base_dir: str,
@@ -34,20 +73,11 @@ def assemble_payload(
     inject: bool = False,
     depth: int = 5,
 ) -> str:
-    """
-    - If a component has a 'text' key, emit that text verbatim.
-    - Otherwise it must have 'name' and 'files':
-        optional 'prefix' (above the attachment) and 'suffix' (below).
-      Files and directories are expanded via create_file_references().
-    - if 'wrap' key is present:
-        * wrap == "md" → wrap the inner content in a markdown code fence
-        * wrap == other string → wrap inner content in <wrap>…</wrap>
-    - if `inject` is true, resolve {cx::...} markers before wrapping files
-    """
+    """Assemble an attachments payload from components."""
     parts: List[str] = []
 
     for comp in components:
-        wrap_mode = comp.get("wrap")  # may be None, "md", or any tag name
+        wrap_mode = comp.get("wrap")
 
         # 1) text‐only
         if "text" in comp:
@@ -60,7 +90,6 @@ def assemble_payload(
             parts.append(text)
             continue
 
-        # 2) file component
         name = comp.get("name")
         files = comp.get("files")
         if not name or not files:
@@ -71,19 +100,18 @@ def assemble_payload(
         prefix = comp.get("prefix", "").rstrip()
         suffix = comp.get("suffix", "").lstrip()
 
-        # collect FileReference objects (recursing into directories)
         all_refs = []
         input_file_refs = []
         for spec in files:
+            spec, file_opts = _coerce_file_spec(spec)
             spec = os.path.expanduser(spec)
 
             if spec.startswith("http://") or spec.startswith("https://"):
                 opts = _parse_url_spec(spec)
                 url = opts.get("target", spec)
-                filename = opts.get("filename")
-                wrap = opts.get("wrap")
+                filename = file_opts.get("filename") or opts.get("filename")
+                wrap = file_opts.get("wrap") or opts.get("wrap")
 
-                # try as git target first, fall back to URL
                 tgt = parse_git_target(url)
                 if tgt and (
                     tgt.path is not None
@@ -112,26 +140,16 @@ def assemble_payload(
                         all_refs.extend(refs)
                         input_file_refs.extend(refs)
                 else:
-                    url_ref = URLReference(
-                        url,
-                        format="raw",
-                        label=filename or url,
-                        inject=inject,
-                        depth=depth,
+                    all_refs.append(
+                        _wrapped_url_reference(
+                            url,
+                            filename=filename,
+                            wrap=wrap,
+                            inject=inject,
+                            depth=depth,
+                        )
                     )
-
-                    wrap_format = wrap or "md"
-                    wrapped_content = wrap_text(
-                        url_ref.output, wrap_format, filename or url
-                    )
-
-                    class SimpleReference:
-                        def __init__(self, output: str):
-                            self.output = output
-
-                    all_refs.append(SimpleReference(wrapped_content))
             else:
-                # handle git targets and local files
                 tgt = parse_git_target(spec)
                 if tgt:
                     repo_dir = ensure_repo(tgt)
@@ -149,16 +167,30 @@ def assemble_payload(
                         raise FileNotFoundError(
                             f"Component '{name}' path not found: {full}"
                         )
-                    refs = create_file_references(
-                        [full],
-                        ignore_paths=None,
-                        format="md",
-                        label="relative",
-                        inject=inject,
-                        depth=depth,
-                    )["refs"]
-                    all_refs.extend(refs)
-                    input_file_refs.extend(refs)
+                    custom_label = file_opts.get("filename")
+                    if custom_label and os.path.isfile(full):
+                        from .reference import FileReference
+
+                        fr = FileReference(
+                            full,
+                            format="md",
+                            label=str(custom_label),
+                            inject=inject,
+                            depth=depth,
+                        )
+                        all_refs.append(fr)
+                        input_file_refs.append(fr)
+                    else:
+                        refs = create_file_references(
+                            [full],
+                            ignore_paths=None,
+                            format="md",
+                            label="relative",
+                            inject=inject,
+                            depth=depth,
+                        )["refs"]
+                        all_refs.extend(refs)
+                        input_file_refs.extend(refs)
 
         attachment_lines = [f'<attachment label="{name}">']
         for idx, ref in enumerate(all_refs):
@@ -229,16 +261,53 @@ def assemble_payload_with_mdlinks(
         prefix = comp.get("prefix", "").rstrip()
         suffix = comp.get("suffix", "").lstrip()
 
-        # collect base FileReferences first
-        base_refs = []
+        comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
+        comp_link_scope = (comp.get("link-scope", link_scope_default) or "all").lower()
+
+        comp_link_skip = comp.get("link-skip", link_skip_default)
+        if comp_link_skip is None:
+            comp_link_skip = []
+        elif isinstance(comp_link_skip, str):
+            comp_link_skip = [comp_link_skip]
+
+        resolved_link_skip_default: List[str] = []
+        for skip_path in comp_link_skip:
+            skip_path = os.path.expanduser(skip_path)
+            if not os.path.isabs(skip_path):
+                skip_path = os.path.join(base_dir, skip_path)
+            resolved_link_skip_default.append(skip_path)
+
+        refs_for_attachment = []
+        input_refs_for_comp = []
+
         for spec in files:
+            spec, file_opts = _coerce_file_spec(spec)
             spec = os.path.expanduser(spec)
+
+            per_file_link_depth = file_opts.get("link-depth")
+            per_file_link_scope = (
+                (file_opts.get("link-scope") or comp_link_scope).lower()
+                if file_opts
+                else comp_link_scope
+            )
+            per_file_link_skip = file_opts.get("link-skip") if file_opts else None
+            resolved_link_skip = list(resolved_link_skip_default)
+            if per_file_link_skip:
+                if isinstance(per_file_link_skip, str):
+                    per_file_link_skip = [per_file_link_skip]
+                for skip_path in per_file_link_skip:
+                    skip_path = os.path.expanduser(skip_path)
+                    if not os.path.isabs(skip_path):
+                        skip_path = os.path.join(base_dir, skip_path)
+                    resolved_link_skip.append(skip_path)
+
+            seed_refs = []
 
             if spec.startswith("http://") or spec.startswith("https://"):
                 opts = _parse_url_spec(spec)
                 url = opts.get("target", spec)
-                filename = opts.get("filename")
-                wrap = opts.get("wrap")
+                filename = file_opts.get("filename") or opts.get("filename")
+                wrap = file_opts.get("wrap") or opts.get("wrap")
 
                 tgt = parse_git_target(url)
                 if tgt and (
@@ -265,26 +334,17 @@ def assemble_payload_with_mdlinks(
                             inject=inject,
                             depth=depth,
                         )["refs"]
-                        base_refs.extend(refs)
+                        seed_refs.extend(refs)
                 else:
-                    url_ref = URLReference(
-                        url,
-                        format="raw",
-                        label=filename or url,
-                        inject=inject,
-                        depth=depth,
+                    seed_refs.append(
+                        _wrapped_url_reference(
+                            url,
+                            filename=filename,
+                            wrap=wrap,
+                            inject=inject,
+                            depth=depth,
+                        )
                     )
-
-                    wrap_format = wrap or "md"
-                    wrapped_content = wrap_text(
-                        url_ref.output, wrap_format, filename or url
-                    )
-
-                    class SimpleReference:
-                        def __init__(self, output: str):
-                            self.output = output
-
-                    base_refs.append(SimpleReference(wrapped_content))
             else:
                 tgt = parse_git_target(spec)
                 if tgt:
@@ -303,62 +363,62 @@ def assemble_payload_with_mdlinks(
                         raise FileNotFoundError(
                             f"Component '{name}' path not found: {full}"
                         )
-                    refs = create_file_references(
-                        [full],
-                        ignore_paths=None,
-                        format="md",
+                    custom_label = file_opts.get("filename")
+                    if custom_label and os.path.isfile(full):
+                        from .reference import FileReference
+
+                        fr = FileReference(
+                            full,
+                            format="md",
+                            label=str(custom_label),
+                            inject=inject,
+                            depth=depth,
+                        )
+                        seed_refs.append(fr)
+                    else:
+                        refs = create_file_references(
+                            [full],
+                            ignore_paths=None,
+                            format="md",
+                            label="relative",
+                            inject=inject,
+                            depth=depth,
+                        )["refs"]
+                        seed_refs.extend(refs)
+
+            input_refs_for_comp.extend([r for r in seed_refs if hasattr(r, "path")])
+
+            effective_link_depth = int(
+                per_file_link_depth
+                if per_file_link_depth is not None
+                else comp_link_depth
+            )
+            if effective_link_depth > 0:
+                expanded_refs, comp_trace_items, comp_skip_impact = (
+                    add_markdown_link_refs(
+                        seed_refs,
+                        link_depth=effective_link_depth,
+                        scope=per_file_link_scope,
+                        format_="md",
                         label="relative",
                         inject=inject,
-                        depth=depth,
-                    )["refs"]
-                    base_refs.extend(refs)
-
-        # link resolution
-        comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
-        comp_link_scope = (comp.get("link-scope", link_scope_default) or "all").lower()
-
-        comp_link_skip = comp.get("link-skip", link_skip_default)
-        if comp_link_skip is None:
-            comp_link_skip = []
-        elif isinstance(comp_link_skip, str):
-            comp_link_skip = [comp_link_skip]
-
-        resolved_link_skip = []
-        for skip_path in comp_link_skip:
-            skip_path = os.path.expanduser(skip_path)
-            if not os.path.isabs(skip_path):
-                skip_path = os.path.join(base_dir, skip_path)
-            resolved_link_skip.append(skip_path)
-
-        refs_for_attachment = list(base_refs)
-        # capture seeds for overall trace (only file refs)
-        input_refs = [r for r in base_refs if hasattr(r, "path")]
-        all_input_refs.extend(input_refs)
-
-        if comp_link_depth > 0:
-            refs_for_attachment, comp_trace_items, comp_skip_impact = (
-                add_markdown_link_refs(
-                    refs_for_attachment,
-                    link_depth=comp_link_depth,
-                    scope=comp_link_scope,
-                    format_="md",
-                    label="relative",
-                    inject=inject,
-                    link_skip=resolved_link_skip if resolved_link_skip else None,
+                        link_skip=resolved_link_skip if resolved_link_skip else None,
+                    )
                 )
-            )
-            all_trace_items.extend(comp_trace_items)
+                refs_for_attachment.extend(expanded_refs)
+                all_trace_items.extend(comp_trace_items)
+                if resolved_link_skip:
+                    for skip_path in resolved_link_skip:
+                        abs_skip_path = os.path.abspath(skip_path)
+                        if os.path.exists(abs_skip_path):
+                            all_skipped_paths.add(abs_skip_path)
+                if comp_skip_impact:
+                    all_skip_impact.update(comp_skip_impact)
+            else:
+                refs_for_attachment.extend(seed_refs)
 
-            if resolved_link_skip:
-                for skip_path in resolved_link_skip:
-                    abs_skip_path = os.path.abspath(skip_path)
-                    if os.path.exists(abs_skip_path):
-                        all_skipped_paths.add(abs_skip_path)
+        all_input_refs.extend(input_refs_for_comp)
 
-            if comp_skip_impact:
-                all_skip_impact.update(comp_skip_impact)
-
-        # build attachment block
         attachment_lines = [f'<attachment label="{name}">']
         for idx, ref in enumerate(refs_for_attachment):
             attachment_lines.append(ref.output)
