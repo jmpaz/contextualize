@@ -2,6 +2,8 @@ import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from .utils import brace_expand
+
 
 def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
     try:
@@ -55,7 +57,21 @@ def create_file_references(
 
     all_ignore_patterns = default_ignore_patterns[:]
     if ignore_patterns:
-        all_ignore_patterns.extend(ignore_patterns)
+        expanded_ignore_patterns = []
+        for pattern in ignore_patterns:
+            if "{" in pattern and "}" in pattern:
+                expanded_ignore_patterns.extend(brace_expand(pattern))
+            else:
+                expanded_ignore_patterns.append(pattern)
+        all_ignore_patterns.extend(expanded_ignore_patterns)
+
+    expanded_user_patterns = []
+    if ignore_patterns:
+        for pattern in ignore_patterns:
+            if "{" in pattern and "}" in pattern:
+                expanded_user_patterns.extend(brace_expand(pattern))
+            else:
+                expanded_user_patterns.append(pattern)
 
     for path in paths:
         if path.startswith("http://") or path.startswith("https://"):
@@ -72,8 +88,8 @@ def create_file_references(
         elif os.path.isfile(path):
             if is_ignored(path, all_ignore_patterns):
                 if (
-                    ignore_patterns
-                    and is_ignored(path, ignore_patterns)
+                    expanded_user_patterns
+                    and is_ignored(path, expanded_user_patterns)
                     and _is_utf8_file(path)
                 ):
                     token_count = get_file_token_count(path)
@@ -100,8 +116,8 @@ def create_file_references(
                     file_path = os.path.join(root, file)
                     if is_ignored(file_path, all_ignore_patterns):
                         if (
-                            ignore_patterns
-                            and is_ignored(file_path, ignore_patterns)
+                            expanded_user_patterns
+                            and is_ignored(file_path, expanded_user_patterns)
                             and _is_utf8_file(file_path)
                         ):
                             token_count = get_file_token_count(file_path)

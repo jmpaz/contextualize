@@ -148,3 +148,48 @@ def build_segment(text, wrap_mode, prompts, output_pos, index, total):
         return f"{prefix}{wrapped}{suffix}"
 
     return wrapped
+
+
+def _split_brace_options(s: str) -> list[str]:
+    """Split comma-separated options within braces, handling nested braces."""
+    opts = []
+    buf = ""
+    depth = 0
+    for ch in s:
+        if ch == "," and depth == 0:
+            opts.append(buf)
+            buf = ""
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        buf += ch
+    opts.append(buf)
+    return opts
+
+
+def brace_expand(pattern: str) -> list[str]:
+    """Expand shell-style brace patterns like {a,b,c} into multiple strings."""
+    m = re.search(r"\{", pattern)
+    if not m:
+        return [pattern]
+    start = m.start()
+    depth = 0
+    end = start
+    for i in range(start, len(pattern)):
+        if pattern[i] == "{":
+            depth += 1
+        elif pattern[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    inside = pattern[start + 1 : end]
+    rest = pattern[end + 1 :]
+    prefix = pattern[:start]
+    out = []
+    for opt in _split_brace_options(inside):
+        for expanded in brace_expand(opt + rest):
+            out.append(prefix + expanded)
+    return out
