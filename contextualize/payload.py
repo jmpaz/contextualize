@@ -131,7 +131,7 @@ def assemble_payload(
                             )
                         refs = create_file_references(
                             [full],
-                            ignore_paths=None,
+                            ignore_patterns=None,
                             format="md",
                             label="relative",
                             inject=inject,
@@ -183,7 +183,7 @@ def assemble_payload(
                     else:
                         refs = create_file_references(
                             [full],
-                            ignore_paths=None,
+                            ignore_patterns=None,
                             format="md",
                             label="relative",
                             inject=inject,
@@ -328,7 +328,7 @@ def assemble_payload_with_mdlinks(
                             )
                         refs = create_file_references(
                             [full],
-                            ignore_paths=None,
+                            ignore_patterns=None,
                             format="md",
                             label="relative",
                             inject=inject,
@@ -378,7 +378,7 @@ def assemble_payload_with_mdlinks(
                     else:
                         refs = create_file_references(
                             [full],
-                            ignore_paths=None,
+                            ignore_patterns=None,
                             format="md",
                             label="relative",
                             inject=inject,

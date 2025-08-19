@@ -14,12 +14,19 @@ def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
 
 
 def create_file_references(
-    paths, ignore_paths=None, format="md", label="relative", inject=False, depth=5, trace_collector=None
+    paths,
+    ignore_patterns=None,
+    format="md",
+    label="relative",
+    inject=False,
+    depth=5,
+    trace_collector=None,
 ):
     """
     Build a list of file references from the specified paths.
     if `inject` is true, {cx::...} markers are resolved before wrapping.
     """
+    from .tokenize import count_tokens
 
     def is_ignored(path, gitignore_patterns):
         # We'll import pathspec only if needed:
@@ -28,33 +35,58 @@ def create_file_references(
         path_spec = PathSpec.from_lines("gitwildmatch", gitignore_patterns)
         return path_spec.match_file(path)
 
+    def get_file_token_count(file_path):
+        """Get token count for a file if it's readable."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return count_tokens(content)["count"]
+        except:
+            return 0
+
     file_references = []
-    ignore_patterns = [
+    ignored_files = []
+    default_ignore_patterns = [
         ".gitignore",
         ".git/",
         "__pycache__/",
         "__init__.py",
     ]
 
-    # If user supplied paths to ignore (like .gitignore, etc.), read them
-    if ignore_paths:
-        for path in ignore_paths:
-            if os.path.isfile(path):
-                with open(path, "r", encoding="utf-8") as file:
-                    ignore_patterns.extend(file.read().splitlines())
+    all_ignore_patterns = default_ignore_patterns[:]
+    if ignore_patterns:
+        all_ignore_patterns.extend(ignore_patterns)
 
     for path in paths:
         if path.startswith("http://") or path.startswith("https://"):
             file_references.append(
                 URLReference(
-                    path, format=format, label=label, inject=inject, depth=depth, trace_collector=trace_collector
+                    path,
+                    format=format,
+                    label=label,
+                    inject=inject,
+                    depth=depth,
+                    trace_collector=trace_collector,
                 )
             )
         elif os.path.isfile(path):
-            if not is_ignored(path, ignore_patterns) and _is_utf8_file(path):
+            if is_ignored(path, all_ignore_patterns):
+                if (
+                    ignore_patterns
+                    and is_ignored(path, ignore_patterns)
+                    and _is_utf8_file(path)
+                ):
+                    token_count = get_file_token_count(path)
+                    ignored_files.append((path, token_count))
+            elif _is_utf8_file(path):
                 file_references.append(
                     FileReference(
-                        path, format=format, label=label, inject=inject, depth=depth, trace_collector=trace_collector
+                        path,
+                        format=format,
+                        label=label,
+                        inject=inject,
+                        depth=depth,
+                        trace_collector=trace_collector,
                     )
                 )
         elif os.path.isdir(path):
@@ -62,13 +94,19 @@ def create_file_references(
                 dirs[:] = [
                     d
                     for d in dirs
-                    if not is_ignored(os.path.join(root, d), ignore_patterns)
+                    if not is_ignored(os.path.join(root, d), all_ignore_patterns)
                 ]
                 for file in files:
                     file_path = os.path.join(root, file)
-                    if not is_ignored(file_path, ignore_patterns) and _is_utf8_file(
-                        file_path
-                    ):
+                    if is_ignored(file_path, all_ignore_patterns):
+                        if (
+                            ignore_patterns
+                            and is_ignored(file_path, ignore_patterns)
+                            and _is_utf8_file(file_path)
+                        ):
+                            token_count = get_file_token_count(file_path)
+                            ignored_files.append((file_path, token_count))
+                    elif _is_utf8_file(file_path):
                         file_references.append(
                             FileReference(
                                 file_path,
@@ -83,6 +121,7 @@ def create_file_references(
     return {
         "refs": file_references,
         "concatenated": concat_refs(file_references),
+        "ignored_files": ignored_files,
     }
 
 
@@ -126,7 +165,10 @@ class FileReference:
             return ""
         if self.inject:
             from .injection import inject_content_in_text
-            self.file_content = inject_content_in_text(self.file_content, self.depth, self.trace_collector, self.path)
+
+            self.file_content = inject_content_in_text(
+                self.file_content, self.depth, self.trace_collector, self.path
+            )
 
         return process_text(
             self.file_content,
@@ -194,7 +236,9 @@ class URLReference:
         if self.inject:
             from .injection import inject_content_in_text
 
-            text = inject_content_in_text(text, self.depth, self.trace_collector, self.url)
+            text = inject_content_in_text(
+                text, self.depth, self.trace_collector, self.url
+            )
         return process_text(text, format=self.format, label=self.get_label())
 
 

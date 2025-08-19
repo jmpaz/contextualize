@@ -95,6 +95,7 @@ def format_trace_output(
     common_prefix=None,
     stdin_data=None,
     injection_traces=None,
+    ignored_files=None,
 ):
     if not input_refs and not trace_items and not stdin_data and not injection_traces:
         return ""
@@ -102,6 +103,8 @@ def format_trace_output(
     all_paths = [r.path for r in input_refs] + [item[0] for item in trace_items]
     if skipped_paths:
         all_paths.extend(skipped_paths)
+    if ignored_files:
+        all_paths.extend([path for path, _ in ignored_files])
 
     common_prefix = common_prefix or os.path.dirname(
         os.path.commonpath(all_paths) if all_paths else ""
@@ -250,6 +253,12 @@ def format_trace_output(
                 if downstream_files > 0
                 else f"  {rel_path} ({file_tokens} tokens)"
             )
+
+    if ignored_files:
+        lines.append("\nIgnored:")
+        for file_path, token_count in ignored_files:
+            rel_path = get_rel_path(file_path)
+            lines.append(f"  {rel_path} ({token_count} tokens)")
 
     if injection_traces:
         lines.append("\nInjected:")
@@ -422,7 +431,7 @@ def add_markdown_link_refs(
     # materialize new paths as normal file references
     more = create_file_references(
         to_add,
-        ignore_paths=None,
+        ignore_patterns=None,
         format=format_,
         label=label,
         inject=inject,
