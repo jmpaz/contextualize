@@ -493,6 +493,7 @@ def cat_cmd(
 
     injection_trace_items = [] if inject and trace else None
     ignored_files = []
+    ignored_folders = {}
 
     def add_file_refs(paths_list):
         """Helper to add file references for a list of paths"""
@@ -507,6 +508,7 @@ def cat_cmd(
         )
         refs.extend(result["refs"])
         ignored_files.extend(result.get("ignored_files", []))
+        ignored_folders.update(result.get("ignored_folders", {}))
 
     refs = []
     for p in paths:
@@ -583,6 +585,7 @@ def cat_cmd(
             stdin_data=stdin_data if stdin_data else None,
             injection_traces=injection_trace_items,
             ignored_files=ignored_files,
+            ignored_folders=ignored_folders,
         )
         ctx.obj["trace_output"] = trace_output
 

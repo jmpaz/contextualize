@@ -48,6 +48,8 @@ def create_file_references(
 
     file_references = []
     ignored_files = []
+    ignored_folders = {}
+    dirs_with_non_ignored_files = set()
     default_ignore_patterns = [
         ".gitignore",
         ".git/",
@@ -106,6 +108,7 @@ def create_file_references(
                     )
                 )
         elif os.path.isdir(path):
+            dir_ignored_files = {}
             for root, dirs, files in os.walk(path):
                 dirs[:] = [
                     d
@@ -121,8 +124,22 @@ def create_file_references(
                             and _is_utf8_file(file_path)
                         ):
                             token_count = get_file_token_count(file_path)
-                            ignored_files.append((file_path, token_count))
+                            if root not in dir_ignored_files:
+                                dir_ignored_files[root] = []
+                            dir_ignored_files[root].append((file_path, token_count))
                     elif _is_utf8_file(file_path):
+                        dirs_with_non_ignored_files.add(root)
+                        parent = os.path.dirname(root)
+                        while (
+                            parent
+                            and parent != path
+                            and parent not in dirs_with_non_ignored_files
+                        ):
+                            dirs_with_non_ignored_files.add(parent)
+                            new_parent = os.path.dirname(parent)
+                            if new_parent == parent:
+                                break
+                            parent = new_parent
                         file_references.append(
                             FileReference(
                                 file_path,
@@ -134,10 +151,33 @@ def create_file_references(
                             )
                         )
 
+            for dir_path, files_list in dir_ignored_files.items():
+                if dir_path not in dirs_with_non_ignored_files:
+                    total_tokens = sum(tokens for _, tokens in files_list)
+                    ignored_folders[dir_path] = (len(files_list), total_tokens)
+                else:
+                    ignored_files.extend(files_list)
+
+    consolidated_folders = {}
+    for folder_path in sorted(ignored_folders.keys()):
+        parent_is_ignored = False
+        parent = os.path.dirname(folder_path)
+        while parent:
+            if parent in ignored_folders:
+                parent_is_ignored = True
+                break
+            new_parent = os.path.dirname(parent)
+            if new_parent == parent:
+                break
+            parent = new_parent
+        if not parent_is_ignored:
+            consolidated_folders[folder_path] = ignored_folders[folder_path]
+
     return {
         "refs": file_references,
         "concatenated": concat_refs(file_references),
         "ignored_files": ignored_files,
+        "ignored_folders": consolidated_folders,
     }
 
 

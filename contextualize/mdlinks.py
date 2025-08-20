@@ -96,6 +96,7 @@ def format_trace_output(
     stdin_data=None,
     injection_traces=None,
     ignored_files=None,
+    ignored_folders=None,
 ):
     if not input_refs and not trace_items and not stdin_data and not injection_traces:
         return ""
@@ -254,11 +255,20 @@ def format_trace_output(
                 else f"  {rel_path} ({file_tokens} tokens)"
             )
 
-    if ignored_files:
+    if ignored_files or ignored_folders:
         lines.append("\nIgnored:")
-        for file_path, token_count in ignored_files:
-            rel_path = get_rel_path(file_path)
-            lines.append(f"  {rel_path} ({token_count} tokens)")
+        if ignored_folders:
+            for folder_path, (file_count, total_tokens) in sorted(
+                ignored_folders.items()
+            ):
+                rel_path = get_rel_path(folder_path)
+                lines.append(
+                    f"  {rel_path}/ ({file_count} files, {total_tokens} tokens)"
+                )
+        if ignored_files:
+            for file_path, token_count in ignored_files:
+                rel_path = get_rel_path(file_path)
+                lines.append(f"  {rel_path} ({token_count} tokens)")
 
     if injection_traces:
         lines.append("\nInjected:")
