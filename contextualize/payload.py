@@ -1,5 +1,6 @@
 import os
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -66,6 +67,128 @@ def _wrapped_url_reference(
     return _SimpleReference(wrapped)
 
 
+def _resolve_spec_to_seed_refs(
+    raw_spec: Any,
+    file_opts: Dict[str, Any],
+    base_dir: str,
+    *,
+    inject: bool,
+    depth: int,
+    component_name: str,
+) -> List[Any]:
+    """Resolve a single file/url/git spec into a list of seed refs."""
+    spec = os.path.expanduser(raw_spec)
+    seed_refs: List[Any] = []
+
+    if spec.startswith("http://") or spec.startswith("https://"):
+        opts = _parse_url_spec(spec)
+        url = opts.get("target", spec)
+        filename = file_opts.get("filename") or opts.get("filename")
+        wrap = file_opts.get("wrap") or opts.get("wrap")
+
+        tgt = parse_git_target(url)
+        if tgt and (
+            tgt.path is not None or tgt.repo_url.endswith(".git") or tgt.repo_url != url
+        ):
+            repo_dir = ensure_repo(tgt)
+            paths = [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
+            for full in paths:
+                if not os.path.exists(full):
+                    raise FileNotFoundError(
+                        f"Component '{component_name}' path not found: {full}"
+                    )
+                refs = create_file_references(
+                    [full],
+                    ignore_patterns=None,
+                    format="md",
+                    label="relative",
+                    inject=inject,
+                    depth=depth,
+                )["refs"]
+                seed_refs.extend(refs)
+        else:
+            seed_refs.append(
+                _wrapped_url_reference(
+                    url,
+                    filename=filename,
+                    wrap=wrap,
+                    inject=inject,
+                    depth=depth,
+                )
+            )
+        return seed_refs
+
+    # git or local
+    tgt = parse_git_target(spec)
+    if tgt:
+        repo_dir = ensure_repo(tgt)
+        paths = [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
+    else:
+        base = "" if os.path.isabs(spec) else base_dir
+        paths = expand_git_paths(base, spec)
+
+    for full in paths:
+        if not os.path.exists(full):
+            raise FileNotFoundError(
+                f"Component '{component_name}' path not found: {full}"
+            )
+        custom_label = file_opts.get("filename")
+        if custom_label and os.path.isfile(full):
+            from .reference import FileReference
+
+            fr = FileReference(
+                full,
+                format="md",
+                label=str(custom_label),
+                inject=inject,
+                depth=depth,
+            )
+            seed_refs.append(fr)
+        else:
+            refs = create_file_references(
+                [full],
+                ignore_patterns=None,
+                format="md",
+                label="relative",
+                inject=inject,
+                depth=depth,
+            )["refs"]
+            seed_refs.extend(refs)
+
+    return seed_refs
+
+
+def _render_attachment_block(
+    name: str,
+    refs: List[Any],
+    wrap_mode: Optional[str],
+    prefix: str,
+    suffix: str,
+) -> str:
+    """Render an <attachment> block with optional wrap/prefix/suffix."""
+    attachment_lines = [f'<attachment label="{name}">']
+    for idx, ref in enumerate(refs):
+        attachment_lines.append(ref.output)
+        if idx < len(refs) - 1:
+            attachment_lines.append("")
+    attachment_lines.append("</attachment>")
+    inner = "\n".join(attachment_lines)
+
+    if wrap_mode:
+        if wrap_mode.lower() == "md":
+            inner = "```\n" + inner + "\n```"
+        else:
+            inner = f"<{wrap_mode}>\n{inner}\n</{wrap_mode}>"
+
+    block_lines: List[str] = []
+    if prefix:
+        block_lines.append(prefix)
+    block_lines.append(inner)
+    if suffix:
+        block_lines.append(suffix)
+    return "\n".join(block_lines)
+
+
 def assemble_payload(
     components: List[Dict[str, Any]],
     base_dir: str,
@@ -73,152 +196,18 @@ def assemble_payload(
     inject: bool = False,
     depth: int = 5,
 ) -> str:
-    """Assemble an attachments payload from components."""
-    parts: List[str] = []
-
-    for comp in components:
-        wrap_mode = comp.get("wrap")
-
-        # 1) text‐only
-        if "text" in comp:
-            text = comp["text"].rstrip()
-            if wrap_mode:
-                if wrap_mode.lower() == "md":
-                    text = "```\n" + text + "\n```"
-                else:
-                    text = f"<{wrap_mode}>\n{text}\n</{wrap_mode}>"
-            parts.append(text)
-            continue
-
-        name = comp.get("name")
-        files = comp.get("files")
-        if not name or not files:
-            raise ValueError(
-                f"Component must have either 'text' or both 'name' & 'files': {comp}"
-            )
-
-        prefix = comp.get("prefix", "").rstrip()
-        suffix = comp.get("suffix", "").lstrip()
-
-        all_refs = []
-        input_file_refs = []
-        for spec in files:
-            spec, file_opts = _coerce_file_spec(spec)
-            spec = os.path.expanduser(spec)
-
-            if spec.startswith("http://") or spec.startswith("https://"):
-                opts = _parse_url_spec(spec)
-                url = opts.get("target", spec)
-                filename = file_opts.get("filename") or opts.get("filename")
-                wrap = file_opts.get("wrap") or opts.get("wrap")
-
-                tgt = parse_git_target(url)
-                if tgt and (
-                    tgt.path is not None
-                    or tgt.repo_url.endswith(".git")
-                    or tgt.repo_url != url
-                ):
-                    repo_dir = ensure_repo(tgt)
-                    paths = (
-                        [repo_dir]
-                        if not tgt.path
-                        else expand_git_paths(repo_dir, tgt.path)
-                    )
-                    for full in paths:
-                        if not os.path.exists(full):
-                            raise FileNotFoundError(
-                                f"Component '{name}' path not found: {full}"
-                            )
-                        refs = create_file_references(
-                            [full],
-                            ignore_patterns=None,
-                            format="md",
-                            label="relative",
-                            inject=inject,
-                            depth=depth,
-                        )["refs"]
-                        all_refs.extend(refs)
-                        input_file_refs.extend(refs)
-                else:
-                    all_refs.append(
-                        _wrapped_url_reference(
-                            url,
-                            filename=filename,
-                            wrap=wrap,
-                            inject=inject,
-                            depth=depth,
-                        )
-                    )
-            else:
-                tgt = parse_git_target(spec)
-                if tgt:
-                    repo_dir = ensure_repo(tgt)
-                    paths = (
-                        [repo_dir]
-                        if not tgt.path
-                        else expand_git_paths(repo_dir, tgt.path)
-                    )
-                else:
-                    base = "" if os.path.isabs(spec) else base_dir
-                    paths = expand_git_paths(base, spec)
-
-                for full in paths:
-                    if not os.path.exists(full):
-                        raise FileNotFoundError(
-                            f"Component '{name}' path not found: {full}"
-                        )
-                    custom_label = file_opts.get("filename")
-                    if custom_label and os.path.isfile(full):
-                        from .reference import FileReference
-
-                        fr = FileReference(
-                            full,
-                            format="md",
-                            label=str(custom_label),
-                            inject=inject,
-                            depth=depth,
-                        )
-                        all_refs.append(fr)
-                        input_file_refs.append(fr)
-                    else:
-                        refs = create_file_references(
-                            [full],
-                            ignore_patterns=None,
-                            format="md",
-                            label="relative",
-                            inject=inject,
-                            depth=depth,
-                        )["refs"]
-                        all_refs.extend(refs)
-                        input_file_refs.extend(refs)
-
-        attachment_lines = [f'<attachment label="{name}">']
-        for idx, ref in enumerate(all_refs):
-            attachment_lines.append(ref.output)
-            if idx < len(all_refs) - 1:
-                attachment_lines.append("")
-        attachment_lines.append("</attachment>")
-        inner = "\n".join(attachment_lines)
-
-        if wrap_mode:
-            if wrap_mode.lower() == "md":
-                inner = "```\n" + inner + "\n```"
-            else:
-                inner = f"<{wrap_mode}>\n{inner}\n</{wrap_mode}>"
-
-        block_lines: List[str] = []
-        if prefix:
-            block_lines.append(prefix)
-        block_lines.append(inner)
-        if suffix:
-            block_lines.append(suffix)
-
-        parts.append("\n".join(block_lines))
-
-    return "\n\n".join(parts)
+    return build_payload(
+        components,
+        base_dir,
+        inject=inject,
+        depth=depth,
+        link_depth=0,
+        link_scope="all",
+        link_skip=None,
+    ).payload
 
 
-def assemble_payload_with_mdlinks(
+def _build_payload_impl(
     components: List[Dict[str, Any]],
     base_dir: str,
     *,
@@ -228,9 +217,6 @@ def assemble_payload_with_mdlinks(
     link_scope_default: str = "all",
     link_skip_default: List[str] = None,
 ):
-    """
-    Assemble payload like assemble_payload, but also resolve Markdown links per component.
-    """
     parts: List[str] = []
     all_input_refs = []
     all_trace_items = []
@@ -301,90 +287,14 @@ def assemble_payload_with_mdlinks(
                         skip_path = os.path.join(base_dir, skip_path)
                     resolved_link_skip.append(skip_path)
 
-            seed_refs = []
-
-            if spec.startswith("http://") or spec.startswith("https://"):
-                opts = _parse_url_spec(spec)
-                url = opts.get("target", spec)
-                filename = file_opts.get("filename") or opts.get("filename")
-                wrap = file_opts.get("wrap") or opts.get("wrap")
-
-                tgt = parse_git_target(url)
-                if tgt and (
-                    tgt.path is not None
-                    or tgt.repo_url.endswith(".git")
-                    or tgt.repo_url != url
-                ):
-                    repo_dir = ensure_repo(tgt)
-                    paths = (
-                        [repo_dir]
-                        if not tgt.path
-                        else expand_git_paths(repo_dir, tgt.path)
-                    )
-                    for full in paths:
-                        if not os.path.exists(full):
-                            raise FileNotFoundError(
-                                f"Component '{name}' path not found: {full}"
-                            )
-                        refs = create_file_references(
-                            [full],
-                            ignore_patterns=None,
-                            format="md",
-                            label="relative",
-                            inject=inject,
-                            depth=depth,
-                        )["refs"]
-                        seed_refs.extend(refs)
-                else:
-                    seed_refs.append(
-                        _wrapped_url_reference(
-                            url,
-                            filename=filename,
-                            wrap=wrap,
-                            inject=inject,
-                            depth=depth,
-                        )
-                    )
-            else:
-                tgt = parse_git_target(spec)
-                if tgt:
-                    repo_dir = ensure_repo(tgt)
-                    paths = (
-                        [repo_dir]
-                        if not tgt.path
-                        else expand_git_paths(repo_dir, tgt.path)
-                    )
-                else:
-                    base = "" if os.path.isabs(spec) else base_dir
-                    paths = expand_git_paths(base, spec)
-
-                for full in paths:
-                    if not os.path.exists(full):
-                        raise FileNotFoundError(
-                            f"Component '{name}' path not found: {full}"
-                        )
-                    custom_label = file_opts.get("filename")
-                    if custom_label and os.path.isfile(full):
-                        from .reference import FileReference
-
-                        fr = FileReference(
-                            full,
-                            format="md",
-                            label=str(custom_label),
-                            inject=inject,
-                            depth=depth,
-                        )
-                        seed_refs.append(fr)
-                    else:
-                        refs = create_file_references(
-                            [full],
-                            ignore_patterns=None,
-                            format="md",
-                            label="relative",
-                            inject=inject,
-                            depth=depth,
-                        )["refs"]
-                        seed_refs.extend(refs)
+            seed_refs = _resolve_spec_to_seed_refs(
+                spec,
+                file_opts,
+                base_dir,
+                inject=inject,
+                depth=depth,
+                component_name=name,
+            )
 
             input_refs_for_comp.extend([r for r in seed_refs if hasattr(r, "path")])
 
@@ -419,28 +329,11 @@ def assemble_payload_with_mdlinks(
 
         all_input_refs.extend(input_refs_for_comp)
 
-        attachment_lines = [f'<attachment label="{name}">']
-        for idx, ref in enumerate(refs_for_attachment):
-            attachment_lines.append(ref.output)
-            if idx < len(refs_for_attachment) - 1:
-                attachment_lines.append("")
-        attachment_lines.append("</attachment>")
-        inner = "\n".join(attachment_lines)
-
-        if wrap_mode:
-            if wrap_mode.lower() == "md":
-                inner = "```\n" + inner + "\n```"
-            else:
-                inner = f"<{wrap_mode}>\n{inner}\n</{wrap_mode}>"
-
-        block_lines: List[str] = []
-        if prefix:
-            block_lines.append(prefix)
-        block_lines.append(inner)
-        if suffix:
-            block_lines.append(suffix)
-
-        parts.append("\n".join(block_lines))
+        parts.append(
+            _render_attachment_block(
+                name, refs_for_attachment, wrap_mode, prefix, suffix
+            )
+        )
 
     return (
         "\n\n".join(parts),
@@ -452,47 +345,54 @@ def assemble_payload_with_mdlinks(
     )
 
 
+@dataclass
+class PayloadResult:
+    payload: str
+    input_refs: List[Any]
+    trace_items: List[Any]
+    base_dir: str
+    skipped_paths: List[str]
+    skip_impact: Dict[str, Any]
+
+
+def build_payload(
+    components: List[Dict[str, Any]],
+    base_dir: str,
+    *,
+    inject: bool = False,
+    depth: int = 5,
+    link_depth: int = 0,
+    link_scope: str = "all",
+    link_skip: Optional[List[str]] = None,
+) -> PayloadResult:
+    payload, input_refs, trace_items, base, skipped, impact = _build_payload_impl(
+        components,
+        base_dir,
+        inject=inject,
+        depth=depth,
+        link_depth_default=link_depth,
+        link_scope_default=link_scope,
+        link_skip_default=link_skip or [],
+    )
+    return PayloadResult(payload, input_refs, trace_items, base, skipped, impact)
+
+
 def render_from_yaml(
     manifest_path: str,
     *,
     inject: bool = False,
     depth: int = 5,
 ) -> str:
-    """
-    Load YAML with top-level:
-      config:
-        root:  # optional, expands ~
-      components:
-        - text: ...
-        - name: ...; prefix/suffix?; files: [...]
-        - wrap:  # optional
-    """
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
-
-    if not isinstance(data, dict):
-        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
-
-    cfg = data.get("config", {})
-    if "root" in cfg:
-        raw = cfg["root"] or "~"
-        base_dir = os.path.expanduser(raw)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(manifest_path))
-
-    comps = data.get("components")
-    if not isinstance(comps, list):
-        raise ValueError("'components' must be a list")
-
-    return assemble_payload(comps, base_dir, inject=inject, depth=depth)
+    """Render manifest to payload text."""
+    return render_manifest(manifest_path, inject=inject, depth=depth).payload
 
 
-def render_from_yaml_with_mdlinks(
+def render_manifest(
     manifest_path: str,
     *,
     inject: bool = False,
     depth: int = 5,
-):
+) -> PayloadResult:
     """
     Load YAML and assemble payload with mdlinks.
     Respects top-level config keys:
@@ -525,24 +425,24 @@ def render_from_yaml_with_mdlinks(
     if isinstance(link_skip_default, str):
         link_skip_default = [link_skip_default]
 
-    return assemble_payload_with_mdlinks(
+    return build_payload(
         comps,
         base_dir,
         inject=inject,
         depth=depth,
-        link_depth_default=link_depth_default,
-        link_scope_default=link_scope_default,
-        link_skip_default=link_skip_default,
+        link_depth=link_depth_default,
+        link_scope=link_scope_default,
+        link_skip=link_skip_default,
     )
 
 
-def assemble_payload_with_mdlinks_from_data(
+def render_manifest_data(
     data: Dict[str, Any],
     manifest_cwd: str,
     *,
     inject: bool = False,
     depth: int = 5,
-):
+) -> PayloadResult:
     """
     Assemble from an already-parsed YAML mapping (used for stdin case).
     Returns (payload_text, input_refs, trace_items, base_dir, skipped_paths, skip_impact).
@@ -566,12 +466,12 @@ def assemble_payload_with_mdlinks_from_data(
     if isinstance(link_skip_default, str):
         link_skip_default = [link_skip_default]
 
-    return assemble_payload_with_mdlinks(
+    return build_payload(
         comps,
         base_dir,
         inject=inject,
         depth=depth,
-        link_depth_default=link_depth_default,
-        link_scope_default=link_scope_default,
-        link_skip_default=link_skip_default,
+        link_depth=link_depth_default,
+        link_scope=link_scope_default,
+        link_skip=link_skip_default,
     )

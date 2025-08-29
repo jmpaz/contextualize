@@ -342,21 +342,20 @@ def payload_cmd(ctx, manifest_path, inject, trace):
 
         from .mdlinks import format_trace_output
         from .payload import (
-            assemble_payload_with_mdlinks_from_data,
-            render_from_yaml_with_mdlinks,
+            render_manifest,
+            render_manifest_data,
         )
     except ImportError:
         raise click.ClickException("pyyaml is required")
 
     if manifest_path:
-        (
-            payload_content,
-            input_refs,
-            trace_items,
-            base_dir,
-            skipped_paths,
-            skip_impact,
-        ) = render_from_yaml_with_mdlinks(manifest_path, inject=inject)
+        result = render_manifest(manifest_path, inject=inject)
+        payload_content = result.payload
+        input_refs = result.input_refs
+        trace_items = result.trace_items
+        base_dir = result.base_dir
+        skipped_paths = result.skipped_paths
+        skip_impact = result.skip_impact
         if trace:
             stdin_data = ctx.obj.get("stdin_data", "")
             trace_output = format_trace_output(
@@ -393,14 +392,13 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         )
 
     try:
-        (
-            payload_content,
-            input_refs,
-            trace_items,
-            base_dir,
-            skipped_paths,
-            skip_impact,
-        ) = assemble_payload_with_mdlinks_from_data(data, os.getcwd(), inject=inject)
+        result = render_manifest_data(data, os.getcwd(), inject=inject)
+        payload_content = result.payload
+        input_refs = result.input_refs
+        trace_items = result.trace_items
+        base_dir = result.base_dir
+        skipped_paths = result.skipped_paths
+        skip_impact = result.skip_impact
     except Exception as e:
         raise click.ClickException(str(e))
 
