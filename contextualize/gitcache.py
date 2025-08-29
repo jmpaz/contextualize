@@ -170,7 +170,6 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
                 # if ls-remote fails, try the original rev as-is
                 pass
 
-        # try to checkout first - it might already be available
         try:
             subprocess.run(
                 ["git", "-C", g.cache_dir, "checkout", rev],
@@ -178,30 +177,39 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
                 capture_output=True,
             )
         except subprocess.CalledProcessError:
-            # if checkout fails, we might have a shallow repo that needs more history
             try:
-                # first try to unshallow the repo
                 subprocess.run(
-                    ["git", "-C", g.cache_dir, "fetch", "--unshallow"],
+                    ["git", "-C", g.cache_dir, "fetch", "origin", f"{rev}:{rev}"],
                     check=True,
                     capture_output=True,
                 )
             except subprocess.CalledProcessError:
-                # if unshallow fails (maybe it's already unshallow), just fetch all
-                subprocess.run(
-                    ["git", "-C", g.cache_dir, "fetch", "origin"],
-                    check=True,
-                    capture_output=True,
-                )
+                try:
+                    subprocess.run(
+                        ["git", "-C", g.cache_dir, "fetch", "--unshallow"],
+                        check=True,
+                        capture_output=True,
+                    )
+                except subprocess.CalledProcessError:
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            g.cache_dir,
+                            "fetch",
+                            "origin",
+                            "+refs/heads/*:refs/remotes/origin/*",
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
 
-            # now try to checkout again
             subprocess.run(
                 ["git", "-C", g.cache_dir, "checkout", rev],
                 check=True,
                 capture_output=True,
             )
     else:
-        # no specific revision, checkout default branch
         try:
             result = subprocess.run(
                 [
@@ -223,7 +231,6 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
                 capture_output=True,
             )
         except subprocess.CalledProcessError:
-            # if symbolic-ref fails, fall back to main/master
             for branch in ["main", "master"]:
                 try:
                     subprocess.run(
