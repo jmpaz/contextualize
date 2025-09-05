@@ -4,6 +4,8 @@ import re
 from collections import defaultdict
 from urllib.parse import urlparse
 
+import yaml
+
 from .reference import FileReference, _is_utf8_file, create_file_references
 from .tokenize import count_tokens
 
@@ -126,10 +128,42 @@ def format_trace_output(
             else path
         )
 
+    def _parse_frontmatter_title(text: str):
+        """Extract `title` from YAML frontmatter if present."""
+        if not text:
+            return None
+        try:
+            if not text.lstrip().startswith("---"):
+                return None
+            lines = text.splitlines()
+            if not lines or not lines[0].strip().startswith("---"):
+                return None
+            end_idx = None
+            for i in range(1, min(len(lines), 200)):
+                if lines[i].strip() == "---":
+                    end_idx = i
+                    break
+            if end_idx is None:
+                return None
+            yaml_text = "\n".join(lines[1:end_idx])
+            if not yaml_text.strip():
+                return None
+            data = yaml.safe_load(yaml_text)
+            if isinstance(data, dict) and "title" in data:
+                title = data.get("title")
+                if title is None:
+                    return None
+                title_str = str(title).strip().replace("\n", " ")
+                return title_str if title_str else None
+        except Exception:
+            return None
+        return None
+
     for ref in input_refs:
         rel_path = get_rel_path(ref.path)
         original_content = getattr(ref, "original_file_content", None)
         final_content = getattr(ref, "file_content", "")
+        title = _parse_frontmatter_title(original_content or final_content)
 
         if original_content and original_content != final_content:
             original_tokens = count_tokens(original_content)["count"]
@@ -139,7 +173,7 @@ def format_trace_output(
             token_count = count_tokens(final_content)["count"] if final_content else 0
             token_display = token_count
 
-        formatted_inputs.append((rel_path, token_display, None))
+        formatted_inputs.append((rel_path, token_display, title))
 
     by_depth = defaultdict(list)
     parent_map = {}
@@ -181,12 +215,14 @@ def format_trace_output(
                     if hasattr(ref, "file_content")
                     else 0
                 )
+                title = _parse_frontmatter_title(getattr(ref, "file_content", ""))
                 seen_files.add(abs_tgt)
             else:
                 token_count = None
+                title = None
 
             chain = build_source_chain(abs_tgt, max_len=depth)
-            depth_items.append((rel_path, token_count, chain))
+            depth_items.append((rel_path, token_count, chain, title))
         formatted_discovered[depth] = depth_items
 
     if skipped_paths:
@@ -213,33 +249,38 @@ def format_trace_output(
         stdin_token_count = count_tokens(stdin_data)["count"]
         lines.append(f"  stdin ({stdin_token_count} tokens)")
 
-    for rel_path, token_display, _ in formatted_inputs:
+    for rel_path, token_display, title in formatted_inputs:
         if isinstance(token_display, tuple):
             original, final = token_display
-            lines.append(f"  {rel_path} ({original} → {final} tokens)")
+            token_str = f"({original} → {final} tokens)"
         else:
-            lines.append(f"  {rel_path} ({token_display} tokens)")
+            token_str = f"({token_display} tokens)"
+        if title:
+            line = f"  {rel_path} — {title} {token_str}"
+        else:
+            line = f"  {rel_path} {token_str}"
+        lines.append(line)
 
     for depth in sorted(formatted_discovered.keys()):
         lines.append(f"\nDiscovered (depth {depth}):")
 
         path_token_widths = []
-        for p, t, _ in formatted_discovered[depth]:
-            if t is None:
-                path_token_widths.append(len(f"{p} (✓)"))
-            else:
-                path_token_widths.append(len(f"{p} ({t})"))
+        for p, t, _chain, _title in formatted_discovered[depth]:
+            token_part = "(✓)" if t is None else f"({t})"
+            title_part = f" — {_title}" if _title else ""
+            left_text = f"{p}{title_part} {token_part}"
+            path_token_widths.append(len(left_text))
         max_path_token_width = max(path_token_widths, default=0)
 
-        for rel_path, token_count, source_chain in formatted_discovered[depth]:
-            if token_count is None:
-                path_with_tokens = f"{rel_path} (✓)"
-            else:
-                path_with_tokens = f"{rel_path} ({token_count})"
-            padding = max_path_token_width - len(path_with_tokens)
+        for rel_path, token_count, source_chain, title in formatted_discovered[depth]:
+            token_part = "(✓)" if token_count is None else f"({token_count})"
+            title_part = f" — {title}" if title else ""
+            left_text = f"{rel_path}{title_part} {token_part}"
+            padding = max_path_token_width - len(left_text)
 
             arrow_and_chain = f" ← {source_chain}" if source_chain else ""
-            lines.append(f"  {path_with_tokens}{' ' * padding}{arrow_and_chain}")
+            line = f"  {left_text}{' ' * padding}{arrow_and_chain}"
+            lines.append(line)
 
     if formatted_skipped:
         lines.append("\nSkipped:")
