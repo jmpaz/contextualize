@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from .utils import brace_expand, _split_brace_options
+from .utils import _split_brace_options, brace_expand
 
 CACHE_ROOT = os.path.expanduser("~/.local/share/contextualize/cache/git")
 
@@ -38,27 +38,50 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
     # path specifier
     if ":" in target:
         if target.startswith("git@"):
-            # git@host:owner/repo
+            # git@host:owner/repo(.git)[:path]
             first_colon = target.find(":")
-            if target.count(":") > 1:
-                remainder = target[first_colon + 1 :]
-                last_colon = remainder.rfind(":")
-                if last_colon != -1 and remainder[last_colon + 1 :]:
-                    path = remainder[last_colon + 1 :]
-                    repo_url = target[: first_colon + 1 + last_colon]
+            if first_colon != -1:
+                depth = 0
+                seen_slash = False
+                colon_pos = -1
+                for i in range(first_colon + 1, len(target)):
+                    ch = target[i]
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth = max(0, depth - 1)
+                    elif ch == "/":
+                        seen_slash = True
+                    elif ch == ":" and depth == 0 and seen_slash:
+                        colon_pos = i
+                        break
+                if colon_pos != -1 and colon_pos + 1 < len(target):
+                    path = target[colon_pos + 1 :]
+                    repo_url = target[:colon_pos]
         else:
-            # http/https URLs - colon after protocol
-            colon_pos = target.rfind(":")
+            # http/https URLs
             protocol_end = target.find("://")
-            if protocol_end != -1 and colon_pos > protocol_end + 2:
-                potential_path = target[colon_pos + 1 :]
-                if potential_path and (
-                    not potential_path.isdigit() or "/" in potential_path
-                ):
-                    path, repo_url = potential_path, target[:colon_pos]
+            if protocol_end != -1:
+                slash_after_host = target.find("/", protocol_end + 3)
+                scan_start = (
+                    slash_after_host if slash_after_host != -1 else protocol_end + 3
+                )
+                depth = 0
+                colon_pos = -1
+                for i in range(scan_start, len(target)):
+                    ch = target[i]
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth = max(0, depth - 1)
+                    elif ch == ":" and depth == 0:
+                        colon_pos = i
+                        break
+                if colon_pos != -1 and colon_pos + 1 < len(target):
+                    path = target[colon_pos + 1 :]
+                    repo_url = target[:colon_pos]
 
     # revision specifier
-    # handle # first (takes precedence for specific commit hashes)
     if "#" in repo_url:
         hash_pos = repo_url.rfind("#")
         potential_rev = repo_url[hash_pos + 1 :]
@@ -68,8 +91,7 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
     # handle @ for branch/revision
     if "@" in repo_url:
         if repo_url.startswith("git@"):
-            # for git@ URLs, only look for @ after the first one
-            git_at_end = repo_url.find(":", 4)  # find colon after git@host
+            git_at_end = repo_url.find(":", 4)
             if git_at_end != -1:
                 remaining = repo_url[git_at_end + 1 :]
                 if "@" in remaining:
