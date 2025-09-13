@@ -426,7 +426,7 @@ def add_markdown_link_refs(
     - scope: follow links from only the first file ("first") or from all initial files ("all")
     """
     if link_depth <= 0 or not refs:
-        return refs, []
+        return refs, [], {}
 
     seen = set()
 
