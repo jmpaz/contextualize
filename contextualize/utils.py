@@ -68,10 +68,9 @@ def segment_output(text, max_tokens, format_hint):
     from .tokenize import count_tokens
 
     if format_hint == "xml":
-        files = re.findall(r"<file path='[^']*'>.*?</file>", text, re.DOTALL)
-        remaining = re.sub(
-            r"<file path='[^']*'>.*?</file>", "|||FILE|||", text, flags=re.DOTALL
-        )
+        pattern = r"<file\b[^>]*>.*?</file>"
+        files = re.findall(pattern, text, re.DOTALL)
+        remaining = re.sub(pattern, "|||FILE|||", text, flags=re.DOTALL)
         parts = remaining.split("|||FILE|||")
         result = []
         for i, part in enumerate(parts):

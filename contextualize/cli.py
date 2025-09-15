@@ -439,6 +439,12 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     help="Show paths crawled during execution.",
 )
 @click.option(
+    "--rev",
+    type=str,
+    default=None,
+    help="Read local file/directory content from a git revision (e.g., HEAD).",
+)
+@click.option(
     "--link-scope",
     type=click.Choice(["first", "all"], case_sensitive=False),
     default="all",
@@ -458,6 +464,7 @@ def cat_cmd(
     link_scope,
     link_skip,
     trace,
+    rev,
 ):
     """
     Prepare and concatenate file references (raw).
@@ -499,6 +506,25 @@ def cat_cmd(
         ignored_folders.update(result.get("ignored_folders", {}))
 
     refs = []
+    use_rev = bool(rev)
+    repo_root = None
+    ignore_spec = None
+    if use_rev:
+        from .gitrev import get_repo_root, list_files_at_rev, GitRevFileReference
+        from pathspec import PathSpec
+        from .utils import brace_expand
+
+        repo_root = get_repo_root(os.getcwd())
+        if not repo_root:
+            raise click.ClickException("--rev requires running inside a git repository")
+        patterns = [".gitignore", ".git/", "__pycache__/", "__init__.py"]
+        if ignore:
+            for pat in ignore:
+                if "{" in pat and "}" in pat:
+                    patterns.extend(brace_expand(pat))
+                else:
+                    patterns.append(pat)
+        ignore_spec = PathSpec.from_lines("gitwildmatch", patterns)
     for p in paths:
         if p.startswith("http://") or p.startswith("https://"):
             tgt = parse_git_target(p)
@@ -526,6 +552,26 @@ def cat_cmd(
                         trace_collector=injection_trace_items,
                     )
                 )
+        elif use_rev:
+            try:
+                spec_rel = p
+                if os.path.isabs(spec_rel) or spec_rel.startswith(".."):
+                    spec_rel = os.path.relpath(os.path.abspath(p), repo_root)
+                rel_files = list_files_at_rev(repo_root, rev, [spec_rel])
+            except Exception as e:
+                raise click.ClickException(str(e))
+            for relf in rel_files:
+                if ignore_spec and ignore_spec.match_file(relf):
+                    continue
+                refs.append(
+                    GitRevFileReference(
+                        repo_root=repo_root,
+                        rev=rev,
+                        rel_path=relf,
+                        format=format,
+                        label=label,
+                    )
+                )
         elif os.path.exists(p):
             add_file_refs([p])
         else:
@@ -548,8 +594,7 @@ def cat_cmd(
 
     input_refs = [r for r in refs if isinstance(r, FileReference)]
 
-    # resolve markdown links
-    if link_depth > 0:
+    if link_depth > 0 and not use_rev:
         refs[:], trace_items, skip_impact = add_markdown_link_refs(
             refs,
             link_depth=link_depth,
@@ -648,8 +693,14 @@ def fetch_cmd(ctx, issue, properties, config):
 )
 @click.option("--git-pull", is_flag=True, help="Pull cached git repos")
 @click.option("--git-reclone", is_flag=True, help="Reclone cached git repos")
+@click.option(
+    "--rev",
+    type=str,
+    default=None,
+    help="Generate the map from a git revision (e.g., HEAD)",
+)
 @click.pass_context
-def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone):
+def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone, rev):
     """
     Generate a repository map (raw).
     """
@@ -661,28 +712,48 @@ def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone):
 
     from pathlib import Path
 
-    from contextualize.repomap import generate_repo_map_data
+    from contextualize.repomap import (
+        generate_repo_map_data,
+        generate_repo_map_data_from_git,
+    )
 
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
 
-    expanded: list[str] = []
-    for p in paths:
-        if os.path.exists(p):
-            expanded.append(p)
-            continue
+    if rev:
+        from .gitrev import get_repo_root
 
-        tgt = parse_git_target(p)
-        if tgt:
-            repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
-            if tgt.path:
-                for item in expand_git_paths(repo_dir, tgt.path):
-                    expanded.append(str(Path(item)))
+        repo_root = get_repo_root(os.getcwd())
+        if not repo_root:
+            raise click.ClickException("--rev requires running inside a git repository")
+        # Treat provided paths as path specs relative to repo root if not absolute
+        expanded: list[str] = []
+        for p in paths:
+            if os.path.isabs(p) or p.startswith(".."):
+                expanded.append(os.path.relpath(os.path.abspath(p), repo_root))
             else:
-                expanded.append(str(Path(repo_dir)))
-        else:
-            expanded.append(p)
+                expanded.append(p)
+        result = generate_repo_map_data_from_git(
+            repo_root, expanded, rev, max_tokens, format, ignore
+        )
+    else:
+        expanded: list[str] = []
+        for p in paths:
+            if os.path.exists(p):
+                expanded.append(p)
+                continue
 
-    result = generate_repo_map_data(expanded, max_tokens, format, ignore)
+            tgt = parse_git_target(p)
+            if tgt:
+                repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
+                if tgt.path:
+                    for item in expand_git_paths(repo_dir, tgt.path):
+                        expanded.append(str(Path(item)))
+                else:
+                    expanded.append(str(Path(repo_dir)))
+            else:
+                expanded.append(p)
+
+        result = generate_repo_map_data(expanded, max_tokens, format, ignore)
     if "error" in result:
         return result["error"]
     return result["repo_map"]

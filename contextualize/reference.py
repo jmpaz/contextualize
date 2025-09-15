@@ -298,13 +298,21 @@ class URLReference:
         return process_text(text, format=self.format, label=self.get_label())
 
 
-def process_text(text, clean=False, range=None, format="md", label="", shell_cmd=None):
+def process_text(
+    text,
+    clean=False,
+    range=None,
+    format="md",
+    label="",
+    shell_cmd=None,
+    rev: str | None = None,
+):
     if clean:
         text = _clean(text)
     if range:
         text = _extract_range(text, range)
     max_backticks = _count_max_backticks(text)
-    return _delimit(text, format, label, max_backticks, shell_cmd)
+    return _delimit(text, format, label, max_backticks, shell_cmd, rev)
 
 
 def _clean(text):
@@ -329,16 +337,22 @@ def _count_max_backticks(text):
     return max_backticks
 
 
-def _delimit(text, format, label, max_backticks=0, shell_cmd=None):
+def _delimit(
+    text, format, label, max_backticks=0, shell_cmd=None, rev: str | None = None
+):
     if format == "md":
         backticks_str = "`" * max(max_backticks + 2, 3)  # at least 3
-        return f"{backticks_str}{label}\n{text}\n{backticks_str}"
+        info = f"{label}@{rev}" if rev else label
+        return f"{backticks_str}{info}\n{text}\n{backticks_str}"
     elif format == "xml":
+        if rev:
+            return f"<file path='{label}' rev='{rev}'>\n{text}\n</file>"
         return f"<file path='{label}'>\n{text}\n</file>"
     elif format == "shell":
         if shell_cmd:
             return f"❯ {shell_cmd}\n{text}"
         else:
-            return f"❯ cat {label}\n{text}"
+            info = f"{label}@{rev}" if rev else label
+            return f"❯ cat {info}\n{text}"
     else:
         return text
