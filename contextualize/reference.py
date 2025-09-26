@@ -1,3 +1,4 @@
+import codecs
 import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -9,10 +10,19 @@ def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
     try:
         with open(path, "rb") as f:
             chunk = f.read(sample_size)
-        chunk.decode("utf-8")
-        return True
-    except (UnicodeDecodeError, OSError):
+    except OSError:
         return False
+
+    if not chunk:
+        return True
+
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        decoder.decode(chunk, final=False)
+    except UnicodeDecodeError:
+        return False
+
+    return True
 
 
 def create_file_references(
