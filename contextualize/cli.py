@@ -510,11 +510,18 @@ def cat_cmd(
     repo_root = None
     ignore_spec = None
     if use_rev:
-        from .gitrev import get_repo_root, list_files_at_rev, GitRevFileReference
+        from .gitrev import (
+            GitRevFileReference,
+            discover_repo_root,
+            list_files_at_rev,
+        )
         from pathspec import PathSpec
         from .utils import brace_expand
 
-        repo_root = get_repo_root(os.getcwd())
+        try:
+            repo_root = discover_repo_root(paths, cwd=os.getcwd())
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
         if not repo_root:
             raise click.ClickException("--rev requires running inside a git repository")
         patterns = [".gitignore", ".git/", "__pycache__/", "__init__.py"]
@@ -554,9 +561,9 @@ def cat_cmd(
                 )
         elif use_rev:
             try:
-                spec_rel = p
+                spec_rel = os.path.expanduser(p)
                 if os.path.isabs(spec_rel) or spec_rel.startswith(".."):
-                    spec_rel = os.path.relpath(os.path.abspath(p), repo_root)
+                    spec_rel = os.path.relpath(os.path.abspath(spec_rel), repo_root)
                 rel_files = list_files_at_rev(repo_root, rev, [spec_rel])
             except Exception as e:
                 raise click.ClickException(str(e))
@@ -720,18 +727,22 @@ def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone, rev):
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
 
     if rev:
-        from .gitrev import get_repo_root
+        from .gitrev import discover_repo_root
 
-        repo_root = get_repo_root(os.getcwd())
+        try:
+            repo_root = discover_repo_root(paths, cwd=os.getcwd())
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
         if not repo_root:
             raise click.ClickException("--rev requires running inside a git repository")
         # Treat provided paths as path specs relative to repo root if not absolute
         expanded: list[str] = []
         for p in paths:
-            if os.path.isabs(p) or p.startswith(".."):
-                expanded.append(os.path.relpath(os.path.abspath(p), repo_root))
+            expanded_path = os.path.expanduser(p)
+            if os.path.isabs(expanded_path) or expanded_path.startswith(".."):
+                expanded.append(os.path.relpath(os.path.abspath(expanded_path), repo_root))
             else:
-                expanded.append(p)
+                expanded.append(expanded_path)
         result = generate_repo_map_data_from_git(
             repo_root, expanded, rev, max_tokens, format, ignore
         )

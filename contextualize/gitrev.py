@@ -67,6 +67,57 @@ def read_file_at_rev(repo_root: str, rev: str, rel_path: str) -> Optional[str]:
         return None
 
 
+def discover_repo_root(paths: Iterable[str], *, cwd: Optional[str] = None) -> Optional[str]:
+    """Attempt to discover a git repository root for the provided paths."""
+
+    repo_roots: set[str] = set()
+
+    def _normalize_path(raw: str) -> Optional[str]:
+        if not raw or raw == "-":
+            return None
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return None
+        path = os.path.expanduser(raw)
+        base_cwd = os.path.abspath(cwd) if cwd else os.getcwd()
+        if not os.path.isabs(path):
+            path = os.path.join(base_cwd, path)
+        return os.path.abspath(path)
+
+    def _add_repo_root(path: str) -> None:
+        current = path
+        visited: set[str] = set()
+        while current not in visited:
+            visited.add(current)
+            if os.path.isdir(current) or os.path.isfile(current):
+                root = get_repo_root(current)
+                if root:
+                    repo_roots.add(os.path.abspath(root))
+                    return
+            parent = os.path.dirname(current)
+            if parent == current:
+                return
+            current = parent
+
+    for raw in paths:
+        normalized = _normalize_path(raw)
+        if normalized:
+            _add_repo_root(normalized)
+
+    if not repo_roots:
+        fallback_base = os.path.abspath(cwd) if cwd else os.getcwd()
+        root = get_repo_root(fallback_base)
+        if root:
+            repo_roots.add(os.path.abspath(root))
+
+    if not repo_roots:
+        return None
+
+    if len(repo_roots) > 1:
+        raise ValueError("Multiple git repositories detected; please specify one repository per command invocation.")
+
+    return next(iter(repo_roots))
+
+
 @dataclass
 class GitRevFileReference:
     repo_root: str
