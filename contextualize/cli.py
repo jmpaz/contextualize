@@ -182,8 +182,11 @@ def cli(
     ctx.obj["stdin_data"] = stdin_data
 
     if ctx.invoked_subcommand is None and not stdin_data:
-        click.echo(ctx.get_help())
-        ctx.exit()
+        if prompt:
+            ctx.obj["prompt_only"] = True
+        else:
+            click.echo(ctx.get_help())
+            ctx.exit()
 
 
 @cli.result_callback()
@@ -201,6 +204,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     position = ctx.obj.get("output_pos", "append")
     prompts = ctx.obj["prompt"]
     no_subcmd = ctx.invoked_subcommand is None
+    prompt_only = ctx.obj.get("prompt_only", False)
 
     if subcommand_output and stdin_data:
         # pipeline: wrap and prompt only the new content
@@ -217,20 +221,27 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         elif stdin_data and no_subcmd:
             # no subcommand, just processing stdin
             raw_text = stdin_data
+        elif prompt_only and prompts:
+            if len(prompts) == 1:
+                raw_text = prompts[0]
+            else:
+                raw_text = f"{prompts[0]}\n\n{prompts[1]}"
         else:
             return
 
         # normal case: wrap everything and add prompts
         wrapped_text = wrap_text(raw_text, ctx.obj["wrap_mode"])
 
-        # handle position parameter for single prompt cases
-        if len(prompts) == 1:
-            if ctx.obj["output_pos"] == "append":
-                final_output = f"{wrapped_text}\n{prompts[0]}"
-            else:
-                final_output = f"{prompts[0]}\n{wrapped_text}"
+        if prompt_only:
+            final_output = wrapped_text
         else:
-            final_output = add_prompt_wrappers(wrapped_text, prompts)
+            if len(prompts) == 1:
+                if ctx.obj["output_pos"] == "append":
+                    final_output = f"{wrapped_text}\n{prompts[0]}"
+                else:
+                    final_output = f"{prompts[0]}\n{wrapped_text}"
+            else:
+                final_output = add_prompt_wrappers(wrapped_text, prompts)
 
     token_info = count_tokens(final_output, target="cl100k_base")
     token_count = token_info["count"]
@@ -261,7 +272,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                 final_segment = build_segment(
                     segment_text,
                     ctx.obj["wrap_mode"],
-                    prompts,
+                    [] if prompt_only else prompts,
                     ctx.obj["output_pos"],
                     i,
                     len(segments),
@@ -510,12 +521,13 @@ def cat_cmd(
     repo_root = None
     ignore_spec = None
     if use_rev:
+        from pathspec import PathSpec
+
         from .gitrev import (
             GitRevFileReference,
             discover_repo_root,
             list_files_at_rev,
         )
-        from pathspec import PathSpec
         from .utils import brace_expand
 
         try:
@@ -740,7 +752,9 @@ def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone, rev):
         for p in paths:
             expanded_path = os.path.expanduser(p)
             if os.path.isabs(expanded_path) or expanded_path.startswith(".."):
-                expanded.append(os.path.relpath(os.path.abspath(expanded_path), repo_root))
+                expanded.append(
+                    os.path.relpath(os.path.abspath(expanded_path), repo_root)
+                )
             else:
                 expanded.append(expanded_path)
         result = generate_repo_map_data_from_git(
