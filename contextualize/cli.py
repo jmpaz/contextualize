@@ -673,19 +673,57 @@ def paste_cmd(ctx, count, format_hint):
 
     from .utils import wait_for_enter
 
+    def wait_for_stage_signal():
+        try:
+            import termios
+            import tty
+
+            fd = os.open("/dev/tty", os.O_RDONLY)
+        except OSError:
+            return "confirm" if wait_for_enter() else "interrupt"
+
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            key = os.read(fd, 1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            os.close(fd)
+
+        if key in (b"\r", b"\n"):
+            return "confirm"
+        if key == b"\x1b":
+            return "undo"
+        if key in (b"\x03", b"\x04"):
+            return "interrupt"
+        return "confirm"
+
     captured_segments = []
-    for idx in range(1, count + 1):
+    idx = 1
+    while idx <= count:
         prompt = (
             f"[{idx}/{count}] Press Enter after copying the next chunk..."
             if count > 1
             else "Press Enter once your clipboard is ready..."
         )
         click.echo(prompt + " ", nl=False)
-        confirmed = wait_for_enter()
-        if not confirmed:
-            click.echo()
+        signal = wait_for_stage_signal()
+        click.echo()
+
+        if signal == "interrupt":
             click.echo("Clipboard capture interrupted.", err=True)
             ctx.exit(1)
+
+        if signal == "undo":
+            if captured_segments:
+                captured_segments.pop()
+                if idx > 1:
+                    idx -= 1
+                click.echo("Previous capture removed. Please copy again for this slot.")
+            else:
+                click.echo("No capture to undo.")
+            click.echo()
+            continue
 
         try:
             clipboard_text = clipboard_paste()
@@ -706,6 +744,8 @@ def paste_cmd(ctx, count, format_hint):
         prefix = f"[{idx}/{count}] " if count > 1 else ""
         click.echo(f"{prefix}Captured {token_count} tokens ({token_method}).")
         click.echo()
+
+        idx += 1
 
     return "\n\n".join(captured_segments)
 

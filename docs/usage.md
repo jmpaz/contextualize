@@ -68,6 +68,7 @@ contextualize paste [--count INT] [--format md|xml|shell|plain]
 
 `paste` waits for you to copy text and press Enter for each requested chunk (defaults to one chunk).
 `--count` lets you capture multiple clipboard entries in sequence, and every capture is labelled similar to `cat` output.
+Press `Esc` while a prompt is waiting to undo the most recent capture if you grabbed the wrong snippet.
 The command works with all global flags, so you can wrap or prompt the captured text just like other sources.
 
 ```
