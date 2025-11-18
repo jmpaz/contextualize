@@ -2,8 +2,9 @@ import os
 import sys
 
 import click
-from pyperclip import copy
+from pyperclip import copy, paste as clipboard_paste
 
+from .reference import process_text
 from .tokenize import count_tokens
 from .utils import add_prompt_wrappers, read_config, wrap_text
 
@@ -24,7 +25,7 @@ def preprocess_args():
     if len(sys.argv) < 2:
         return
 
-    subcommands = {"payload", "cat", "fetch", "map", "shell"}
+    subcommands = {"payload", "cat", "fetch", "map", "shell", "paste"}
 
     # options that should be moved / which take values
     forwardable = {
@@ -642,6 +643,72 @@ def cat_cmd(
         ctx.obj["trace_output"] = trace_output
 
     return result
+
+
+@cli.command("paste")
+@click.option(
+    "--count",
+    "-n",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of clipboard captures to collect.",
+)
+@click.option(
+    "-f",
+    "--format",
+    "format_hint",
+    default="md",
+    help="Output format for clipboard entries (md/xml/shell/plain).",
+)
+@click.pass_context
+def paste_cmd(ctx, count, format_hint):
+    """
+    Capture clipboard contents in stages.
+    """
+    if count < 1:
+        raise click.BadParameter("--count must be at least 1")
+
+    ctx.obj["format"] = format_hint
+
+    from .utils import wait_for_enter
+
+    captured_segments = []
+    for idx in range(1, count + 1):
+        prompt = (
+            f"[{idx}/{count}] Press Enter after copying the next chunk..."
+            if count > 1
+            else "Press Enter once your clipboard is ready..."
+        )
+        click.echo(prompt + " ", nl=False)
+        confirmed = wait_for_enter()
+        if not confirmed:
+            click.echo()
+            click.echo("Clipboard capture interrupted.", err=True)
+            ctx.exit(1)
+
+        try:
+            clipboard_text = clipboard_paste()
+        except Exception as exc:
+            raise click.ClickException(f"Unable to read from clipboard: {exc}") from exc
+
+        label = "paste" if count == 1 else f"paste #{idx}"
+        processed = process_text(
+            clipboard_text or "",
+            format=format_hint,
+            label=label,
+        )
+        captured_segments.append(processed)
+
+        token_info = count_tokens(processed, target="cl100k_base")
+        token_count = token_info["count"]
+        token_method = token_info["method"]
+        prefix = f"[{idx}/{count}] " if count > 1 else ""
+        click.echo(f"{prefix}Captured {token_count} tokens ({token_method}).")
+        click.echo()
+
+    return "\n\n".join(captured_segments)
+
 
 
 @cli.command("fetch")

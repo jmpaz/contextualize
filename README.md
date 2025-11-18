@@ -22,11 +22,12 @@ uv tool install contextualize
 
 | command   | purpose |
 |-----------|---------|
-| `cat`     | gather file contents (e.g. for piping to [`llm`](https://github.com/simonw/llm)). often used with `--copy` + `--prompt` |
-| `map`     | survey file/folder structure(s) with [aider](https://github.com/paul-gauthier/aider)                                                     |
-| `shell`   | capture output from arbitrary shell commands                                                     |
-| `fetch`   | retrieve Linear issues (legacy)                                                            |
-| `payload` | compose text and file blocks from a YAML manifest                                          |
+| `cat`     | gather file contents (e.g. for piping to [`llm`](https://github.com/simonw/llm), or pasting elsewhere) |
+| `map`     | survey file/folder structure(s) with [aider](https://github.com/paul-gauthier/aider)                   |
+| `shell`   | capture output from arbitrary shell commands                                                           |
+| `fetch`   | retrieve Linear issues (legacy)                                                                        |
+| `payload` | compose text and file blocks from a YAML manifest                                                      |
+| `paste`   | capture staged clipboard snippets                                                                      |
 
 All commands work with the global flags `--prompt`, `--wrap`, `--copy`, and `--write-file`.
 

@@ -51,14 +51,33 @@ The `.git` suffix is optional and the repo will be cloned to `~/.local/share/con
 | `--git-reclone` | delete and re-clone cached git repos |
 
 
-```bash
+```
 contextualize -p "review:" -c \  # prepend "summarize:" to the output of cat; copy the result
   cat -f xml \                   # wrap each file's content in '<paste>' tags
   pyproject.toml docs/           # extract content from pyproject.toml, docs/*
 ```
 
 
+### `paste`
+
+Capture clipboard text in stages so it can be combined with other `contextualize` steps.
+
+```
+contextualize paste [--count INT] [--format md|xml|shell|plain]
+```
+
+`paste` waits for you to copy text and press Enter for each requested chunk (defaults to one chunk).
+`--count` lets you capture multiple clipboard entries in sequence, and every capture is labelled similar to `cat` output.
+The command works with all global flags, so you can wrap or prompt the captured text just like other sources.
+
+```
+# capture two snippets before piping them into another stage
+contextualize paste --count 2 | contextualize -p "Please review both snippets:" -w --copy
+```
+
+
 ### `map`
+
 
 Generate repository maps summarizing file structure.
 
