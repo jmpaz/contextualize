@@ -125,6 +125,7 @@ class GitRevFileReference:
     rel_path: str
     format: str = "md"
     label: str = "relative"
+    include_token_count: bool = False
 
     def get_label(self) -> str:
         if self.label == "relative":
@@ -141,5 +142,9 @@ class GitRevFileReference:
         if text is None:
             return ""
         return process_text(
-            text, format=self.format, label=self.get_label(), rev=self.rev
+            text,
+            format=self.format,
+            label=self.get_label(),
+            rev=self.rev,
+            include_token_count=self.include_token_count,
         )

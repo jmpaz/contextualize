@@ -429,6 +429,12 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     default="relative",
     help="Label style for references (relative/name/ext)",
 )
+@click.option(
+    "--tokens",
+    "annotate_tokens",
+    is_flag=True,
+    help="Annotate each label with a token count for its content.",
+)
 @click.option("--git-pull", is_flag=True, help="Pull cached git repos")
 @click.option("--git-reclone", is_flag=True, help="Reclone cached git repos")
 @click.option(
@@ -469,6 +475,7 @@ def cat_cmd(
     ignore,
     format,
     label,
+    annotate_tokens,
     git_pull,
     git_reclone,
     inject,
@@ -509,6 +516,7 @@ def cat_cmd(
             ignore,
             format,
             label,
+            include_token_count=annotate_tokens,
             inject=inject,
             depth=5,
             trace_collector=injection_trace_items,
@@ -567,6 +575,7 @@ def cat_cmd(
                         p,
                         format=format,
                         label=label,
+                        include_token_count=annotate_tokens,
                         inject=inject,
                         depth=5,
                         trace_collector=injection_trace_items,
@@ -590,6 +599,7 @@ def cat_cmd(
                         rel_path=relf,
                         format=format,
                         label=label,
+                        include_token_count=annotate_tokens,
                     )
                 )
         elif os.path.exists(p):
@@ -623,6 +633,7 @@ def cat_cmd(
             label=label,
             inject=inject,
             link_skip=link_skip,
+            include_token_count=annotate_tokens,
         )
 
     result = concat_refs(refs)
@@ -661,8 +672,14 @@ def cat_cmd(
     default="md",
     help="Output format for clipboard entries (md/xml/shell/plain).",
 )
+@click.option(
+    "--tokens",
+    "annotate_tokens",
+    is_flag=True,
+    help="Annotate each captured label with a token count for its content.",
+)
 @click.pass_context
-def paste_cmd(ctx, count, format_hint):
+def paste_cmd(ctx, count, format_hint, annotate_tokens):
     """
     Capture clipboard contents in stages.
     """
@@ -731,10 +748,17 @@ def paste_cmd(ctx, count, format_hint):
             raise click.ClickException(f"Unable to read from clipboard: {exc}") from exc
 
         label = "paste" if count == 1 else f"paste #{idx}"
+        content_token_count = None
+        if annotate_tokens:
+            content_token_count = count_tokens(
+                clipboard_text or "", target="cl100k_base"
+            )["count"]
         processed = process_text(
             clipboard_text or "",
             format=format_hint,
             label=label,
+            token_count=content_token_count,
+            include_token_count=annotate_tokens,
         )
         captured_segments.append(processed)
 

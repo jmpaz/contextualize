@@ -417,6 +417,7 @@ def add_markdown_link_refs(
     scope="all",
     format_="md",
     label="relative",
+    include_token_count=False,
     inject=False,
     link_skip=None,
 ):
@@ -485,6 +486,7 @@ def add_markdown_link_refs(
         ignore_patterns=None,
         format=format_,
         label=label,
+        include_token_count=include_token_count,
         inject=inject,
         depth=link_depth,
     )["refs"]

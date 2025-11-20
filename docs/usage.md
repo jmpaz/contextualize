@@ -32,7 +32,7 @@ contextualize --prompt "what has changed in this patch?" shell "git diff --stage
 Collect file contents, with optional wrapping and labels.
 
 ```
-contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell] [--label relative|name|ext] [--git-pull] [--git-reclone]
+contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell] [--label relative|name|ext] [--tokens] [--git-pull] [--git-reclone]
 ```
 
 `PATH` may also start with a git repo spec such as `gh:user/repo` or `https://host/repo.git:path`.
@@ -47,6 +47,7 @@ The `.git` suffix is optional and the repo will be cloned to `~/.local/share/con
 | `--ignore` | glob pattern(s) to skip |
 | `--format` | choose `md` (default), `xml`, or `shell` |
 | `--label` | how to label each attachment: `relative` (default), `name`, or `ext` |
+| `--tokens` | annotate each label with the file's token count |
 | `--git-pull` | update cached git repos referenced in paths |
 | `--git-reclone` | delete and re-clone cached git repos |
 
@@ -63,11 +64,12 @@ contextualize -p "review:" -c \  # prepend "summarize:" to the output of cat; co
 Capture clipboard text in stages so it can be combined with other `contextualize` steps.
 
 ```
-contextualize paste [--count INT] [--format md|xml|shell|plain]
+contextualize paste [--count INT] [--format md|xml|shell|plain] [--tokens]
 ```
 
 `paste` waits for you to copy text and press Enter for each requested chunk (defaults to one chunk).
 `--count` lets you capture multiple clipboard entries in sequence, and every capture is labelled similar to `cat` output.
+`--tokens` adds token count for each label.
 Press `Esc` while a prompt is waiting to undo the most recent capture if you grabbed the wrong snippet.
 The command works with all global flags, so you can wrap or prompt the captured text just like other sources.
 

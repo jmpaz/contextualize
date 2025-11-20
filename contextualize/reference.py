@@ -30,6 +30,7 @@ def create_file_references(
     ignore_patterns=None,
     format="md",
     label="relative",
+    include_token_count=False,
     inject=False,
     depth=5,
     trace_collector=None,
@@ -92,6 +93,7 @@ def create_file_references(
                     path,
                     format=format,
                     label=label,
+                    include_token_count=include_token_count,
                     inject=inject,
                     depth=depth,
                     trace_collector=trace_collector,
@@ -112,6 +114,7 @@ def create_file_references(
                         path,
                         format=format,
                         label=label,
+                        include_token_count=include_token_count,
                         inject=inject,
                         depth=depth,
                         trace_collector=trace_collector,
@@ -155,6 +158,7 @@ def create_file_references(
                                 file_path,
                                 format=format,
                                 label=label,
+                                include_token_count=include_token_count,
                                 inject=inject,
                                 depth=depth,
                                 trace_collector=trace_collector,
@@ -207,6 +211,7 @@ class FileReference:
         label="relative",
         clean_contents=False,
         *,
+        include_token_count=False,
         inject=False,
         depth=5,
         trace_collector=None,
@@ -216,6 +221,7 @@ class FileReference:
         self.format = format
         self.label = label
         self.clean_contents = clean_contents
+        self.include_token_count = include_token_count
         self.inject = inject
         self.depth = depth
         self.trace_collector = trace_collector
@@ -242,6 +248,7 @@ class FileReference:
             self.range,
             self.format,
             self.get_label(),
+            include_token_count=self.include_token_count,
         )
 
     def get_label(self):
@@ -269,6 +276,7 @@ class URLReference:
     url: str
     format: str = "md"
     label: str = "relative"
+    include_token_count: bool = False
     inject: bool = False
     depth: int = 5
     trace_collector: list = None
@@ -305,7 +313,12 @@ class URLReference:
             text = inject_content_in_text(
                 text, self.depth, self.trace_collector, self.url
             )
-        return process_text(text, format=self.format, label=self.get_label())
+        return process_text(
+            text,
+            format=self.format,
+            label=self.get_label(),
+            include_token_count=self.include_token_count,
+        )
 
 
 def process_text(
@@ -316,13 +329,26 @@ def process_text(
     label="",
     shell_cmd=None,
     rev: str | None = None,
+    token_count: int | None = None,
+    include_token_count: bool = False,
 ):
     if clean:
         text = _clean(text)
     if range:
         text = _extract_range(text, range)
+    use_token_count = include_token_count and format in {"md", "xml", "shell"}
+
+    if use_token_count:
+        if token_count is None:
+            from .tokenize import count_tokens
+
+            token_count = count_tokens(text)["count"]
+    else:
+        token_count = None
     max_backticks = _count_max_backticks(text)
-    return _delimit(text, format, label, max_backticks, shell_cmd, rev)
+    return _delimit(
+        text, format, label, max_backticks, shell_cmd, rev, token_count
+    )
 
 
 def _clean(text):
@@ -348,21 +374,31 @@ def _count_max_backticks(text):
 
 
 def _delimit(
-    text, format, label, max_backticks=0, shell_cmd=None, rev: str | None = None
+    text,
+    format,
+    label,
+    max_backticks=0,
+    shell_cmd=None,
+    rev: str | None = None,
+    token_count: int | None = None,
 ):
     if format == "md":
         backticks_str = "`" * max(max_backticks + 2, 3)  # at least 3
         info = f"{label}@{rev}" if rev else label
+        if token_count is not None:
+            info = f"{info} ({token_count} tokens)"
         return f"{backticks_str}{info}\n{text}\n{backticks_str}"
     elif format == "xml":
-        if rev:
-            return f"<file path='{label}' rev='{rev}'>\n{text}\n</file>"
-        return f"<file path='{label}'>\n{text}\n</file>"
+        token_attr = f" token_count='{token_count}'" if token_count is not None else ""
+        rev_attr = f" rev='{rev}'" if rev else ""
+        return f"<file path='{label}'{token_attr}{rev_attr}>\n{text}\n</file>"
     elif format == "shell":
         if shell_cmd:
-            return f"❯ {shell_cmd}\n{text}"
+            token_suffix = f" ({token_count} tokens)" if token_count is not None else ""
+            return f"❯ {shell_cmd}{token_suffix}\n{text}"
         else:
             info = f"{label}@{rev}" if rev else label
-            return f"❯ cat {info}\n{text}"
+            token_suffix = f" ({token_count} tokens)" if token_count is not None else ""
+            return f"❯ cat {info}{token_suffix}\n{text}"
     else:
         return text
