@@ -61,7 +61,7 @@ def add_prompt_wrappers(content, prompts):
         return f"{prompts[0]}\n{content}\n\n{prompts[1]}"
 
 
-def segment_output(text, max_tokens, format_hint):
+def segment_output(text, max_tokens, format_hint, token_target="cl100k_base"):
     """Split text into segments without breaking files."""
     import re
 
@@ -94,7 +94,7 @@ def segment_output(text, max_tokens, format_hint):
     current_tokens = 0
 
     for file_content in files:
-        tokens = count_tokens(file_content, target="cl100k_base")["count"]
+        tokens = count_tokens(file_content, target=token_target)["count"]
 
         if tokens > max_tokens:
             if current:

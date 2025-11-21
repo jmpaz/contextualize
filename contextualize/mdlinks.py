@@ -99,6 +99,7 @@ def format_trace_output(
     injection_traces=None,
     ignored_files=None,
     ignored_folders=None,
+    token_target="cl100k_base",
 ):
     if not input_refs and not trace_items and not stdin_data and not injection_traces:
         return ""
@@ -166,11 +167,15 @@ def format_trace_output(
         title = _parse_frontmatter_title(original_content or final_content)
 
         if original_content and original_content != final_content:
-            original_tokens = count_tokens(original_content)["count"]
-            final_tokens = count_tokens(final_content)["count"]
+            original_tokens = count_tokens(original_content, target=token_target)["count"]
+            final_tokens = count_tokens(final_content, target=token_target)["count"]
             token_display = (original_tokens, final_tokens)
         else:
-            token_count = count_tokens(final_content)["count"] if final_content else 0
+            token_count = (
+                count_tokens(final_content, target=token_target)["count"]
+                if final_content
+                else 0
+            )
             token_display = token_count
 
         formatted_inputs.append((rel_path, token_display, title))
@@ -209,9 +214,9 @@ def format_trace_output(
 
             is_duplicate = abs_tgt in seen_files
             if not is_duplicate:
-                ref = FileReference(tgt)
+                ref = FileReference(tgt, token_target=token_target)
                 token_count = (
-                    count_tokens(ref.file_content)["count"]
+                    count_tokens(ref.file_content, target=token_target)["count"]
                     if hasattr(ref, "file_content")
                     else 0
                 )
@@ -246,7 +251,7 @@ def format_trace_output(
     lines = ["Inputs:"]
 
     if stdin_data:
-        stdin_token_count = count_tokens(stdin_data)["count"]
+        stdin_token_count = count_tokens(stdin_data, target=token_target)["count"]
         lines.append(f"  stdin ({stdin_token_count} tokens)")
 
     for rel_path, token_display, title in formatted_inputs:
@@ -373,7 +378,7 @@ def format_trace_output(
     return "\n".join(lines)
 
 
-def count_downstream(path, content, depth, seen_set=None):
+def count_downstream(path, content, depth, seen_set=None, token_target="cl100k_base"):
     """Count how many files would be discovered downstream from a skipped file."""
     if seen_set is None:
         seen_set = set([os.path.abspath(path)])
@@ -401,7 +406,7 @@ def count_downstream(path, content, depth, seen_set=None):
             try:
                 with open(target, "r", encoding="utf-8") as fh:
                     content = fh.read()
-                    token_info = count_tokens(content)
+                    token_info = count_tokens(content, target=token_target)
                     total_tokens += token_info["count"]
                     queue.append((target, content, current_depth + 1))
             except Exception:
@@ -417,6 +422,7 @@ def add_markdown_link_refs(
     scope="all",
     format_="md",
     label="relative",
+    token_target="cl100k_base",
     include_token_count=False,
     inject=False,
     link_skip=None,
@@ -440,9 +446,9 @@ def add_markdown_link_refs(
                 try:
                     with open(abs_path, "r", encoding="utf-8") as f:
                         content = f.read()
-                        token_info = count_tokens(content)
+                        token_info = count_tokens(content, target=token_target)
                         downstream_count, downstream_tokens = count_downstream(
-                            abs_path, content, link_depth, seen
+                            abs_path, content, link_depth, seen, token_target
                         )
                         skip_impact[abs_path] = {
                             "file_tokens": token_info["count"],
@@ -486,6 +492,7 @@ def add_markdown_link_refs(
         ignore_patterns=None,
         format=format_,
         label=label,
+        token_target=token_target,
         include_token_count=include_token_count,
         inject=inject,
         depth=link_depth,

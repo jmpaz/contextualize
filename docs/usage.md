@@ -7,6 +7,7 @@
 - `-w, --wrap` wrap output as `md` or `xml`; `-w` alone is a shorthand for `--wrap xml`
 - `-c, --copy` copy to clipboard instead of printing; displays the token count
 - `--write-file PATH` write final output to a file
+- `--token-target STR` choose the encoding/model for token counting (e.g. `cl100k_base`, `gpt-4o-mini`, `claude-3-5-sonnet-20241022`)
 - `-a, --after` / `-b, --before` control placement in pipelines (default: after)
 
 these flags can be combined with any command:

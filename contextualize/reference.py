@@ -31,6 +31,7 @@ def create_file_references(
     format="md",
     label="relative",
     include_token_count=False,
+    token_target="cl100k_base",
     inject=False,
     depth=5,
     trace_collector=None,
@@ -53,7 +54,7 @@ def create_file_references(
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            return count_tokens(content)["count"]
+            return count_tokens(content, target=token_target)["count"]
         except:
             return 0
 
@@ -94,6 +95,7 @@ def create_file_references(
                     format=format,
                     label=label,
                     include_token_count=include_token_count,
+                    token_target=token_target,
                     inject=inject,
                     depth=depth,
                     trace_collector=trace_collector,
@@ -115,6 +117,7 @@ def create_file_references(
                         format=format,
                         label=label,
                         include_token_count=include_token_count,
+                        token_target=token_target,
                         inject=inject,
                         depth=depth,
                         trace_collector=trace_collector,
@@ -159,6 +162,7 @@ def create_file_references(
                                 format=format,
                                 label=label,
                                 include_token_count=include_token_count,
+                                token_target=token_target,
                                 inject=inject,
                                 depth=depth,
                                 trace_collector=trace_collector,
@@ -212,6 +216,7 @@ class FileReference:
         clean_contents=False,
         *,
         include_token_count=False,
+        token_target="cl100k_base",
         inject=False,
         depth=5,
         trace_collector=None,
@@ -222,6 +227,7 @@ class FileReference:
         self.label = label
         self.clean_contents = clean_contents
         self.include_token_count = include_token_count
+        self.token_target = token_target
         self.inject = inject
         self.depth = depth
         self.trace_collector = trace_collector
@@ -248,6 +254,7 @@ class FileReference:
             self.range,
             self.format,
             self.get_label(),
+            token_target=self.token_target,
             include_token_count=self.include_token_count,
         )
 
@@ -276,6 +283,7 @@ class URLReference:
     url: str
     format: str = "md"
     label: str = "relative"
+    token_target: str = "cl100k_base"
     include_token_count: bool = False
     inject: bool = False
     depth: int = 5
@@ -317,6 +325,7 @@ class URLReference:
             text,
             format=self.format,
             label=self.get_label(),
+            token_target=self.token_target,
             include_token_count=self.include_token_count,
         )
 
@@ -329,6 +338,7 @@ def process_text(
     label="",
     shell_cmd=None,
     rev: str | None = None,
+    token_target: str = "cl100k_base",
     token_count: int | None = None,
     include_token_count: bool = False,
 ):
@@ -342,7 +352,7 @@ def process_text(
         if token_count is None:
             from .tokenize import count_tokens
 
-            token_count = count_tokens(text)["count"]
+            token_count = count_tokens(text, target=token_target)["count"]
     else:
         token_count = None
     max_backticks = _count_max_backticks(text)

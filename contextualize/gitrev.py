@@ -126,6 +126,7 @@ class GitRevFileReference:
     format: str = "md"
     label: str = "relative"
     include_token_count: bool = False
+    token_target: str = "cl100k_base"
 
     def get_label(self) -> str:
         if self.label == "relative":
@@ -146,5 +147,6 @@ class GitRevFileReference:
             format=self.format,
             label=self.get_label(),
             rev=self.rev,
+            token_target=self.token_target,
             include_token_count=self.include_token_count,
         )

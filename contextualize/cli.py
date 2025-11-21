@@ -37,8 +37,16 @@ def preprocess_args():
         "-c",
         "--write-file",
         "--copy-segments",
+        "--token-target",
     }
-    value_options = {"--prompt", "-p", "--wrap", "--write-file", "--copy-segments"}
+    value_options = {
+        "--prompt",
+        "-p",
+        "--wrap",
+        "--write-file",
+        "--copy-segments",
+        "--token-target",
+    }
 
     # find subcommand position
     subcommand_idx = None
@@ -129,6 +137,12 @@ preprocess_args()
     help="Optional output file path (overrides clipboard/console output).",
 )
 @click.option(
+    "--token-target",
+    default="cl100k_base",
+    show_default=True,
+    help="Encoding/model to use for token counts (e.g., cl100k_base, gpt-4o-mini, claude-3-5-sonnet-20241022).",
+)
+@click.option(
     "--position",
     "output_position",
     type=click.Choice(["append", "prepend"], case_sensitive=False),
@@ -150,6 +164,7 @@ def cli(
     copy,
     copy_segments,
     write_file,
+    token_target,
     output_position,
     append_flag,
     prepend_flag,
@@ -163,6 +178,7 @@ def cli(
     ctx.obj["copy"] = copy
     ctx.obj["copy_segments"] = copy_segments
     ctx.obj["write_file"] = write_file
+    ctx.obj["token_target"] = token_target
     if append_flag and prepend_flag:
         raise click.BadParameter("use -a or -b, not both")
     if copy and copy_segments:
@@ -244,7 +260,9 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
             else:
                 final_output = add_prompt_wrappers(wrapped_text, prompts)
 
-    token_info = count_tokens(final_output, target="cl100k_base")
+    token_target = ctx.obj.get("token_target", "cl100k_base")
+
+    token_info = count_tokens(final_output, target=token_target)
     token_count = token_info["count"]
     token_method = token_info["method"]
 
@@ -263,7 +281,9 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     elif copy_segments:
         from .utils import build_segment, segment_output, wait_for_enter
 
-        segments = segment_output(raw_text, copy_segments, ctx.obj.get("format", "md"))
+        segments = segment_output(
+            raw_text, copy_segments, ctx.obj.get("format", "md"), token_target
+        )
         if not segments:
             click.echo("No content to copy.", err=True)
             return
@@ -280,7 +300,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                 )
 
                 copy(final_segment)
-                tokens = count_tokens(final_segment, target="cl100k_base")["count"]
+                tokens = count_tokens(final_segment, target=token_target)["count"]
 
                 if i == 1:
                     msg = f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard ({token_method})"
@@ -337,6 +357,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     If no path is given and stdin is piped, read the manifest from stdin.
     """
     ctx.obj["format"] = "md"  # for segmentation
+    token_target = ctx.obj.get("token_target", "cl100k_base")
     try:
         import os
 
@@ -368,6 +389,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
                 common_prefix=base_dir,
                 stdin_data=stdin_data if stdin_data else None,
                 injection_traces=None,  # TODO: add injection trace support for payload
+                token_target=token_target,
             )
             ctx.obj["trace_output"] = trace_output
         return payload_content
@@ -413,6 +435,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
             common_prefix=base_dir,
             stdin_data=None,
             injection_traces=None,  # TODO: add injection trace support for payload
+            token_target=token_target,
         )
         ctx.obj["trace_output"] = trace_output
 
@@ -488,6 +511,8 @@ def cat_cmd(
     """
     Prepare and concatenate file references (raw).
     """
+    token_target = ctx.obj.get("token_target", "cl100k_base")
+
     if not paths:
         click.echo(ctx.get_help())
         ctx.exit()
@@ -517,6 +542,7 @@ def cat_cmd(
             format,
             label,
             include_token_count=annotate_tokens,
+            token_target=token_target,
             inject=inject,
             depth=5,
             trace_collector=injection_trace_items,
@@ -575,6 +601,7 @@ def cat_cmd(
                         p,
                         format=format,
                         label=label,
+                        token_target=token_target,
                         include_token_count=annotate_tokens,
                         inject=inject,
                         depth=5,
@@ -600,6 +627,7 @@ def cat_cmd(
                         format=format,
                         label=label,
                         include_token_count=annotate_tokens,
+                        token_target=token_target,
                     )
                 )
         elif os.path.exists(p):
@@ -631,6 +659,7 @@ def cat_cmd(
             scope=link_scope,
             format_=format,
             label=label,
+            token_target=token_target,
             inject=inject,
             link_skip=link_skip,
             include_token_count=annotate_tokens,
@@ -650,6 +679,7 @@ def cat_cmd(
             injection_traces=injection_trace_items,
             ignored_files=ignored_files,
             ignored_folders=ignored_folders,
+            token_target=token_target,
         )
         ctx.obj["trace_output"] = trace_output
 
@@ -687,6 +717,7 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
         raise click.BadParameter("--count must be at least 1")
 
     ctx.obj["format"] = format_hint
+    token_target = ctx.obj.get("token_target", "cl100k_base")
 
     from .utils import wait_for_enter
 
@@ -751,18 +782,19 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
         content_token_count = None
         if annotate_tokens:
             content_token_count = count_tokens(
-                clipboard_text or "", target="cl100k_base"
+                clipboard_text or "", target=token_target
             )["count"]
         processed = process_text(
             clipboard_text or "",
             format=format_hint,
             label=label,
+            token_target=token_target,
             token_count=content_token_count,
             include_token_count=annotate_tokens,
         )
         captured_segments.append(processed)
 
-        token_info = count_tokens(processed, target="cl100k_base")
+        token_info = count_tokens(processed, target=token_target)
         token_count = token_info["count"]
         token_method = token_info["method"]
         prefix = f"[{idx}/{count}] " if count > 1 else ""
