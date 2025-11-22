@@ -2,7 +2,8 @@ import os
 import sys
 
 import click
-from pyperclip import copy, paste as clipboard_paste
+from pyperclip import copy
+from pyperclip import paste as clipboard_paste
 
 from .reference import process_text
 from .tokenize import count_tokens
@@ -35,6 +36,7 @@ def preprocess_args():
         "-w",
         "--copy",
         "-c",
+        "--count",
         "--write-file",
         "--copy-segments",
         "--token-target",
@@ -127,9 +129,15 @@ preprocess_args()
     help="Copy output to clipboard instead of printing to console. Prints labeled token count.",
 )
 @click.option(
+    "--count",
+    "count_only",
+    is_flag=True,
+    help="Dry run of --copy. Counts and prints # of tokens in output.",
+)
+@click.option(
     "--copy-segments",
     type=int,
-    help="Copy output in segments with max tokens per segment. Mutually exclusive with --copy.",
+    help="Copy output in segments with max tokens per segment. Mutually exclusive with --copy and --count.",
 )
 @click.option(
     "--write-file",
@@ -162,6 +170,7 @@ def cli(
     wrap_short,
     wrap_mode,
     copy,
+    count_only,
     copy_segments,
     write_file,
     token_target,
@@ -176,6 +185,7 @@ def cli(
     ctx.obj["prompt"] = prompt
     ctx.obj["wrap_mode"] = "md" if wrap_short else wrap_mode
     ctx.obj["copy"] = copy
+    ctx.obj["count_only"] = count_only
     ctx.obj["copy_segments"] = copy_segments
     ctx.obj["write_file"] = write_file
     ctx.obj["token_target"] = token_target
@@ -183,6 +193,10 @@ def cli(
         raise click.BadParameter("use -a or -b, not both")
     if copy and copy_segments:
         raise click.BadParameter("--copy and --copy-segments are mutually exclusive")
+    if copy and count_only:
+        raise click.BadParameter("--copy and --count are mutually exclusive")
+    if count_only and copy_segments:
+        raise click.BadParameter("--count and --copy-segments are mutually exclusive")
 
     if append_flag:
         output_pos = "append"
@@ -268,6 +282,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 
     write_file = ctx.obj["write_file"]
     copy_flag = ctx.obj["copy"]
+    count_flag = ctx.obj.get("count_only")
     copy_segments = ctx.obj.get("copy_segments")
     trace_output = ctx.obj.get("trace_output")
 
@@ -320,6 +335,11 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                     click.echo(trace_output)
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)
+    elif count_flag:
+        if trace_output:
+            click.echo(trace_output)
+            click.echo("\n-----\n")
+        click.echo(f"Processed {token_count} tokens ({token_method}).")
     elif copy_flag:
         try:
             copy(final_output)
@@ -804,7 +824,6 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
         idx += 1
 
     return "\n\n".join(captured_segments)
-
 
 
 @cli.command("fetch")
