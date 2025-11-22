@@ -464,7 +464,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aider-chat", specifier = ">=0.83.2" },
+    { name = "aider-chat", specifier = ">=0.86.1" },
     { name = "anthropic", specifier = "==0.42.0" },
     { name = "pathspec" },
     { name = "pyperclip", specifier = ">=1.8.2" },

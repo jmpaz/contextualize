@@ -10,7 +10,7 @@ requires-python = ">=3.10,<3.13"
 dependencies = [
   "pyyaml",
   "pathspec",
-  "aider-chat>=0.83.2",
+  "aider-chat>=0.86.1",
   "anthropic==0.42.0",
   "pyperclip>=1.8.2",
   "tiktoken>=0.6.0",
