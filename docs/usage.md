@@ -128,7 +128,7 @@ components:
     prefix: |
       here is the core logic:
     files:
-      - contextualize/*.py
+      - src/contextualize/**/*.py
       - README.md
     suffix: |
       that was the core logic.
@@ -171,7 +171,7 @@ The following chains of commands will each yield a single formatted string that 
 **In-style commit message**
 ```bash
 contextualize -p "Given the following codebase:" \
-  cat contextualize/ |
+  cat src/contextualize/ |
 
 contextualize -wp "please write a commit message for the following changes:" \
   shell "git diff --staged -U0" |

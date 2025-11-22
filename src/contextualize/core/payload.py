@@ -5,9 +5,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from .gitcache import ensure_repo, expand_git_paths, parse_git_target
-from .mdlinks import add_markdown_link_refs
-from .reference import URLReference, create_file_references
+from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
+from .links import add_markdown_link_refs
+from .references import URLReference, create_file_references
 from .utils import wrap_text
 
 
@@ -134,7 +134,7 @@ def _resolve_spec_to_seed_refs(
             )
         custom_label = file_opts.get("filename")
         if custom_label and os.path.isfile(full):
-            from .reference import FileReference
+            from .references import FileReference
 
             fr = FileReference(
                 full,

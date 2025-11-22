@@ -5,9 +5,8 @@ import click
 from pyperclip import copy
 from pyperclip import paste as clipboard_paste
 
-from .reference import process_text
-from .tokenize import count_tokens
-from .utils import add_prompt_wrappers, wrap_text
+from .core.render import process_text
+from .core.utils import add_prompt_wrappers, count_tokens, wrap_text
 
 
 def validate_prompt(ctx, param, value):
@@ -288,13 +287,13 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     trace_output = ctx.obj.get("trace_output")
     content_token_total = ctx.obj.get("max_tokens_total")
     if max_tokens_budget and content_token_total is None:
-        raise click.ClickException("Token budget was set but content totals were missing.")
+        raise click.ClickException(
+            "Token budget was set but content totals were missing."
+        )
 
     if max_tokens_budget and content_token_total > max_tokens_budget:
         breakdown = ctx.obj.get("max_tokens_breakdown")
-        msg = (
-            f"Token budget exceeded: {content_token_total} tokens > {max_tokens_budget} (target {token_target})."
-        )
+        msg = f"Token budget exceeded: {content_token_total} tokens > {max_tokens_budget} (target {token_target})."
         if breakdown:
             msg = msg + "\n" + breakdown
         raise click.ClickException(msg)
@@ -307,7 +306,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
             click.echo("\n-----\n")
         click.echo(f"Wrote {token_count} tokens ({token_method}) to {write_file}")
     elif copy_segments:
-        from .utils import build_segment, segment_output, wait_for_enter
+        from .core.utils import build_segment, segment_output, wait_for_enter
 
         segments = segment_output(
             raw_text, copy_segments, ctx.obj.get("format", "md"), token_target
@@ -396,8 +395,8 @@ def payload_cmd(ctx, manifest_path, inject, trace):
 
         import yaml
 
-        from .mdlinks import format_trace_output
-        from .payload import (
+        from .core.links import format_trace_output
+        from .core.payload import (
             render_manifest,
             render_manifest_data,
         )
@@ -564,13 +563,13 @@ def cat_cmd(
 
     from pathlib import Path
 
-    from .gitcache import ensure_repo, expand_git_paths, parse_git_target
-    from .mdlinks import (
+    from .git.cache import ensure_repo, expand_git_paths, parse_git_target
+    from .core.links import (
         add_markdown_link_refs,
         compute_input_token_details,
         format_trace_output,
     )
-    from .reference import (
+    from .core.references import (
         FileReference,
         URLReference,
         concat_refs,
@@ -606,12 +605,8 @@ def cat_cmd(
     if use_rev:
         from pathspec import PathSpec
 
-        from .gitrev import (
-            GitRevFileReference,
-            discover_repo_root,
-            list_files_at_rev,
-        )
-        from .utils import brace_expand
+        from .git.rev import GitRevFileReference, discover_repo_root, list_files_at_rev
+        from .core.utils import brace_expand
 
         try:
             repo_root = discover_repo_root(paths, cwd=os.getcwd())
@@ -672,7 +667,7 @@ def cat_cmd(
                 if symbols:
                     text_at_rev = read_file_at_rev(repo_root, rev, relf)
                     try:
-                        from .repomap import find_symbol_ranges
+                        from .core.repomap import find_symbol_ranges
 
                         match_map = find_symbol_ranges(relf, symbols, text=text_at_rev)
                     except Exception:
@@ -752,9 +747,10 @@ def cat_cmd(
                 except Exception:
                     pass
 
-            if getattr(ref, "file_content", None) is None and getattr(
-                ref, "original_file_content", None
-            ) is None:
+            if (
+                getattr(ref, "file_content", None) is None
+                and getattr(ref, "original_file_content", None) is None
+            ):
                 continue
 
             budget_refs.append(ref)
@@ -838,7 +834,7 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
     ctx.obj["format"] = format_hint
     token_target = ctx.obj.get("token_target", "cl100k_base")
 
-    from .utils import wait_for_enter
+    from .core.utils import wait_for_enter
 
     def wait_for_stage_signal():
         try:
@@ -973,17 +969,17 @@ def map_cmd(
 
     from pathlib import Path
 
-    from contextualize.repomap import (
+    from .core.repomap import (
         generate_repo_map_data,
         generate_repo_map_data_from_git,
     )
 
-    from .gitcache import ensure_repo, expand_git_paths, parse_git_target
+    from .git.cache import ensure_repo, expand_git_paths, parse_git_target
 
     token_target = ctx.obj.get("token_target", "cl100k_base")
 
     if rev:
-        from .gitrev import discover_repo_root
+        from .git.rev import discover_repo_root
 
         try:
             repo_root = discover_repo_root(paths, cwd=os.getcwd())
@@ -1061,7 +1057,7 @@ def shell_cmd(ctx, commands, format, capture_stderr):
     Run arbitrary shell commands (returns raw combined output).
     """
     ctx.obj["format"] = format  # for segmentation
-    from .shell import create_command_references
+    from .core.references import create_command_references
 
     refs_data = create_command_references(
         commands=commands,

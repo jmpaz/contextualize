@@ -8,10 +8,10 @@ from aider.repomap import (
     Spinner,
     filter_important_files,
 )
-from contextualize.tokenize import count_tokens
+from .utils import count_tokens
 from grep_ast import TreeContext
-from .reference import _is_utf8_file
-from .gitrev import list_files_at_rev, read_file_at_rev
+from .references import _is_utf8_file
+from ..git.rev import list_files_at_rev, read_file_at_rev
 
 
 def _parse_symbol_spec(spec: str) -> tuple[str, str, int | None]:
@@ -329,7 +329,9 @@ class ContextualRepoMap(RepoMap):
             progress=spin.step,
         )
 
-        other_rel_fnames = sorted(set(self.get_rel_fname(fname) for fname in other_fnames))
+        other_rel_fnames = sorted(
+            set(self.get_rel_fname(fname) for fname in other_fnames)
+        )
         special_fnames = filter_important_files(other_rel_fnames)
         ranked_tags_fnames = set(tag[0] for tag in ranked_tags)
         special_fnames = [fn for fn in special_fnames if fn not in ranked_tags_fnames]
@@ -363,7 +365,9 @@ class ContextualRepoMap(RepoMap):
 
             pct_err = abs(num_tokens - max_map_tokens) / max_map_tokens
             ok_err = 0.15
-            if (num_tokens <= max_map_tokens and num_tokens > best_tree_tokens) or pct_err < ok_err:
+            if (
+                num_tokens <= max_map_tokens and num_tokens > best_tree_tokens
+            ) or pct_err < ok_err:
                 best_tree = tree
                 best_tree_tokens = num_tokens
                 best_tags_subset = ranked_tags[:middle]
@@ -413,7 +417,9 @@ class ContextualRepoMap(RepoMap):
         self._symbol_context_cache[rel_fname] = {"context": ctx, "code": code}
         return ctx
 
-    def symbol_token_count(self, rel_fname: str, code: str, start_line: int, token_target: str) -> int:
+    def symbol_token_count(
+        self, rel_fname: str, code: str, start_line: int, token_target: str
+    ) -> int:
         ctx = self._symbol_context(rel_fname, code)
         if not ctx:
             return 0
@@ -432,7 +438,12 @@ class ContextualRepoMap(RepoMap):
 
 
 def generate_repo_map_data(
-    paths, max_tokens, fmt, ignore=None, annotate_tokens=False, token_target="cl100k_base"
+    paths,
+    max_tokens,
+    fmt,
+    ignore=None,
+    annotate_tokens=False,
+    token_target="cl100k_base",
 ):
     """
     Generate a repository map and return a dict containing:
@@ -474,7 +485,9 @@ def generate_repo_map_data(
 
     root = os.getcwd()
 
-    rm = ContextualRepoMap(map_tokens=max_tokens, main_model=token_counter, io=io, root=root)
+    rm = ContextualRepoMap(
+        map_tokens=max_tokens, main_model=token_counter, io=io, root=root
+    )
     repo_map = rm.get_repo_map(chat_files=[], other_files=files)
 
     if not repo_map:
@@ -515,7 +528,9 @@ def generate_repo_map_data(
                     continue
                 seen.add(t.line)
                 file_text = file_texts.get(rel_path, "")
-                tokens = rm.symbol_token_count(rel_path, file_text, t.line, token_target)
+                tokens = rm.symbol_token_count(
+                    rel_path, file_text, t.line, token_target
+                )
                 try:
                     source_line = file_text.splitlines()[t.line]
                 except Exception:
@@ -636,7 +651,9 @@ def generate_repo_map_data_from_git(
                     continue
                 seen.add(t.line)
                 file_text = file_texts.get(rel_path, "")
-                tokens = rm.symbol_token_count(rel_path, file_text, t.line, token_target)
+                tokens = rm.symbol_token_count(
+                    rel_path, file_text, t.line, token_target
+                )
                 try:
                     source_line = file_text.splitlines()[t.line]
                 except Exception:

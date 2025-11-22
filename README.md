@@ -35,7 +35,7 @@ All commands work with the global flags `--prompt`, `--wrap`, `--copy`, `--count
 
 ```bash
 # gather files and copy (individually wrapped + labelled, prefixed by '--prompt') to clipboard
-contextualize cat contextualize/ README.md --copy --prompt "how does this work?"
+contextualize cat src/ README.md --prompt "how does this work?" --copy
 
 # fetch a single file from a remote repo (cached under ~/.local/share/contextualize/cache/git/)
 contextualize cat gh:jmpaz/contextualize:README.md

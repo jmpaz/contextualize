@@ -1,10 +1,14 @@
 import codecs
 import os
 import sys
+import re
+import subprocess
 from dataclasses import dataclass
+from typing import List
 from urllib.parse import urlparse
 
-from .utils import brace_expand
+from .render import process_text
+from .utils import brace_expand, count_tokens
 
 
 def split_path_and_symbols(raw_path: str) -> tuple[str, list[str]]:
@@ -52,7 +56,6 @@ def create_file_references(
     Build a list of file references from the specified paths.
     if `inject` is true, {cx::...} markers are resolved before wrapping.
     """
-    from .tokenize import count_tokens
 
     def is_ignored(path, gitignore_patterns):
         # We'll import pathspec only if needed:
@@ -284,7 +287,7 @@ class FileReference:
             print(f"Error reading file {self.path}: {str(e)}")
             return ""
         if self.inject:
-            from .injection import inject_content_in_text
+            from .links import inject_content_in_text
 
             self.file_content = inject_content_in_text(
                 self.file_content, self.depth, self.trace_collector, self.path
@@ -325,7 +328,7 @@ class FileReference:
 
     def get_label(self):
         if self.label == "relative":
-            from .gitcache import CACHE_ROOT
+            from ..git.cache import CACHE_ROOT
 
             cache_root = os.path.join(CACHE_ROOT, "")
             if self.path.startswith(cache_root):
@@ -388,7 +391,7 @@ class URLReference:
             except Exception:
                 pass
         if self.inject:
-            from .injection import inject_content_in_text
+            from .links import inject_content_in_text
 
             text = inject_content_in_text(
                 text, self.depth, self.trace_collector, self.url
@@ -403,128 +406,88 @@ class URLReference:
         )
 
 
-def process_text(
-    text,
-    clean=False,
-    range=None,
-    ranges=None,
-    format="md",
-    label="",
-    shell_cmd=None,
-    rev: str | None = None,
-    token_target: str = "cl100k_base",
-    token_count: int | None = None,
-    include_token_count: bool = False,
-    symbols=None,
-):
-    if clean:
-        text = _clean(text)
-    if range and not ranges:
-        ranges = [range]
-    if ranges:
-        text = _extract_ranges(text, ranges)
-    use_token_count = include_token_count and format in {"md", "xml", "shell"}
+class CommandReference:
+    """
+    A wrapper that runs a command, captures its output, and formats it
+    with the same approach used by FileReference.
+    """
 
-    if use_token_count:
-        if token_count is None:
-            from .tokenize import count_tokens
+    def __init__(
+        self,
+        command: str,
+        format: str = "shell",
+        capture_stderr: bool = True,
+    ):
+        """
+        :param command: The raw command string, e.g. "ls --help"
+        :param format: "md"/"xml"/"shell"
+        :param capture_stderr: Whether to capture stderr as well.
+        """
+        self.command = command
+        self.format = format
+        self.capture_stderr = capture_stderr
 
-            token_count = count_tokens(text, target=token_target)["count"]
-    else:
-        token_count = None
-    max_backticks = _count_max_backticks(text)
-    return _delimit(
-        text,
-        format,
-        label,
-        max_backticks,
-        shell_cmd,
-        rev,
-        token_count,
-        symbols=symbols,
-        is_excerpt=bool(ranges),
-    )
+        self.command_output = self.run_command()
+        self.output = self.get_contents()
 
+    def run_command(self) -> str:
+        """
+        Execute the command and return combined stdout/stderr.
+        Captures stdout (and stderr if enabled), and returns a single string with ANSI
+        escape sequences removed.
+        """
+        try:
+            result = subprocess.run(
+                self.command,
+                shell=True,  # allows pipes, redirection, etc.
+                capture_output=True,
+                text=True,
+            )
+            stdout = result.stdout
+            stderr = result.stderr if self.capture_stderr else ""
+            combined = stdout + ("\n" + stderr if stderr else "")
+            return remove_ansi(combined)
+        except Exception as e:
+            return f"Error running command {self.command}: {str(e)}\n"
 
-def _clean(text):
-    # Example cleaning logic
-    return text.replace("    ", "\t")
-
-
-def _extract_range(text, range_tuple):
-    start, end = range_tuple
-    lines = text.split("\n")
-    return "\n".join(lines[start - 1 : end])
-
-
-def _extract_ranges(text, ranges):
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(ranges, key=lambda r: r[0]):
-        if not merged:
-            merged.append((start, end))
-            continue
-        prev_start, prev_end = merged[-1]
-        if start <= prev_end + 1:
-            merged[-1] = (prev_start, max(prev_end, end))
+    def get_contents(self) -> str:
+        if self.format == "xml":
+            return f'<cmd exec="{self.command}">\n{self.command_output}\n</cmd>'
         else:
-            merged.append((start, end))
-
-    lines = text.split("\n")
-    snippets = []
-    for start, end in merged:
-        start_idx = max(0, start - 1)
-        end_idx = min(len(lines), end)
-        snippet = "\n".join(lines[start_idx:end_idx])
-        snippets.append(snippet)
-
-    return "\n...\n".join(snippets)
+            return process_text(
+                text=self.command_output,
+                clean=False,
+                range=None,
+                format=self.format,
+                label=self.command,
+                shell_cmd=self.command if self.format == "shell" else None,
+            )
 
 
-def _count_max_backticks(text):
-    max_backticks = 0
-    for line in text.split("\n"):
-        # If a line starts with backticks, count them
-        stripped = line.lstrip("`")
-        count = len(line) - len(stripped)
-        if count > max_backticks:
-            max_backticks = count
-    return max_backticks
+def remove_ansi(text: str) -> str:
+    """
+    Remove ANSI escape sequences from text.
+    """
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_escape.sub("", text)
 
 
-def _delimit(
-    text,
-    format,
-    label,
-    max_backticks=0,
-    shell_cmd=None,
-    rev: str | None = None,
-    token_count: int | None = None,
-    *,
-    symbols=None,
-    is_excerpt=False,
+def create_command_references(
+    commands: List[str],
+    format: str = "shell",
+    capture_stderr: bool = True,
 ):
-    symbols_list = [s for s in (symbols or []) if s]
-    sym_suffix = f"::{','.join(symbols_list)}" if symbols_list else ""
-    label_with_symbols = f"{label}{sym_suffix}"
+    """
+    Runs each command, collects outputs as CommandReference objects,
+    and concatenates them similarly to how file references are handled.
+    """
+    cmd_refs = []
+    for cmd in commands:
+        cmd_ref = CommandReference(cmd, format=format, capture_stderr=capture_stderr)
+        cmd_refs.append(cmd_ref)
 
-    if format == "md":
-        backticks_str = "`" * max(max_backticks + 2, 3)  # at least 3
-        info = f"{label_with_symbols}@{rev}" if rev else label_with_symbols
-        if token_count is not None:
-            info = f"{info} ({token_count} tokens)"
-        return f"{backticks_str}{info}\n{text}\n{backticks_str}"
-    elif format == "xml":
-        token_attr = f" token_count='{token_count}'" if token_count is not None else ""
-        rev_attr = f" rev='{rev}'" if rev else ""
-        symbols_attr = (
-            f" symbols='{','.join(symbols_list)}'" if symbols_list else ""
-        )
-        return f"<file path='{label}'{symbols_attr}{token_attr}{rev_attr}>\n{text}\n</file>"
-    elif format == "shell":
-        target_label = f"{label_with_symbols}@{rev}" if rev else label_with_symbols
-        token_suffix = f" ({token_count} tokens)" if token_count is not None else ""
-        if shell_cmd:
-            return f"❯ {shell_cmd}{token_suffix}\n{text}"
-        return f"❯ cat {target_label}{token_suffix}\n{text}"
-    else:
-        return text
+    concatenated = "\n\n".join(ref.output for ref in cmd_refs)
+    return {
+        "refs": cmd_refs,
+        "concatenated": concatenated,
+    }

@@ -24,7 +24,8 @@ Homepage = "https://github.com/jmpaz/contextualize"
 contextualize = "contextualize.cli:main"
 
 [tool.setuptools]
-packages = ["contextualize"]
+package-dir = {"" = "src"}
+packages = {find = {where = ["src"]}}
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
