@@ -89,7 +89,7 @@ contextualize paste --count 2 | contextualize -p "Please review both snippets:" 
 Generate repository maps summarizing file structure.
 
 ```
-contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format plain|shell] [--git-pull] [--git-reclone]
+contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format plain|shell] [--tokens] [--git-pull] [--git-reclone]
 ```
 
 `PATH` accepts the same git repo specs as `cat`.
@@ -100,6 +100,7 @@ contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format pl
 | `--max-tokens` | limit map size for aider |
 | `--ignore` | glob pattern(s) to skip |
 | `--format` | choose `plain` (default) or `shell` |
+| `--tokens` | annotate each file header with the full file token count |
 | `--git-pull` | update cached git repos referenced in paths |
 | `--git-reclone` | delete and re-clone cached git repos |
 

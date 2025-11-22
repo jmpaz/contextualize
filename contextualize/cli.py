@@ -964,6 +964,12 @@ def fetch_cmd(ctx, issue, properties, config):
     default="plain",
     help="Output format for the repo map (plain/shell)",
 )
+@click.option(
+    "--tokens",
+    "annotate_tokens",
+    is_flag=True,
+    help="Annotate each file label with a token count for its map snippet.",
+)
 @click.option("--git-pull", is_flag=True, help="Pull cached git repos")
 @click.option("--git-reclone", is_flag=True, help="Reclone cached git repos")
 @click.option(
@@ -973,13 +979,18 @@ def fetch_cmd(ctx, issue, properties, config):
     help="Generate the map from a git revision (e.g., HEAD)",
 )
 @click.pass_context
-def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone, rev):
+def map_cmd(
+    ctx, paths, max_tokens, ignore, format, annotate_tokens, git_pull, git_reclone, rev
+):
     """
     Generate a repository map (raw).
     """
     if not paths:
         click.echo(ctx.get_help())
         ctx.exit()
+
+    if max_tokens is not None and max_tokens <= 0:
+        raise click.BadParameter("--max-tokens must be greater than 0")
 
     ctx.obj["format"] = format  # for segmentation
 
@@ -991,6 +1002,8 @@ def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone, rev):
     )
 
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
+
+    token_target = ctx.obj.get("token_target", "cl100k_base")
 
     if rev:
         from .gitrev import discover_repo_root
@@ -1012,7 +1025,14 @@ def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone, rev):
             else:
                 expanded.append(expanded_path)
         result = generate_repo_map_data_from_git(
-            repo_root, expanded, rev, max_tokens, format, ignore
+            repo_root,
+            expanded,
+            rev,
+            max_tokens,
+            format,
+            ignore,
+            annotate_tokens=annotate_tokens,
+            token_target=token_target,
         )
     else:
         expanded: list[str] = []
@@ -1032,7 +1052,14 @@ def map_cmd(ctx, paths, max_tokens, ignore, format, git_pull, git_reclone, rev):
             else:
                 expanded.append(p)
 
-        result = generate_repo_map_data(expanded, max_tokens, format, ignore)
+        result = generate_repo_map_data(
+            expanded,
+            max_tokens,
+            format,
+            ignore,
+            annotate_tokens=annotate_tokens,
+            token_target=token_target,
+        )
     if "error" in result:
         return result["error"]
     return result["repo_map"]
