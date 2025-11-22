@@ -352,7 +352,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         if trace_output:
             click.echo(trace_output)
             click.echo("\n-----\n")
-        click.echo(f"Processed {token_count} tokens ({token_method}).")
+        click.echo(f"Total: {token_count} tokens ({token_method}).")
     elif copy_flag:
         try:
             copy(final_output)
@@ -715,7 +715,8 @@ def cat_cmd(
     token_details = None
     breakdown = None
     max_tokens_budget = ctx.obj.get("max_tokens")
-    if max_tokens_budget:
+    need_token_details = bool(max_tokens_budget) or trace
+    if need_token_details:
         budget_refs = []
         for ref in refs:
             path = getattr(ref, "path", None) or getattr(ref, "url", None)
@@ -738,23 +739,25 @@ def cat_cmd(
         total_tokens, token_details = compute_input_token_details(
             budget_refs, token_target=token_target
         )
-        breakdown = format_trace_output(
-            budget_refs,
-            [],
-            common_prefix=None,
-            stdin_data=None,
-            token_target=token_target,
-            input_token_details=token_details,
-            sort_inputs_by_tokens=True,
-        )
-        ctx.obj["max_tokens_breakdown"] = breakdown
-        ctx.obj["max_tokens_details"] = token_details
-        ctx.obj["max_tokens_refs"] = budget_refs
-        ctx.obj["max_tokens_total"] = total_tokens
-        if total_tokens > max_tokens_budget:
-            raise click.ClickException(
-                f"Token budget exceeded: {total_tokens} tokens > {max_tokens_budget} (target {token_target}).\n{breakdown}"
+
+        if max_tokens_budget:
+            breakdown = format_trace_output(
+                budget_refs,
+                [],
+                common_prefix=None,
+                stdin_data=None,
+                token_target=token_target,
+                input_token_details=token_details,
+                sort_inputs_by_tokens=True,
             )
+            ctx.obj["max_tokens_breakdown"] = breakdown
+            ctx.obj["max_tokens_details"] = token_details
+            ctx.obj["max_tokens_refs"] = budget_refs
+            ctx.obj["max_tokens_total"] = total_tokens
+            if total_tokens > max_tokens_budget:
+                raise click.ClickException(
+                    f"Token budget exceeded: {total_tokens} tokens > {max_tokens_budget} (target {token_target}).\n{breakdown}"
+                )
 
     result = concat_refs(refs)
 
@@ -772,6 +775,7 @@ def cat_cmd(
             ignored_folders=ignored_folders,
             token_target=token_target,
             input_token_details=token_details,
+            sort_inputs_by_tokens=bool(token_details),
         )
         ctx.obj["trace_output"] = trace_output
 

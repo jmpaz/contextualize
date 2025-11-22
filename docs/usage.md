@@ -54,6 +54,7 @@ The `.git` suffix is optional and the repo will be cloned to `~/.local/share/con
 | `--tokens` | annotate each label with the file's token count |
 | `--git-pull` | update cached git repos referenced in paths |
 | `--git-reclone` | delete and re-clone cached git repos |
+| `--trace` | print a breakdown of gathered inputs, sorted by token count |
 
 
 ```
