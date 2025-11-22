@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
   { name = "jmpaz" }
 ]
-requires-python = ">=3.6"
+requires-python = ">=3.10,<3.13"
 dependencies = [
   "pyyaml",
   "pathspec",
@@ -29,4 +29,3 @@ packages = ["contextualize"]
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
-
