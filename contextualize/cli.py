@@ -7,7 +7,7 @@ from pyperclip import paste as clipboard_paste
 
 from .reference import process_text
 from .tokenize import count_tokens
-from .utils import add_prompt_wrappers, read_config, wrap_text
+from .utils import add_prompt_wrappers, wrap_text
 
 
 def validate_prompt(ctx, param, value):
@@ -26,7 +26,7 @@ def preprocess_args():
     if len(sys.argv) < 2:
         return
 
-    subcommands = {"payload", "cat", "fetch", "map", "shell", "paste"}
+    subcommands = {"payload", "cat", "map", "shell", "paste"}
 
     # options that should be moved / which take values
     forwardable = {
@@ -923,56 +923,6 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
         idx += 1
 
     return "\n\n".join(captured_segments)
-
-
-@cli.command("fetch")
-@click.argument("issue", nargs=-1)
-@click.option("--properties", help="Comma-separated list of properties to include")
-@click.option("--config", type=click.Path(), help="Path to config file")
-@click.pass_context
-def fetch_cmd(ctx, issue, properties, config):
-    """
-    Fetch and prepare Linear issues (returns raw Markdown).
-    """
-    if not issue:
-        click.echo(ctx.get_help())
-        ctx.exit()
-
-    ctx.obj["format"] = "md"  # fetch returns markdown
-
-    from .external import InvalidTokenError, LinearClient
-
-    config_data = read_config(config)
-    try:
-        client = LinearClient(config_data["LINEAR_TOKEN"])
-    except InvalidTokenError as e:
-        click.echo(f"Error: {str(e)}", err=True)
-        return ""
-
-    issue_ids = []
-    for arg in issue:
-        if arg.startswith("https://linear.app/"):
-            issue_id = arg.split("/")[-2]
-        else:
-            issue_id = arg
-        issue_ids.append(issue_id)
-
-    include_props = (
-        properties.split(",")
-        if properties
-        else config_data.get("FETCH_INCLUDE_PROPERTIES", [])
-    )
-
-    markdown_outputs = []
-    for issue_id in issue_ids:
-        issue_obj = client.get_issue(issue_id)
-        if issue_obj is None:
-            markdown_outputs.append(f"Error: Issue '{issue_id}' not found.")
-            continue
-        md = issue_obj.to_markdown(include_properties=include_props)
-        markdown_outputs.append(md)
-
-    return "\n\n".join(markdown_outputs)
 
 
 @cli.command("map")
