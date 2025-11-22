@@ -290,6 +290,8 @@ class URLReference:
     trace_collector: list = None
 
     def __post_init__(self) -> None:
+        self.file_content = ""
+        self.original_file_content = ""
         self.output = self.get_contents()
 
     def get_label(self) -> str:
@@ -302,6 +304,10 @@ class URLReference:
             return os.path.splitext(path)[1]
         return self.label
 
+    @property
+    def path(self) -> str:
+        return self.url
+
     def get_contents(self) -> str:
         import json
 
@@ -310,6 +316,7 @@ class URLReference:
         r = requests.get(self.url, timeout=30, headers={"User-Agent": "contextualize"})
         r.raise_for_status()
         text = r.text
+        self.original_file_content = text
         if "json" in r.headers.get("Content-Type", ""):
             try:
                 text = json.dumps(r.json(), indent=2)
@@ -321,6 +328,7 @@ class URLReference:
             text = inject_content_in_text(
                 text, self.depth, self.trace_collector, self.url
             )
+        self.file_content = text
         return process_text(
             text,
             format=self.format,

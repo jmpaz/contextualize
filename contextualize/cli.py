@@ -236,6 +236,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     prompts = ctx.obj["prompt"]
     no_subcmd = ctx.invoked_subcommand is None
     prompt_only = ctx.obj.get("prompt_only", False)
+    max_tokens_budget = ctx.obj.get("max_tokens")
 
     if subcommand_output and stdin_data:
         # pipeline: wrap and prompt only the new content
@@ -285,6 +286,18 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     count_flag = ctx.obj.get("count_only")
     copy_segments = ctx.obj.get("copy_segments")
     trace_output = ctx.obj.get("trace_output")
+    content_token_total = ctx.obj.get("max_tokens_total")
+    if max_tokens_budget and content_token_total is None:
+        raise click.ClickException("Token budget was set but content totals were missing.")
+
+    if max_tokens_budget and content_token_total > max_tokens_budget:
+        breakdown = ctx.obj.get("max_tokens_breakdown")
+        msg = (
+            f"Token budget exceeded: {content_token_total} tokens > {max_tokens_budget} (target {token_target})."
+        )
+        if breakdown:
+            msg = msg + "\n" + breakdown
+        raise click.ClickException(msg)
 
     if write_file:
         with open(write_file, "w", encoding="utf-8") as f:
@@ -484,6 +497,12 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     "--inject", is_flag=True, help="Process {cx::...} content injection patterns"
 )
 @click.option(
+    "--max-tokens",
+    type=int,
+    default=None,
+    help="Fail if gathered paths exceed this token budget (prints a sorted token breakdown).",
+)
+@click.option(
     "--link-depth",
     type=int,
     default=0,
@@ -522,6 +541,7 @@ def cat_cmd(
     git_pull,
     git_reclone,
     inject,
+    max_tokens,
     link_depth,
     link_scope,
     link_skip,
@@ -532,6 +552,9 @@ def cat_cmd(
     Prepare and concatenate file references (raw).
     """
     token_target = ctx.obj.get("token_target", "cl100k_base")
+    if max_tokens is not None and max_tokens <= 0:
+        raise click.BadParameter("--max-tokens must be greater than 0")
+    ctx.obj["max_tokens"] = max_tokens
 
     if not paths:
         click.echo(ctx.get_help())
@@ -542,7 +565,11 @@ def cat_cmd(
     from pathlib import Path
 
     from .gitcache import ensure_repo, expand_git_paths, parse_git_target
-    from .mdlinks import add_markdown_link_refs, format_trace_output
+    from .mdlinks import (
+        add_markdown_link_refs,
+        compute_input_token_details,
+        format_trace_output,
+    )
     from .reference import (
         FileReference,
         URLReference,
@@ -685,6 +712,50 @@ def cat_cmd(
             include_token_count=annotate_tokens,
         )
 
+    token_details = None
+    breakdown = None
+    max_tokens_budget = ctx.obj.get("max_tokens")
+    if max_tokens_budget:
+        budget_refs = []
+        for ref in refs:
+            path = getattr(ref, "path", None) or getattr(ref, "url", None)
+            if not path:
+                continue
+
+            if getattr(ref, "file_content", None) is None and hasattr(ref, "output"):
+                try:
+                    _ = ref.output
+                except Exception:
+                    pass
+
+            if getattr(ref, "file_content", None) is None and getattr(
+                ref, "original_file_content", None
+            ) is None:
+                continue
+
+            budget_refs.append(ref)
+
+        total_tokens, token_details = compute_input_token_details(
+            budget_refs, token_target=token_target
+        )
+        breakdown = format_trace_output(
+            budget_refs,
+            [],
+            common_prefix=None,
+            stdin_data=None,
+            token_target=token_target,
+            input_token_details=token_details,
+            sort_inputs_by_tokens=True,
+        )
+        ctx.obj["max_tokens_breakdown"] = breakdown
+        ctx.obj["max_tokens_details"] = token_details
+        ctx.obj["max_tokens_refs"] = budget_refs
+        ctx.obj["max_tokens_total"] = total_tokens
+        if total_tokens > max_tokens_budget:
+            raise click.ClickException(
+                f"Token budget exceeded: {total_tokens} tokens > {max_tokens_budget} (target {token_target}).\n{breakdown}"
+            )
+
     result = concat_refs(refs)
 
     if trace:
@@ -700,6 +771,7 @@ def cat_cmd(
             ignored_files=ignored_files,
             ignored_folders=ignored_folders,
             token_target=token_target,
+            input_token_details=token_details,
         )
         ctx.obj["trace_output"] = trace_output
 

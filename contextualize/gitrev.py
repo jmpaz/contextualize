@@ -127,6 +127,12 @@ class GitRevFileReference:
     label: str = "relative"
     include_token_count: bool = False
     token_target: str = "cl100k_base"
+    file_content: str | None = None
+    original_file_content: str | None = None
+
+    @property
+    def path(self) -> str:
+        return os.path.join(self.repo_root, self.rel_path)
 
     def get_label(self) -> str:
         if self.label == "relative":
@@ -139,10 +145,15 @@ class GitRevFileReference:
 
     @property
     def output(self) -> str:
+        if getattr(self, "_output", None) is not None:
+            return self._output
         text = read_file_at_rev(self.repo_root, self.rev, self.rel_path)
         if text is None:
-            return ""
-        return process_text(
+            self._output = ""
+            return self._output
+        self.original_file_content = text
+        self.file_content = text
+        self._output = process_text(
             text,
             format=self.format,
             label=self.get_label(),
@@ -150,3 +161,4 @@ class GitRevFileReference:
             token_target=self.token_target,
             include_token_count=self.include_token_count,
         )
+        return self._output

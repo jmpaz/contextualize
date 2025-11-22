@@ -58,6 +58,79 @@ def _resolve_to_path(href, base_dir):
     return None
 
 
+def _parse_frontmatter_title(text: str):
+    """Extract `title` from YAML frontmatter if present."""
+    if not text:
+        return None
+    try:
+        if not text.lstrip().startswith("---"):
+            return None
+        lines = text.splitlines()
+        if not lines or not lines[0].strip().startswith("---"):
+            return None
+        end_idx = None
+        for i in range(1, min(len(lines), 200)):
+            if lines[i].strip() == "---":
+                end_idx = i
+                break
+        if end_idx is None:
+            return None
+        yaml_text = "\n".join(lines[1:end_idx])
+        if not yaml_text.strip():
+            return None
+        data = yaml.safe_load(yaml_text)
+        if isinstance(data, dict) and "title" in data:
+            title = data.get("title")
+            if title is None:
+                return None
+            title_str = str(title).strip().replace("\n", " ")
+            return title_str if title_str else None
+    except Exception:
+        return None
+    return None
+
+
+def compute_input_token_details(input_refs, token_target="cl100k_base"):
+    """
+    Compute token counts and optional titles for a list of refs.
+    Returns (total_tokens, {id(ref): {token_display, token_value, title}}).
+    """
+    total_tokens = 0
+    details = {}
+
+    for ref in input_refs:
+        ref_id = id(ref)
+        original_content = getattr(ref, "original_file_content", None)
+        final_content = getattr(ref, "file_content", None)
+
+        if final_content is None and original_content is not None:
+            final_content = original_content
+
+        title = _parse_frontmatter_title(original_content or final_content or "")
+
+        if original_content and final_content and original_content != final_content:
+            original_tokens = count_tokens(original_content, target=token_target)["count"]
+            final_tokens = count_tokens(final_content, target=token_target)["count"]
+            token_display = (original_tokens, final_tokens)
+            token_value = final_tokens
+        else:
+            token_value = (
+                count_tokens(final_content, target=token_target)["count"]
+                if final_content
+                else 0
+            )
+            token_display = token_value
+
+        details[ref_id] = {
+            "token_display": token_display,
+            "token_value": token_value,
+            "title": title,
+        }
+        total_tokens += token_value
+
+    return total_tokens, details
+
+
 def _collect_linked_paths(seed_path, seed_content, max_depth, seen):
     """
     BFS from seed file following Markdown links up to max_depth.
@@ -100,6 +173,8 @@ def format_trace_output(
     ignored_files=None,
     ignored_folders=None,
     token_target="cl100k_base",
+    input_token_details=None,
+    sort_inputs_by_tokens=False,
 ):
     if not input_refs and not trace_items and not stdin_data and not injection_traces:
         return ""
@@ -110,9 +185,11 @@ def format_trace_output(
     if ignored_files:
         all_paths.extend([path for path, _ in ignored_files])
 
-    common_prefix = common_prefix or os.path.dirname(
-        os.path.commonpath(all_paths) if all_paths else ""
-    )
+    if common_prefix is None:
+        try:
+            common_prefix = os.path.dirname(os.path.commonpath(all_paths)) if all_paths else ""
+        except Exception:
+            common_prefix = ""
 
     formatted_inputs = []
     formatted_discovered = {}
@@ -120,7 +197,8 @@ def format_trace_output(
 
     seen_files = set()
     for ref in input_refs:
-        seen_files.add(os.path.abspath(ref.path))
+        path = getattr(ref, "path", None) or getattr(ref, "url", None) or ""
+        seen_files.add(os.path.abspath(path))
 
     def get_rel_path(path):
         return (
@@ -129,56 +207,42 @@ def format_trace_output(
             else path
         )
 
-    def _parse_frontmatter_title(text: str):
-        """Extract `title` from YAML frontmatter if present."""
-        if not text:
-            return None
-        try:
-            if not text.lstrip().startswith("---"):
-                return None
-            lines = text.splitlines()
-            if not lines or not lines[0].strip().startswith("---"):
-                return None
-            end_idx = None
-            for i in range(1, min(len(lines), 200)):
-                if lines[i].strip() == "---":
-                    end_idx = i
-                    break
-            if end_idx is None:
-                return None
-            yaml_text = "\n".join(lines[1:end_idx])
-            if not yaml_text.strip():
-                return None
-            data = yaml.safe_load(yaml_text)
-            if isinstance(data, dict) and "title" in data:
-                title = data.get("title")
-                if title is None:
-                    return None
-                title_str = str(title).strip().replace("\n", " ")
-                return title_str if title_str else None
-        except Exception:
-            return None
-        return None
-
     for ref in input_refs:
-        rel_path = get_rel_path(ref.path)
-        original_content = getattr(ref, "original_file_content", None)
-        final_content = getattr(ref, "file_content", "")
-        title = _parse_frontmatter_title(original_content or final_content)
+        path = getattr(ref, "path", None) or getattr(ref, "url", None) or ""
+        rel_path = get_rel_path(path)
+        detail = input_token_details.get(id(ref)) if input_token_details else None
 
-        if original_content and original_content != final_content:
-            original_tokens = count_tokens(original_content, target=token_target)["count"]
-            final_tokens = count_tokens(final_content, target=token_target)["count"]
-            token_display = (original_tokens, final_tokens)
+        if detail:
+            token_display = detail.get("token_display", 0)
+            token_value = detail.get("token_value", 0)
+            title = detail.get("title")
         else:
-            token_count = (
-                count_tokens(final_content, target=token_target)["count"]
-                if final_content
-                else 0
-            )
-            token_display = token_count
+            original_content = getattr(ref, "original_file_content", None)
+            final_content = getattr(ref, "file_content", None)
+            if final_content is None and original_content is not None:
+                final_content = original_content
+            final_content = final_content or ""
+            title = _parse_frontmatter_title(original_content or final_content)
 
-        formatted_inputs.append((rel_path, token_display, title))
+            if original_content and original_content != final_content:
+                original_tokens = count_tokens(original_content, target=token_target)["count"]
+                final_tokens = count_tokens(final_content, target=token_target)["count"]
+                token_display = (original_tokens, final_tokens)
+                token_value = final_tokens
+            else:
+                token_value = (
+                    count_tokens(final_content, target=token_target)["count"]
+                    if final_content
+                    else 0
+                )
+                token_display = token_value
+
+        formatted_inputs.append((rel_path, token_display, title, token_value))
+
+    if sort_inputs_by_tokens:
+        formatted_inputs.sort(
+            key=lambda item: item[3] if item[3] is not None else 0, reverse=True
+        )
 
     by_depth = defaultdict(list)
     parent_map = {}
@@ -254,7 +318,7 @@ def format_trace_output(
         stdin_token_count = count_tokens(stdin_data, target=token_target)["count"]
         lines.append(f"  stdin ({stdin_token_count} tokens)")
 
-    for rel_path, token_display, title in formatted_inputs:
+    for rel_path, token_display, title, _token_value in formatted_inputs:
         if isinstance(token_display, tuple):
             original, final = token_display
             token_str = f"({original} → {final} tokens)"
