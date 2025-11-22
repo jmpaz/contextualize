@@ -100,7 +100,7 @@ contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format pl
 | `--max-tokens` | limit map size for aider |
 | `--ignore` | glob pattern(s) to skip |
 | `--format` | choose `plain` (default) or `shell` |
-| `--tokens` | annotate each file header with the full file token count |
+| `--tokens` | annotate file headers + constituent symbols with token counts |
 | `--git-pull` | update cached git repos referenced in paths |
 | `--git-reclone` | delete and re-clone cached git repos |
 
