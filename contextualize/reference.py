@@ -1,9 +1,21 @@
 import codecs
 import os
+import sys
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from .utils import brace_expand
+
+
+def split_path_and_symbols(raw_path: str) -> tuple[str, list[str]]:
+    """
+    Split a path of the form "path::sym1,sym2" into the base path and symbol list.
+    """
+    if "::" not in raw_path:
+        return raw_path, []
+    base, _, suffix = raw_path.partition("::")
+    symbols = [part.strip() for part in suffix.split(",") if part.strip()]
+    return base or raw_path, symbols
 
 
 def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
@@ -87,11 +99,13 @@ def create_file_references(
             else:
                 expanded_user_patterns.append(pattern)
 
-    for path in paths:
-        if path.startswith("http://") or path.startswith("https://"):
+    for raw_path in paths:
+        path, symbols = split_path_and_symbols(raw_path)
+
+        if raw_path.startswith("http://") or raw_path.startswith("https://"):
             file_references.append(
                 URLReference(
-                    path,
+                    raw_path,
                     format=format,
                     label=label,
                     include_token_count=include_token_count,
@@ -111,9 +125,30 @@ def create_file_references(
                     token_count = get_file_token_count(path)
                     ignored_files.append((path, token_count))
             elif _is_utf8_file(path):
+                ranges = None
+                if symbols:
+                    try:
+                        from .repomap import find_symbol_ranges
+
+                        match_map = find_symbol_ranges(path, symbols)
+                    except Exception:
+                        match_map = {}
+
+                    matched = [s for s in symbols if s in match_map]
+                    if not matched:
+                        print(
+                            f"Warning: symbol(s) not found in {path}: {', '.join(symbols)}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    symbols = matched
+                    ranges = [match_map[s] for s in matched]
+
                 file_references.append(
                     FileReference(
                         path,
+                        ranges=ranges,
+                        symbols=symbols,
                         format=format,
                         label=label,
                         include_token_count=include_token_count,
@@ -211,6 +246,7 @@ class FileReference:
         self,
         path,
         range=None,
+        ranges=None,
         format="md",
         label="relative",
         clean_contents=False,
@@ -220,8 +256,14 @@ class FileReference:
         inject=False,
         depth=5,
         trace_collector=None,
+        symbols=None,
     ):
         self.range = range
+        self.ranges = ranges
+        if self.range and not self.ranges:
+            self.ranges = [self.range]
+        self.symbols = [s for s in (symbols or []) if s]
+
         self.path = path
         self.format = format
         self.label = label
@@ -248,14 +290,37 @@ class FileReference:
                 self.file_content, self.depth, self.trace_collector, self.path
             )
 
+        ranges = self.ranges
+        if self.symbols and ranges is None:
+            try:
+                from .repomap import find_symbol_ranges
+
+                match_map = find_symbol_ranges(
+                    self.path, self.symbols, text=self.file_content
+                )
+            except Exception:
+                match_map = {}
+
+            missing = [s for s in self.symbols if s not in match_map]
+            if missing:
+                print(
+                    f"Warning: symbol(s) not found in {self.path}: {', '.join(missing)}",
+                    file=sys.stderr,
+                )
+            if match_map:
+                matched = [s for s in self.symbols if s in match_map]
+                ranges = [match_map[s] for s in matched]
+                self.symbols = matched
+
         return process_text(
             self.file_content,
             self.clean_contents,
-            self.range,
-            self.format,
-            self.get_label(),
+            ranges=ranges,
+            format=self.format,
+            label=self.get_label(),
             token_target=self.token_target,
             include_token_count=self.include_token_count,
+            symbols=self.symbols,
         )
 
     def get_label(self):
@@ -342,6 +407,7 @@ def process_text(
     text,
     clean=False,
     range=None,
+    ranges=None,
     format="md",
     label="",
     shell_cmd=None,
@@ -349,11 +415,14 @@ def process_text(
     token_target: str = "cl100k_base",
     token_count: int | None = None,
     include_token_count: bool = False,
+    symbols=None,
 ):
     if clean:
         text = _clean(text)
-    if range:
-        text = _extract_range(text, range)
+    if range and not ranges:
+        ranges = [range]
+    if ranges:
+        text = _extract_ranges(text, ranges)
     use_token_count = include_token_count and format in {"md", "xml", "shell"}
 
     if use_token_count:
@@ -365,7 +434,15 @@ def process_text(
         token_count = None
     max_backticks = _count_max_backticks(text)
     return _delimit(
-        text, format, label, max_backticks, shell_cmd, rev, token_count
+        text,
+        format,
+        label,
+        max_backticks,
+        shell_cmd,
+        rev,
+        token_count,
+        symbols=symbols,
+        is_excerpt=bool(ranges),
     )
 
 
@@ -378,6 +455,29 @@ def _extract_range(text, range_tuple):
     start, end = range_tuple
     lines = text.split("\n")
     return "\n".join(lines[start - 1 : end])
+
+
+def _extract_ranges(text, ranges):
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges, key=lambda r: r[0]):
+        if not merged:
+            merged.append((start, end))
+            continue
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end + 1:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+
+    lines = text.split("\n")
+    snippets = []
+    for start, end in merged:
+        start_idx = max(0, start - 1)
+        end_idx = min(len(lines), end)
+        snippet = "\n".join(lines[start_idx:end_idx])
+        snippets.append(snippet)
+
+    return "\n...\n".join(snippets)
 
 
 def _count_max_backticks(text):
@@ -399,24 +499,32 @@ def _delimit(
     shell_cmd=None,
     rev: str | None = None,
     token_count: int | None = None,
+    *,
+    symbols=None,
+    is_excerpt=False,
 ):
+    symbols_list = [s for s in (symbols or []) if s]
+    sym_suffix = f"::{','.join(symbols_list)}" if symbols_list else ""
+    label_with_symbols = f"{label}{sym_suffix}"
+
     if format == "md":
         backticks_str = "`" * max(max_backticks + 2, 3)  # at least 3
-        info = f"{label}@{rev}" if rev else label
+        info = f"{label_with_symbols}@{rev}" if rev else label_with_symbols
         if token_count is not None:
             info = f"{info} ({token_count} tokens)"
         return f"{backticks_str}{info}\n{text}\n{backticks_str}"
     elif format == "xml":
         token_attr = f" token_count='{token_count}'" if token_count is not None else ""
         rev_attr = f" rev='{rev}'" if rev else ""
-        return f"<file path='{label}'{token_attr}{rev_attr}>\n{text}\n</file>"
+        symbols_attr = (
+            f" symbols='{','.join(symbols_list)}'" if symbols_list else ""
+        )
+        return f"<file path='{label}'{symbols_attr}{token_attr}{rev_attr}>\n{text}\n</file>"
     elif format == "shell":
+        target_label = f"{label_with_symbols}@{rev}" if rev else label_with_symbols
+        token_suffix = f" ({token_count} tokens)" if token_count is not None else ""
         if shell_cmd:
-            token_suffix = f" ({token_count} tokens)" if token_count is not None else ""
             return f"❯ {shell_cmd}{token_suffix}\n{text}"
-        else:
-            info = f"{label}@{rev}" if rev else label
-            token_suffix = f" ({token_count} tokens)" if token_count is not None else ""
-            return f"❯ cat {info}{token_suffix}\n{text}"
+        return f"❯ cat {target_label}{token_suffix}\n{text}"
     else:
         return text

@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
@@ -129,6 +130,8 @@ class GitRevFileReference:
     token_target: str = "cl100k_base"
     file_content: str | None = None
     original_file_content: str | None = None
+    ranges: list[tuple[int, int]] | None = None
+    symbols: list[str] | None = None
 
     @property
     def path(self) -> str:
@@ -153,6 +156,30 @@ class GitRevFileReference:
             return self._output
         self.original_file_content = text
         self.file_content = text
+
+        ranges = self.ranges
+        symbols = [s for s in (self.symbols or []) if s]
+        if symbols and ranges is None:
+            try:
+                from .repomap import find_symbol_ranges
+
+                match_map = find_symbol_ranges(
+                    self.rel_path, symbols, text=self.file_content
+                )
+            except Exception:
+                match_map = {}
+
+            missing = [s for s in symbols if s not in match_map]
+            if missing:
+                print(
+                    f"Warning: symbol(s) not found in {self.rel_path}@{self.rev}: {', '.join(missing)}",
+                    file=sys.stderr,
+                )
+            matched = [s for s in symbols if s in match_map]
+            if match_map and matched:
+                ranges = [match_map[s] for s in matched]
+                symbols = matched
+
         self._output = process_text(
             text,
             format=self.format,
@@ -160,5 +187,7 @@ class GitRevFileReference:
             rev=self.rev,
             token_target=self.token_target,
             include_token_count=self.include_token_count,
+            ranges=ranges,
+            symbols=symbols,
         )
         return self._output

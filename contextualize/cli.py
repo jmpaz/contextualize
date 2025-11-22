@@ -575,6 +575,7 @@ def cat_cmd(
         URLReference,
         concat_refs,
         create_file_references,
+        split_path_and_symbols,
     )
 
     injection_trace_items = [] if inject and trace else None
@@ -656,8 +657,9 @@ def cat_cmd(
                     )
                 )
         elif use_rev:
+            base_path, symbols = split_path_and_symbols(p)
             try:
-                spec_rel = os.path.expanduser(p)
+                spec_rel = os.path.expanduser(base_path)
                 if os.path.isabs(spec_rel) or spec_rel.startswith(".."):
                     spec_rel = os.path.relpath(os.path.abspath(spec_rel), repo_root)
                 rel_files = list_files_at_rev(repo_root, rev, [spec_rel])
@@ -666,6 +668,25 @@ def cat_cmd(
             for relf in rel_files:
                 if ignore_spec and ignore_spec.match_file(relf):
                     continue
+                ranges = None
+                if symbols:
+                    text_at_rev = read_file_at_rev(repo_root, rev, relf)
+                    try:
+                        from .repomap import find_symbol_ranges
+
+                        match_map = find_symbol_ranges(relf, symbols, text=text_at_rev)
+                    except Exception:
+                        match_map = {}
+                    matched = [s for s in symbols if s in match_map]
+                    if not matched:
+                        click.echo(
+                            f"Warning: symbol(s) not found in {relf}@{rev}: {', '.join(symbols)}",
+                            err=True,
+                        )
+                        continue
+                    ranges = [match_map[s] for s in matched]
+                    symbols = matched
+
                 refs.append(
                     GitRevFileReference(
                         repo_root=repo_root,
@@ -675,6 +696,8 @@ def cat_cmd(
                         label=label,
                         include_token_count=annotate_tokens,
                         token_target=token_target,
+                        ranges=ranges,
+                        symbols=symbols,
                     )
                 )
         elif os.path.exists(p):

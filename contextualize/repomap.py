@@ -1,4 +1,5 @@
 import os
+import tempfile
 
 from aider.repomap import (
     RepoMap,
@@ -11,6 +12,137 @@ from contextualize.tokenize import count_tokens
 from grep_ast import TreeContext
 from .reference import _is_utf8_file
 from .gitrev import list_files_at_rev, read_file_at_rev
+
+
+def _parse_symbol_spec(spec: str) -> tuple[str, str, int | None]:
+    raw = spec.strip()
+    if not raw:
+        return "", "", None
+    line_hint = None
+    name_part = raw
+    if "#" in raw:
+        before, _, maybe_line = raw.rpartition("#")
+        if maybe_line.isdigit():
+            line_hint = int(maybe_line)
+            name_part = before or raw
+    parts = [p for p in name_part.split(".") if p]
+    name = parts[-1] if parts else name_part
+    return raw, name, line_hint
+
+
+def find_symbol_ranges(
+    file_path: str, symbol_specs: list[str], text: str | None = None
+) -> dict[str, tuple[int, int]]:
+    """
+    Return {symbol_spec: (start_line, end_line)} using tree-sitter tags.
+    Lines are 1-based and inclusive.
+    """
+    parsed_specs = [_parse_symbol_spec(spec) for spec in symbol_specs]
+    parsed_specs = [spec for spec in parsed_specs if spec[0]]
+    if not parsed_specs:
+        return {}
+
+    parse_path = file_path
+    cleanup_path = None
+    code_for_parse = text
+
+    if text is not None:
+        suffix = os.path.splitext(file_path)[1]
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix or "")
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(text)
+        parse_path = tmp_path
+        cleanup_path = tmp_path
+    elif not os.path.exists(parse_path):
+        return {}
+
+    class _SymbolIO:
+        def __init__(self, override_text: str | None = None):
+            self.override_text = override_text
+
+        def read_text(self, fname):
+            if self.override_text is not None and fname == parse_path:
+                return self.override_text
+            with open(fname, "r", encoding="utf-8") as f:
+                return f.read()
+
+        def tool_output(self, *_args, **_kwargs):
+            return None
+
+        def tool_error(self, *_args, **_kwargs):
+            return None
+
+        def tool_warning(self, *_args, **_kwargs):
+            return None
+
+    class _ZeroModel:
+        def token_count(self, _text):
+            return 0
+
+    io = _SymbolIO(code_for_parse)
+    rm = RepoMap(
+        map_tokens=0,
+        main_model=_ZeroModel(),
+        io=io,
+        root=os.path.dirname(parse_path) or ".",
+    )
+
+    try:
+        tags = rm.get_tags(parse_path, os.path.basename(parse_path)) or []
+    except Exception:
+        tags = []
+
+    try:
+        code = io.read_text(parse_path)
+        ctx = TreeContext(
+            parse_path,
+            code,
+            color=False,
+            line_number=False,
+            parent_context=True,
+            child_context=True,
+            last_line=True,
+            margin=0,
+            mark_lois=False,
+            header_max=10,
+            show_top_of_file_parent_scope=True,
+            loi_pad=1,
+        )
+    except Exception:
+        ctx = None
+
+    results: dict[str, tuple[int, int]] = {}
+    defs = [t for t in tags if getattr(t, "kind", None) == "def"]
+
+    for raw, name, line_hint in parsed_specs:
+        candidates = [t for t in defs if t.name == name or t.name == raw]
+        if not candidates and "." in raw:
+            suffix = raw.split(".")[-1]
+            candidates = [t for t in defs if t.name == suffix]
+        if not candidates:
+            continue
+
+        if line_hint is not None:
+            candidates.sort(key=lambda t: abs((t.line + 1) - line_hint))
+
+        tag = candidates[0]
+        end_line = tag.line
+        if ctx:
+            try:
+                end_line = ctx.get_last_line_of_scope(tag.line)
+            except Exception:
+                end_line = tag.line
+
+        start_line = tag.line + 1
+        results[raw] = (start_line, end_line + 1)
+
+    if cleanup_path and os.path.exists(cleanup_path):
+        try:
+            os.remove(cleanup_path)
+        except OSError:
+            pass
+
+    return results
 
 
 def _is_ignored(path: str, patterns: list[str]) -> bool:
