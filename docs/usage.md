@@ -56,7 +56,7 @@ The `.git` suffix is optional and the repo will be cloned to `~/.local/share/con
 | `--git-reclone` | delete and re-clone cached git repos |
 | `--trace` | print a breakdown of gathered inputs, sorted by token count |
 
-Append `::Symbol` (or `::Sym1,Sym2`) to any path to extract only those definitions.
+Append `:Symbol` (or `:Sym1,Sym2`) to any path to extract only those definitions.
 
 
 ```

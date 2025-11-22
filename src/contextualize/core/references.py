@@ -13,11 +13,11 @@ from .utils import brace_expand, count_tokens
 
 def split_path_and_symbols(raw_path: str) -> tuple[str, list[str]]:
     """
-    Split a path of the form "path::sym1,sym2" into the base path and symbol list.
+    Split a path of the form "path:sym1,sym2" into the base path and symbol list.
     """
-    if "::" not in raw_path:
+    if ":" not in raw_path:
         return raw_path, []
-    base, _, suffix = raw_path.partition("::")
+    base, _, suffix = raw_path.partition(":")
     symbols = [part.strip() for part in suffix.split(",") if part.strip()]
     return base or raw_path, symbols
 
@@ -102,7 +102,14 @@ def create_file_references(
             else:
                 expanded_user_patterns.append(pattern)
 
+    expanded_all_paths = []
     for raw_path in paths:
+        if "{" in raw_path and "}" in raw_path:
+            expanded_all_paths.extend(brace_expand(raw_path))
+        else:
+            expanded_all_paths.append(raw_path)
+
+    for raw_path in expanded_all_paths:
         path, symbols = split_path_and_symbols(raw_path)
 
         if raw_path.startswith("http://") or raw_path.startswith("https://"):

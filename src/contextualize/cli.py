@@ -602,11 +602,12 @@ def cat_cmd(
     use_rev = bool(rev)
     repo_root = None
     ignore_spec = None
+    from .core.utils import brace_expand
+
     if use_rev:
         from pathspec import PathSpec
 
         from .git.rev import GitRevFileReference, discover_repo_root, list_files_at_rev
-        from .core.utils import brace_expand
 
         try:
             repo_root = discover_repo_root(paths, cwd=os.getcwd())
@@ -622,7 +623,15 @@ def cat_cmd(
                 else:
                     patterns.append(pat)
         ignore_spec = PathSpec.from_lines("gitwildmatch", patterns)
+
+    expanded_all_paths = []
     for p in paths:
+        if "{" in p and "}" in p:
+            expanded_all_paths.extend(brace_expand(p))
+        else:
+            expanded_all_paths.append(p)
+
+    for p in expanded_all_paths:
         if p.startswith("http://") or p.startswith("https://"):
             tgt = parse_git_target(p)
             if tgt and (

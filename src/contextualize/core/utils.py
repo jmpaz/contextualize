@@ -147,12 +147,14 @@ def build_segment(text, wrap_mode, prompts, output_pos, index, total):
 
 
 def _split_brace_options(s: str) -> list[str]:
-    """Split comma-separated options within braces, handling nested braces."""
+    """Split brace options on semicolons (if present) or commas, handling nested braces."""
+    delimiter = ";" if ";" in s else ","
+
     opts = []
     buf = ""
     depth = 0
     for ch in s:
-        if ch == "," and depth == 0:
+        if ch == delimiter and depth == 0:
             opts.append(buf)
             buf = ""
             continue

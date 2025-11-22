@@ -99,7 +99,7 @@ def _delimit(
     is_excerpt=False,
 ):
     symbols_list = [s for s in (symbols or []) if s]
-    sym_suffix = f"::{','.join(symbols_list)}" if symbols_list else ""
+    sym_suffix = f":{','.join(symbols_list)}" if symbols_list else ""
     label_with_symbols = f"{label}{sym_suffix}"
 
     if format == "md":
