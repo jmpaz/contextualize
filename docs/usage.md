@@ -45,7 +45,7 @@ Multiple paths can be separated with commas after the colon.
 Brace expressions and glob patterns in those paths are expanded after cloning.
 The `.git` suffix is optional and the repo will be cloned to `~/.local/share/contextualize/cache/git/` on first use.
 
-Local non-text files supported by [markitdown](https://github.com/microsoft/markitdown) are automatically converted to text.
+Non-text files supported by [markitdown](https://github.com/microsoft/markitdown) are automatically converted to text.
 
 | option | description |
 |--------|-------------|

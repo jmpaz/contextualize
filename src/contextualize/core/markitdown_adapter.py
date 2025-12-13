@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 import tempfile
-from typing import Any
+from typing import Any, Mapping, Protocol
 
 
 class MarkItDownConversionError(RuntimeError):
@@ -20,6 +20,12 @@ class MarkItDownConversionError(RuntimeError):
 class MarkItDownResult:
     markdown: str
     title: str | None
+
+
+class ResponseLike(Protocol):
+    content: bytes
+    headers: Mapping[str, str]
+    url: str
 
 
 @lru_cache(maxsize=1)
@@ -237,6 +243,92 @@ def convert_path_to_markdown(path: str | Path) -> MarkItDownResult:
     except Exception as exc:
         raise MarkItDownConversionError(
             f"MarkItDown failed to convert {path_obj}: {exc}"
+        ) from exc
+
+    markdown = getattr(result, "markdown", None)
+    if not isinstance(markdown, str):
+        markdown = str(result)
+    title = getattr(result, "title", None)
+    if title is not None and not isinstance(title, str):
+        title = str(title)
+
+    out_markdown = _postprocess_image_markdown(markdown) if is_image else markdown
+    out = MarkItDownResult(markdown=out_markdown, title=title)
+    if is_image and media_md5 is not None:
+        _write_cache_entry(
+            key, payload=cache_key_payload, markdown=markdown, title=out.title
+        )
+    return out
+
+
+def convert_response_to_markdown(response: ResponseLike) -> MarkItDownResult:
+    content_type = (
+        str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip()
+    )
+    url_suffix = Path(str(response.url)).suffix.lower()
+    is_image = url_suffix in {".jpg", ".jpeg", ".png"} or content_type.startswith(
+        "image/"
+    )
+
+    media_md5: str | None = None
+    llm_enabled = False
+    exiftool_path: str | None = None
+    base_url = ""
+    model = ""
+    prompt = ""
+
+    if is_image:
+        _load_dotenv_once()
+        llm_enabled = bool(
+            (os.getenv("OPENAI_API_KEY") or "").strip()
+            or (os.getenv("OPENROUTER_API_KEY") or "").strip()
+        )
+        base_url = (
+            os.getenv("OPENAI_BASE_URL") or ""
+        ).strip() or "https://openrouter.ai/api/v1"
+        model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-2.5-flash"
+        prompt = (
+            os.getenv("OPENAI_PROMPT") or ""
+        ).strip() or "Write a detailed caption for this image."
+        exiftool_path = (os.getenv("EXIFTOOL_PATH") or "").strip() or shutil.which(
+            "exiftool"
+        )
+        media_md5 = hashlib.md5(response.content).hexdigest()
+
+        cache_key_payload = {
+            "v": 1,
+            "type": "image",
+            "media_md5": media_md5,
+            "markitdown_version": _markitdown_version(),
+            "llm_enabled": llm_enabled,
+            "provider": base_url if llm_enabled else None,
+            "model": model if llm_enabled else None,
+            "prompt": prompt if llm_enabled else None,
+            "exiftool_path": exiftool_path,
+            "description_heading": "auto-generated",
+        }
+        key = _cache_key(cache_key_payload)
+        cached = _read_cache_entry(key)
+        if isinstance(cached, dict):
+            cached_markdown = cached.get("markdown")
+            cached_title = cached.get("title")
+            if isinstance(cached_markdown, str):
+                title = cached_title if isinstance(cached_title, str) else None
+                return MarkItDownResult(
+                    markdown=_postprocess_image_markdown(cached_markdown), title=title
+                )
+
+        if not _image_text_tools_available():
+            raise MarkItDownConversionError(
+                "Image conversion requires either `exiftool` (or EXIFTOOL_PATH) or "
+                "OPENAI_API_KEY/OPENROUTER_API_KEY."
+            )
+
+    try:
+        result = _get_converter().convert(response)
+    except Exception as exc:
+        raise MarkItDownConversionError(
+            f"MarkItDown failed to convert {response.url}: {exc}"
         ) from exc
 
     markdown = getattr(result, "markdown", None)
