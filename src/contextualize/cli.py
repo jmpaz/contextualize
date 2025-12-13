@@ -39,6 +39,7 @@ def preprocess_args():
         "--write-file",
         "--copy-segments",
         "--token-target",
+        "--md-model",
     }
     value_options = {
         "--prompt",
@@ -47,6 +48,7 @@ def preprocess_args():
         "--write-file",
         "--copy-segments",
         "--token-target",
+        "--md-model",
     }
 
     # find subcommand position
@@ -150,6 +152,11 @@ preprocess_args()
     help="Encoding/model to use for token counts (e.g., cl100k_base, gpt-4o-mini, claude-3-5-sonnet-20241022).",
 )
 @click.option(
+    "--md-model",
+    default=None,
+    help="Override OPENAI_MODEL (used for optional image captioning during conversion).",
+)
+@click.option(
     "--position",
     "output_position",
     type=click.Choice(["append", "prepend"], case_sensitive=False),
@@ -173,6 +180,7 @@ def cli(
     copy_segments,
     write_file,
     token_target,
+    md_model,
     output_position,
     append_flag,
     prepend_flag,
@@ -188,6 +196,12 @@ def cli(
     ctx.obj["copy_segments"] = copy_segments
     ctx.obj["write_file"] = write_file
     ctx.obj["token_target"] = token_target
+    if md_model is not None:
+        model = md_model.strip()
+        if not model:
+            raise click.BadParameter("--md-model cannot be empty")
+        os.environ["OPENAI_MODEL"] = model
+    ctx.obj["md_model"] = md_model
     if append_flag and prepend_flag:
         raise click.BadParameter("use -a or -b, not both")
     if copy and copy_segments:
@@ -387,6 +401,10 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     """
     Render a context payload from a provided YAML manifest.
     If no path is given and stdin is piped, read the manifest from stdin.
+
+    Some common non-text formats are converted to text automatically:
+    pdf, docx, pptx, xls/xlsx, csv, epub, msg, images (jpg/jpeg/png),
+    audio/video (wav/mp3/m4a/mp4).
     """
     ctx.obj["format"] = "md"  # for segmentation
     token_target = ctx.obj.get("token_target", "cl100k_base")
@@ -404,7 +422,12 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         raise click.ClickException("pyyaml is required")
 
     if manifest_path:
-        result = render_manifest(manifest_path, inject=inject)
+        from .core.markitdown_adapter import MarkItDownConversionError
+
+        try:
+            result = render_manifest(manifest_path, inject=inject)
+        except (MarkItDownConversionError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
         payload_content = result.payload
         input_refs = result.input_refs
         trace_items = result.trace_items
@@ -448,6 +471,8 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         )
 
     try:
+        from .core.markitdown_adapter import MarkItDownConversionError
+
         result = render_manifest_data(data, os.getcwd(), inject=inject)
         payload_content = result.payload
         input_refs = result.input_refs
@@ -455,8 +480,10 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         base_dir = result.base_dir
         skipped_paths = result.skipped_paths
         skip_impact = result.skip_impact
+    except (MarkItDownConversionError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
     except Exception as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
 
     if trace:
         trace_output = format_trace_output(
@@ -549,6 +576,10 @@ def cat_cmd(
 ):
     """
     Prepare and concatenate file references (raw).
+
+    Some common non-text formats are converted to text automatically:
+    pdf, docx, pptx, xls/xlsx, csv, epub, msg, images (jpg/jpeg/png),
+    audio/video (wav/mp3/m4a/mp4).
     """
     token_target = ctx.obj.get("token_target", "cl100k_base")
     if max_tokens is not None and max_tokens <= 0:
@@ -563,7 +594,6 @@ def cat_cmd(
 
     from pathlib import Path
 
-    from .git.cache import ensure_repo, expand_git_paths, parse_git_target
     from .core.links import (
         add_markdown_link_refs,
         compute_input_token_details,
@@ -576,6 +606,7 @@ def cat_cmd(
         create_file_references,
         split_path_and_symbols,
     )
+    from .git.cache import ensure_repo, expand_git_paths, parse_git_target
 
     injection_trace_items = [] if inject and trace else None
     ignored_files = []
@@ -583,17 +614,22 @@ def cat_cmd(
 
     def add_file_refs(paths_list):
         """Helper to add file references for a list of paths"""
-        result = create_file_references(
-            paths_list,
-            ignore,
-            format,
-            label,
-            include_token_count=annotate_tokens,
-            token_target=token_target,
-            inject=inject,
-            depth=5,
-            trace_collector=injection_trace_items,
-        )
+        from .core.markitdown_adapter import MarkItDownConversionError
+
+        try:
+            result = create_file_references(
+                paths_list,
+                ignore,
+                format,
+                label,
+                include_token_count=annotate_tokens,
+                token_target=token_target,
+                inject=inject,
+                depth=5,
+                trace_collector=injection_trace_items,
+            )
+        except (MarkItDownConversionError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
         refs.extend(result["refs"])
         ignored_files.extend(result.get("ignored_files", []))
         ignored_folders.update(result.get("ignored_folders", {}))
@@ -727,17 +763,22 @@ def cat_cmd(
     input_refs = [r for r in refs if isinstance(r, FileReference)]
 
     if link_depth > 0 and not use_rev:
-        refs[:], trace_items, skip_impact = add_markdown_link_refs(
-            refs,
-            link_depth=link_depth,
-            scope=link_scope,
-            format_=format,
-            label=label,
-            token_target=token_target,
-            inject=inject,
-            link_skip=link_skip,
-            include_token_count=annotate_tokens,
-        )
+        from .core.markitdown_adapter import MarkItDownConversionError
+
+        try:
+            refs[:], trace_items, skip_impact = add_markdown_link_refs(
+                refs,
+                link_depth=link_depth,
+                scope=link_scope,
+                format_=format,
+                label=label,
+                token_target=token_target,
+                inject=inject,
+                link_skip=link_skip,
+                include_token_count=annotate_tokens,
+            )
+        except (MarkItDownConversionError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
 
     token_details = None
     breakdown = None
@@ -982,7 +1023,6 @@ def map_cmd(
         generate_repo_map_data,
         generate_repo_map_data_from_git,
     )
-
     from .git.cache import ensure_repo, expand_git_paths, parse_git_target
 
     token_target = ctx.obj.get("token_target", "cl100k_base")

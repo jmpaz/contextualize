@@ -4,6 +4,7 @@ import sys
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 from urllib.parse import urlparse
 
@@ -39,6 +40,29 @@ def _is_utf8_file(path: str, sample_size: int = 4096) -> bool:
         return False
 
     return True
+
+
+_MARKITDOWN_PREFERRED_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".pptx",
+        ".xls",
+        ".xlsx",
+        ".csv",
+        ".epub",
+        ".msg",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".wav",
+        ".mp3",
+        ".m4a",
+        ".mp4",
+    }
+)
+
+_DISALLOWED_EXTENSIONS: frozenset[str] = frozenset({".zip"})
 
 
 def create_file_references(
@@ -134,9 +158,16 @@ def create_file_references(
                 ):
                     token_count = get_file_token_count(path)
                     ignored_files.append((path, token_count))
-            elif _is_utf8_file(path):
+            elif (
+                _is_utf8_file(path)
+                or Path(path).suffix.lower() in _MARKITDOWN_PREFERRED_EXTENSIONS
+            ):
                 ranges = None
                 if symbols:
+                    if not _is_utf8_file(path):
+                        raise ValueError(
+                            f"Symbol selection is only supported for text files: {path}"
+                        )
                     try:
                         from .repomap import find_symbol_ranges
 
@@ -168,6 +199,10 @@ def create_file_references(
                         trace_collector=trace_collector,
                     )
                 )
+            else:
+                raise ValueError(
+                    f"Unsupported binary file type (not convertible): {path}"
+                )
         elif os.path.isdir(path):
             dir_ignored_files = {}
             for root, dirs, files in os.walk(path):
@@ -188,7 +223,11 @@ def create_file_references(
                             if root not in dir_ignored_files:
                                 dir_ignored_files[root] = []
                             dir_ignored_files[root].append((file_path, token_count))
-                    elif _is_utf8_file(file_path):
+                    elif (
+                        _is_utf8_file(file_path)
+                        or Path(file_path).suffix.lower()
+                        in _MARKITDOWN_PREFERRED_EXTENSIONS
+                    ):
                         dirs_with_non_ignored_files.add(root)
                         parent = os.path.dirname(root)
                         while (
@@ -287,12 +326,25 @@ class FileReference:
         self.output = self.get_contents()
 
     def get_contents(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as file:
-                self.file_content = self.original_file_content = file.read()
-        except Exception as e:
-            print(f"Error reading file {self.path}: {str(e)}")
-            return ""
+        suffix = Path(self.path).suffix.lower()
+        if suffix in _DISALLOWED_EXTENSIONS:
+            raise ValueError(f"Unsupported file type: {self.path}")
+        prefer_markitdown = suffix in _MARKITDOWN_PREFERRED_EXTENSIONS
+        if not prefer_markitdown:
+            try:
+                with open(self.path, "r", encoding="utf-8") as file:
+                    self.file_content = self.original_file_content = file.read()
+            except UnicodeDecodeError:
+                prefer_markitdown = True
+            except Exception as e:
+                print(f"Error reading file {self.path}: {str(e)}")
+                return ""
+
+        if prefer_markitdown:
+            from .markitdown_adapter import convert_path_to_markdown
+
+            result = convert_path_to_markdown(self.path)
+            self.file_content = self.original_file_content = result.markdown
         if self.inject:
             from .links import inject_content_in_text
 
