@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 from urllib.parse import urlparse
+from urllib.parse import unquote
 
 from .render import process_text
 from .utils import brace_expand, count_tokens
@@ -63,6 +64,67 @@ _MARKITDOWN_PREFERRED_EXTENSIONS: frozenset[str] = frozenset(
 )
 
 _DISALLOWED_EXTENSIONS: frozenset[str] = frozenset({".zip"})
+
+_TEXTUAL_CONTENT_TYPES: frozenset[str] = frozenset(
+    {
+        "application/javascript",
+        "application/xml",
+        "application/x-yaml",
+        "application/yaml",
+    }
+)
+
+_DISALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
+    {"application/zip", "application/x-zip-compressed"}
+)
+
+
+_CD_FILENAME_RE = re.compile(
+    r"filename\*?=(?:UTF-8''|\"|')?(?P<name>[^\"';]+)", flags=re.IGNORECASE
+)
+
+
+def _strip_content_type(value: str) -> str:
+    return value.split(";", 1)[0].strip().lower()
+
+
+def _content_disposition_filename(value: str) -> str | None:
+    if not value:
+        return None
+    match = _CD_FILENAME_RE.search(value)
+    if not match:
+        return None
+    name = unquote(match.group("name").strip())
+    return os.path.basename(name) if name else None
+
+
+def _infer_url_suffix(url: str, headers: dict[str, str]) -> str | None:
+    path = unquote(urlparse(url).path or "")
+    suffix = Path(path).suffix.lower()
+    if suffix:
+        return suffix
+    filename = _content_disposition_filename(headers.get("Content-Disposition", ""))
+    if filename:
+        cd_suffix = Path(filename).suffix.lower()
+        if cd_suffix:
+            return cd_suffix
+    return None
+
+
+def _looks_like_text_content_type(content_type: str) -> bool:
+    if not content_type:
+        return False
+    if content_type.startswith("text/"):
+        return True
+    if content_type in _TEXTUAL_CONTENT_TYPES:
+        return True
+    if "json" in content_type:
+        return True
+    if content_type.endswith("+json"):
+        return True
+    if content_type.endswith("+xml"):
+        return True
+    return False
 
 
 def create_file_references(
@@ -442,13 +504,38 @@ class URLReference:
 
         r = requests.get(self.url, timeout=30, headers={"User-Agent": "contextualize"})
         r.raise_for_status()
-        text = r.text
-        self.original_file_content = text
-        if "json" in r.headers.get("Content-Type", ""):
+        content_type = _strip_content_type(r.headers.get("Content-Type", ""))
+        suffix = _infer_url_suffix(self.url, dict(r.headers))
+        if (suffix and suffix in _DISALLOWED_EXTENSIONS) or (
+            content_type in _DISALLOWED_CONTENT_TYPES
+        ):
+            raise ValueError(f"Unsupported file type: {self.url}")
+
+        data = r.content
+        prefer_markitdown = bool(suffix and suffix in _MARKITDOWN_PREFERRED_EXTENSIONS)
+        is_text = _looks_like_text_content_type(content_type)
+
+        if prefer_markitdown:
+            from .markitdown_adapter import convert_response_to_markdown
+
+            text = convert_response_to_markdown(r).markdown
+            self.original_file_content = text
+        elif is_text:
+            text = r.text
+            self.original_file_content = text
+            if "json" in content_type:
+                try:
+                    text = json.dumps(r.json(), indent=2)
+                except Exception:
+                    pass
+        else:
             try:
-                text = json.dumps(r.json(), indent=2)
-            except Exception:
-                pass
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                from .markitdown_adapter import convert_response_to_markdown
+
+                text = convert_response_to_markdown(r).markdown
+            self.original_file_content = text
         if self.inject:
             from .links import inject_content_in_text
 
