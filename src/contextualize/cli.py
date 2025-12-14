@@ -504,7 +504,7 @@ def payload_cmd(ctx, manifest_path, inject, trace):
 @cli.command("cat")
 @click.argument("paths", nargs=-1, type=str)
 @click.option("--ignore", multiple=True, help="File(s) to ignore")
-@click.option("-f", "--format", default="md", help="Output format (md/xml/shell)")
+@click.option("-f", "--format", default="md", help="Output format (md/xml/shell/raw)")
 @click.option(
     "-l",
     "--label",
@@ -864,8 +864,9 @@ def cat_cmd(
     "-f",
     "--format",
     "format_hint",
+    type=click.Choice(["md", "xml", "shell", "raw"], case_sensitive=False),
     default="md",
-    help="Output format for clipboard entries (md/xml/shell/plain).",
+    help="Output format for clipboard entries (md/xml/shell/raw).",
 )
 @click.option(
     "--tokens",
@@ -984,8 +985,9 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
 @click.option(
     "-f",
     "--format",
-    default="plain",
-    help="Output format for the repo map (plain/shell)",
+    type=click.Choice(["raw", "shell"], case_sensitive=False),
+    default="raw",
+    help="Output format for the repo map (raw/shell)",
 )
 @click.option(
     "--tokens",
@@ -1093,7 +1095,7 @@ def map_cmd(
     "-f",
     "--format",
     default="shell",
-    help="Output format (md/xml/shell). Defaults to shell.",
+    help="Output format (md/xml/shell/raw). Defaults to shell.",
 )
 @click.option(
     "--capture-stderr/--no-capture-stderr",

@@ -36,7 +36,7 @@ contextualize --prompt "what has changed in this patch?" shell "git diff --stage
 Collect file contents, with optional wrapping and labels.
 
 ```
-contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell] [--label relative|name|ext] [--tokens] [--git-pull] [--git-reclone]
+contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell|raw] [--label relative|name|ext] [--tokens] [--git-pull] [--git-reclone]
 ```
 
 `PATH` may also start with a git repo spec such as `gh:user/repo` or `https://host/repo.git:path`.
@@ -51,7 +51,7 @@ Non-text files supported by [markitdown](https://github.com/microsoft/markitdown
 |--------|-------------|
 | `paths` | one or more files or directories |
 | `--ignore` | glob pattern(s) to skip |
-| `--format` | choose `md` (default), `xml`, or `shell` |
+| `--format` | choose `md` (default), `xml`, `shell`, or `raw` |
 | `--label` | how to label each attachment: `relative` (default), `name`, or `ext` |
 | `--tokens` | annotate each label with the file's token count |
 | `--git-pull` | update cached git repos referenced in paths |
@@ -73,7 +73,7 @@ contextualize -p "review:" -c \  # prepend "summarize:" to the output of cat; co
 Capture clipboard text in stages so it can be combined with other `contextualize` steps.
 
 ```
-contextualize paste [--count INT] [--format md|xml|shell|plain] [--tokens]
+contextualize paste [--count INT] [--format md|xml|shell|raw] [--tokens]
 ```
 
 `paste` waits for you to copy text and press Enter for each requested chunk (defaults to one chunk).
@@ -94,7 +94,7 @@ contextualize paste --count 2 | contextualize -p "Please review both snippets:" 
 Generate repository maps summarizing file structure.
 
 ```
-contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format plain|shell] [--tokens] [--git-pull] [--git-reclone]
+contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format raw|shell] [--tokens] [--git-pull] [--git-reclone]
 ```
 
 `PATH` accepts the same git repo specs as `cat`.
@@ -104,7 +104,7 @@ contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format pl
 | `paths` | directories or files to include |
 | `--max-tokens` | limit map size for aider |
 | `--ignore` | glob pattern(s) to skip |
-| `--format` | choose `plain` (default) or `shell` |
+| `--format` | choose `raw` (default) or `shell` |
 | `--tokens` | annotate file headers + constituent symbols with token counts |
 | `--git-pull` | update cached git repos referenced in paths |
 | `--git-reclone` | delete and re-clone cached git repos |

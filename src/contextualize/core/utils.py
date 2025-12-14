@@ -76,7 +76,7 @@ def segment_output(text, max_tokens, format_hint, token_target="cl100k_base"):
             if i < len(files):
                 result.append(files[i])
         files = result
-    elif format_hint in ("md", "markdown", "plain"):
+    elif format_hint in ("md", "markdown", "raw"):
         pattern = r"(^```[^\n]*\n.*?\n```$)"
         files = re.split(pattern, text, flags=re.MULTILINE | re.DOTALL)
         files = [f for f in files if f.strip()]
