@@ -394,10 +394,27 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 @click.option(
     "--trace",
     is_flag=True,
-    help="Show paths crawled during Markdown link resolution.",
+    help="Output an itemized list of files processed.",
+)
+@click.option(
+    "--map",
+    "map_components",
+    multiple=True,
+    help="Render maps only for named components.",
+)
+@click.option(
+    "--map-all",
+    "map_mode",
+    is_flag=True,
+    help="Render aider repo maps instead of file contents.",
+)
+@click.option(
+    "--exclude",
+    multiple=True,
+    help="Exclude named components from the manifest output.",
 )
 @click.pass_context
-def payload_cmd(ctx, manifest_path, inject, trace):
+def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_components):
     """
     Render a context payload from a provided YAML manifest.
     If no path is given and stdin is piped, read the manifest from stdin.
@@ -408,6 +425,26 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     """
     ctx.obj["format"] = "md"  # for segmentation
     token_target = ctx.obj.get("token_target", "cl100k_base")
+
+    def parse_keys(values):
+        keys = []
+        for value in values:
+            for part in value.split(","):
+                key = part.strip()
+                if key:
+                    keys.append(key)
+        return keys
+
+    exclude_keys_list = parse_keys(exclude)
+    map_keys_list = parse_keys(map_components)
+    if map_mode and map_keys_list:
+        raise click.BadParameter("--map cannot be combined with --map-all")
+    overlap = sorted(set(exclude_keys_list) & set(map_keys_list))
+    if overlap:
+        names = ", ".join(overlap)
+        raise click.BadParameter(
+            f"--exclude cannot be combined with --map for: {names}"
+        )
     try:
         import os
 
@@ -425,7 +462,14 @@ def payload_cmd(ctx, manifest_path, inject, trace):
         from .core.markitdown_adapter import MarkItDownConversionError
 
         try:
-            result = render_manifest(manifest_path, inject=inject)
+            result = render_manifest(
+                manifest_path,
+                inject=inject,
+                exclude_keys=exclude_keys_list,
+                map_mode=map_mode,
+                map_keys=map_keys_list,
+                token_target=token_target,
+            )
         except (MarkItDownConversionError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc
         payload_content = result.payload
@@ -473,7 +517,15 @@ def payload_cmd(ctx, manifest_path, inject, trace):
     try:
         from .core.markitdown_adapter import MarkItDownConversionError
 
-        result = render_manifest_data(data, os.getcwd(), inject=inject)
+        result = render_manifest_data(
+            data,
+            os.getcwd(),
+            inject=inject,
+            exclude_keys=exclude_keys_list,
+            map_mode=map_mode,
+            map_keys=map_keys_list,
+            token_target=token_target,
+        )
         payload_content = result.payload
         input_refs = result.input_refs
         trace_items = result.trace_items

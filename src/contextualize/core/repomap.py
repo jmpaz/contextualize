@@ -444,6 +444,7 @@ def generate_repo_map_data(
     ignore=None,
     annotate_tokens=False,
     token_target="cl100k_base",
+    root=None,
 ):
     """
     Generate a repository map and return a dict containing:
@@ -483,7 +484,7 @@ def generate_repo_map_data(
     io = CollectorIO()
     token_counter = TokenCounter()
 
-    root = os.getcwd()
+    root = root or os.getcwd()
 
     rm = ContextualRepoMap(
         map_tokens=max_tokens, main_model=token_counter, io=io, root=root

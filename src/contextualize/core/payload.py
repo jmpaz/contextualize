@@ -33,6 +33,14 @@ class _SimpleReference:
         self.output = output
 
 
+@dataclass
+class _PathReference:
+    path: str
+
+
+_DEFAULT_MAP_TOKENS = 10000
+
+
 def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
     if isinstance(spec, dict):
         raw = spec.get("path") or spec.get("target") or spec.get("url")
@@ -46,6 +54,27 @@ def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
     raise ValueError(
         f"Invalid file spec; expected string or mapping, got: {type(spec)}"
     )
+
+
+def _format_comment(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Comment must be a string, got: {type(value)}")
+    text = value.strip()
+    if not text:
+        return None
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    import json
+
+    escaped = json.dumps(text, ensure_ascii=False)
+    return f"comment={escaped}"
+
+
+def _combine_comment(comment: str | None, output: str) -> str:
+    if comment:
+        return f"{comment}\n{output}"
+    return output
 
 
 def _wrapped_url_reference(
@@ -65,6 +94,81 @@ def _wrapped_url_reference(
     )
     wrapped = wrap_text(url_ref.output, wrap or "md", filename or url)
     return _SimpleReference(wrapped)
+
+
+def _resolve_spec_to_paths(
+    raw_spec: str,
+    base_dir: str,
+    *,
+    component_name: str,
+) -> list[str]:
+    spec = os.path.expanduser(raw_spec)
+
+    if spec.startswith("http://") or spec.startswith("https://"):
+        opts = _parse_url_spec(spec)
+        url = opts.get("target", spec)
+        tgt = parse_git_target(url)
+        if not tgt or (
+            tgt.path is None
+            and not tgt.repo_url.endswith(".git")
+            and tgt.repo_url == url
+        ):
+            return []
+        repo_dir = ensure_repo(tgt)
+        paths = [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
+    else:
+        tgt = parse_git_target(spec)
+        if tgt:
+            repo_dir = ensure_repo(tgt)
+            paths = [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
+        else:
+            base = "" if os.path.isabs(spec) else base_dir
+            paths = expand_git_paths(base, spec)
+
+    resolved = []
+    for full in paths:
+        if not os.path.exists(full):
+            raise FileNotFoundError(
+                f"Component '{component_name}' path not found: {full}"
+            )
+        resolved.append(full)
+    return resolved
+
+
+def _compute_map_root(paths: list[str]) -> str | None:
+    if not paths:
+        return None
+    if len(paths) == 1:
+        path = paths[0]
+        if os.path.isdir(path):
+            return path
+        return os.path.dirname(path)
+    try:
+        return os.path.commonpath(paths)
+    except ValueError:
+        return None
+
+
+def _generate_repo_map_output(
+    paths: list[str],
+    *,
+    token_target: str,
+) -> str:
+    from .repomap import generate_repo_map_data
+
+    root = _compute_map_root(paths)
+    result = generate_repo_map_data(
+        paths,
+        _DEFAULT_MAP_TOKENS,
+        "raw",
+        ignore=None,
+        annotate_tokens=False,
+        token_target=token_target,
+        root=root,
+    )
+    if "error" in result:
+        return result["error"]
+    return result["repo_map"]
 
 
 def _resolve_spec_to_seed_refs(
@@ -164,9 +268,14 @@ def _render_attachment_block(
     wrap_mode: Optional[str],
     prefix: str,
     suffix: str,
+    comment: str | None,
 ) -> str:
     """Render an <attachment> block with optional wrap/prefix/suffix."""
     attachment_lines = [f'<attachment label="{name}">']
+    if comment:
+        attachment_lines.append(comment)
+        if refs:
+            attachment_lines.append("")
     for idx, ref in enumerate(refs):
         attachment_lines.append(ref.output)
         if idx < len(refs) - 1:
@@ -207,6 +316,39 @@ def assemble_payload(
     ).payload
 
 
+def _append_refs_with_comment(
+    target: list[Any],
+    refs: list[Any],
+    comment: str | None,
+) -> None:
+    if comment:
+        if refs:
+            combined = _combine_comment(comment, refs[0].output)
+            target.append(_SimpleReference(combined))
+            target.extend(refs[1:])
+        else:
+            target.append(_SimpleReference(comment))
+        return
+    target.extend(refs)
+
+
+def _should_map_component(
+    name: str | None,
+    *,
+    map_mode: bool,
+    map_keys: set[str],
+) -> bool:
+    if not name:
+        return False
+    if map_mode:
+        if map_keys:
+            return name in map_keys
+        return True
+    if map_keys:
+        return name in map_keys
+    return False
+
+
 def _build_payload_impl(
     components: List[Dict[str, Any]],
     base_dir: str,
@@ -216,19 +358,39 @@ def _build_payload_impl(
     link_depth_default: int = 0,
     link_scope_default: str = "all",
     link_skip_default: List[str] = None,
+    exclude_keys: list[str] | None = None,
+    map_mode: bool = False,
+    map_keys: list[str] | None = None,
+    token_target: str = "cl100k_base",
 ):
     parts: List[str] = []
     all_input_refs = []
     all_trace_items = []
     all_skipped_paths = set()
     all_skip_impact = {}
+    exclude_set = {k.strip() for k in (exclude_keys or []) if k and k.strip()}
+    map_key_set = {k.strip() for k in (map_keys or []) if k and k.strip()}
+    overlap = sorted(exclude_set & map_key_set)
+    if overlap:
+        names = ", ".join(overlap)
+        raise ValueError(f"Components cannot be both mapped and excluded: {names}")
 
     for comp in components:
+        name = comp.get("name")
+        if name and name in exclude_set:
+            continue
         wrap_mode = comp.get("wrap")
+        component_comment = _format_comment(comp.get("comment"))
 
         # text-only component passthrough
         if "text" in comp:
             text = comp["text"].rstrip()
+            if component_comment:
+                text = (
+                    _combine_comment(component_comment, text)
+                    if text
+                    else component_comment
+                )
             if wrap_mode:
                 if wrap_mode.lower() == "md":
                     text = "```\n" + text + "\n```"
@@ -237,7 +399,6 @@ def _build_payload_impl(
             parts.append(text)
             continue
 
-        name = comp.get("name")
         files = comp.get("files")
         if not name or not files:
             raise ValueError(
@@ -246,6 +407,9 @@ def _build_payload_impl(
 
         prefix = comp.get("prefix", "").rstrip()
         suffix = comp.get("suffix", "").lstrip()
+        map_component = _should_map_component(
+            name, map_mode=map_mode, map_keys=map_key_set
+        )
 
         comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
         comp_link_scope = (comp.get("link-scope", link_scope_default) or "all").lower()
@@ -265,10 +429,41 @@ def _build_payload_impl(
 
         refs_for_attachment = []
         input_refs_for_comp = []
+        seen_input_paths: set[str] = set()
 
         for spec in files:
             spec, file_opts = _coerce_file_spec(spec)
             spec = os.path.expanduser(spec)
+            item_comment = _format_comment(file_opts.get("comment"))
+
+            if map_component:
+                map_paths = _resolve_spec_to_paths(
+                    spec,
+                    base_dir,
+                    component_name=name,
+                )
+                if map_paths:
+                    map_output = _generate_repo_map_output(
+                        map_paths, token_target=token_target
+                    )
+                    _append_refs_with_comment(
+                        refs_for_attachment,
+                        [_SimpleReference(map_output)],
+                        item_comment,
+                    )
+                    for path in map_paths:
+                        abs_path = os.path.abspath(path)
+                        if abs_path in seen_input_paths:
+                            continue
+                        seen_input_paths.add(abs_path)
+                        input_refs_for_comp.append(_PathReference(abs_path))
+                elif item_comment:
+                    _append_refs_with_comment(
+                        refs_for_attachment,
+                        [],
+                        item_comment,
+                    )
+                continue
 
             per_file_link_depth = file_opts.get("link-depth")
             per_file_link_scope = (
@@ -315,7 +510,9 @@ def _build_payload_impl(
                         link_skip=resolved_link_skip if resolved_link_skip else None,
                     )
                 )
-                refs_for_attachment.extend(expanded_refs)
+                _append_refs_with_comment(
+                    refs_for_attachment, expanded_refs, item_comment
+                )
                 all_trace_items.extend(comp_trace_items)
                 if resolved_link_skip:
                     for skip_path in resolved_link_skip:
@@ -325,15 +522,21 @@ def _build_payload_impl(
                 if comp_skip_impact:
                     all_skip_impact.update(comp_skip_impact)
             else:
-                refs_for_attachment.extend(seed_refs)
+                _append_refs_with_comment(refs_for_attachment, seed_refs, item_comment)
 
         all_input_refs.extend(input_refs_for_comp)
 
-        parts.append(
-            _render_attachment_block(
-                name, refs_for_attachment, wrap_mode, prefix, suffix
+        if refs_for_attachment or prefix or suffix or component_comment:
+            parts.append(
+                _render_attachment_block(
+                    name,
+                    refs_for_attachment,
+                    wrap_mode,
+                    prefix,
+                    suffix,
+                    component_comment,
+                )
             )
-        )
 
     return (
         "\n\n".join(parts),
@@ -364,6 +567,10 @@ def build_payload(
     link_depth: int = 0,
     link_scope: str = "all",
     link_skip: Optional[List[str]] = None,
+    exclude_keys: list[str] | None = None,
+    map_mode: bool = False,
+    map_keys: list[str] | None = None,
+    token_target: str = "cl100k_base",
 ) -> PayloadResult:
     payload, input_refs, trace_items, base, skipped, impact = _build_payload_impl(
         components,
@@ -373,6 +580,10 @@ def build_payload(
         link_depth_default=link_depth,
         link_scope_default=link_scope,
         link_skip_default=link_skip or [],
+        exclude_keys=exclude_keys,
+        map_mode=map_mode,
+        map_keys=map_keys,
+        token_target=token_target,
     )
     return PayloadResult(payload, input_refs, trace_items, base, skipped, impact)
 
@@ -392,6 +603,10 @@ def render_manifest(
     *,
     inject: bool = False,
     depth: int = 5,
+    exclude_keys: list[str] | None = None,
+    map_mode: bool = False,
+    map_keys: list[str] | None = None,
+    token_target: str = "cl100k_base",
 ) -> PayloadResult:
     """
     Load YAML and assemble payload with mdlinks.
@@ -433,6 +648,10 @@ def render_manifest(
         link_depth=link_depth_default,
         link_scope=link_scope_default,
         link_skip=link_skip_default,
+        exclude_keys=exclude_keys,
+        map_mode=map_mode,
+        map_keys=map_keys,
+        token_target=token_target,
     )
 
 
@@ -442,6 +661,10 @@ def render_manifest_data(
     *,
     inject: bool = False,
     depth: int = 5,
+    exclude_keys: list[str] | None = None,
+    map_mode: bool = False,
+    map_keys: list[str] | None = None,
+    token_target: str = "cl100k_base",
 ) -> PayloadResult:
     """
     Assemble from an already-parsed YAML mapping (used for stdin case).
@@ -474,4 +697,8 @@ def render_manifest_data(
         link_depth=link_depth_default,
         link_scope=link_scope_default,
         link_skip=link_skip_default,
+        exclude_keys=exclude_keys,
+        map_mode=map_mode,
+        map_keys=map_keys,
+        token_target=token_target,
     )

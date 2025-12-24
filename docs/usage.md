@@ -118,6 +118,11 @@ Compose arbitrary sets of text blocks + files into a single output via a YAML ma
 contextualize payload MANIFEST.yaml  # or pipe into stdin
 ```
 
+Payload options:
+- `--map-all` render aider repo maps instead of file contents
+- `--map NAME` render maps only for named components (repeat or comma-separate)
+- `--exclude NAME` skip components by `name` (repeat or comma-separate)
+
 ```yaml
 # MANIFEST.yaml
 config:
@@ -127,18 +132,19 @@ components:
   - text: |
       some introductory text
   - name: core
+    comment: "core logic overview"
     prefix: |
       here is the core logic:
     files:
-      - src/contextualize/**/*.py
+      - path: src/contextualize/**/*.py
+        comment: "implementation details"
       - README.md
     suffix: |
       that was the core logic.
 ```
 
 running the command yields the composed payload.
-
-An upcoming release will add support for sections like `commands` and `maps` in addition to `files`.
+`comment` values are rendered as `comment="..."` lines using JSON string escaping (Unicode preserved), so quotes/backslashes are escaped and newlines are preserved as `\n`.
 
 ### content injection
 
