@@ -119,7 +119,7 @@ contextualize payload MANIFEST.yaml  # or pipe into stdin
 ```
 
 Payload options:
-- `--map-all` render aider repo maps instead of file contents
+- `-m, --map-compatible` render codemaps when possible; otherwise include file contents
 - `--map NAME` render maps only for named components (repeat or comma-separate)
 - `--exclude NAME` skip components by `name` (repeat or comma-separate)
 

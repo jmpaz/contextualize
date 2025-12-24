@@ -224,6 +224,8 @@ def format_trace_output(
     for ref in input_refs:
         path = getattr(ref, "path", None) or getattr(ref, "url", None) or ""
         rel_path = get_rel_path(path)
+        if getattr(ref, "is_map", False):
+            rel_path = f"[map] {rel_path}"
         detail = input_token_details.get(id(ref)) if input_token_details else None
 
         if detail:

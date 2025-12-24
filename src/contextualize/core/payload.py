@@ -33,12 +33,17 @@ class _SimpleReference:
         self.output = output
 
 
-@dataclass
-class _PathReference:
-    path: str
+class _MapReference:
+    def __init__(self, path: str, output: str):
+        self.path = path
+        self.output = output
+        self.file_content = output
+        self.original_file_content = output
+        self.is_map = True
 
 
 _DEFAULT_MAP_TOKENS = 10000
+_MIN_MAP_NONEMPTY_LINES = 2
 
 
 def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
@@ -169,6 +174,11 @@ def _generate_repo_map_output(
     if "error" in result:
         return result["error"]
     return result["repo_map"]
+
+
+def _map_output_is_compatible(output: str) -> bool:
+    lines = [line for line in output.splitlines() if line.strip()]
+    return len(lines) >= _MIN_MAP_NONEMPTY_LINES
 
 
 def _resolve_spec_to_seed_refs(
@@ -429,7 +439,6 @@ def _build_payload_impl(
 
         refs_for_attachment = []
         input_refs_for_comp = []
-        seen_input_paths: set[str] = set()
 
         for spec in files:
             spec, file_opts = _coerce_file_spec(spec)
@@ -446,24 +455,15 @@ def _build_payload_impl(
                     map_output = _generate_repo_map_output(
                         map_paths, token_target=token_target
                     )
-                    _append_refs_with_comment(
-                        refs_for_attachment,
-                        [_SimpleReference(map_output)],
-                        item_comment,
-                    )
-                    for path in map_paths:
-                        abs_path = os.path.abspath(path)
-                        if abs_path in seen_input_paths:
-                            continue
-                        seen_input_paths.add(abs_path)
-                        input_refs_for_comp.append(_PathReference(abs_path))
-                elif item_comment:
-                    _append_refs_with_comment(
-                        refs_for_attachment,
-                        [],
-                        item_comment,
-                    )
-                continue
+                    if _map_output_is_compatible(map_output):
+                        map_ref = _MapReference(spec, map_output)
+                        _append_refs_with_comment(
+                            refs_for_attachment,
+                            [map_ref],
+                            item_comment,
+                        )
+                        input_refs_for_comp.append(map_ref)
+                        continue
 
             per_file_link_depth = file_opts.get("link-depth")
             per_file_link_scope = (

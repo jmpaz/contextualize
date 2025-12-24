@@ -403,10 +403,11 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     help="Render maps only for named components.",
 )
 @click.option(
-    "--map-all",
+    "-m",
+    "--map-compatible",
     "map_mode",
     is_flag=True,
-    help="Render aider repo maps instead of file contents.",
+    help="Render codemaps when possible; otherwise include file contents.",
 )
 @click.option(
     "--exclude",
@@ -437,8 +438,6 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
 
     exclude_keys_list = parse_keys(exclude)
     map_keys_list = parse_keys(map_components)
-    if map_mode and map_keys_list:
-        raise click.BadParameter("--map cannot be combined with --map-all")
     overlap = sorted(set(exclude_keys_list) & set(map_keys_list))
     if overlap:
         names = ", ".join(overlap)
