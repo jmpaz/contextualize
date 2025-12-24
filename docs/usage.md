@@ -94,7 +94,7 @@ contextualize paste --count 2 | contextualize -p "Please review both snippets:" 
 Generate repository maps summarizing file structure.
 
 ```
-contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format raw|shell] [--tokens] [--git-pull] [--git-reclone]
+contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format raw|shell|md|xml] [--tokens] [--git-pull] [--git-reclone]
 ```
 
 `PATH` accepts the same git repo specs as `cat`.
@@ -104,7 +104,7 @@ contextualize map PATH [PATH...] [--max-tokens INT] [--ignore PATH] [--format ra
 | `paths` | directories or files to include |
 | `--max-tokens` | limit map size for aider |
 | `--ignore` | glob pattern(s) to skip |
-| `--format` | choose `raw` (default) or `shell` |
+| `--format` | choose `raw` (default), `shell`, `md`, or `xml` |
 | `--tokens` | annotate file headers + constituent symbols with token counts |
 | `--git-pull` | update cached git repos referenced in paths |
 | `--git-reclone` | delete and re-clone cached git repos |
@@ -132,7 +132,6 @@ components:
   - text: |
       some introductory text
   - name: core
-    comment: "core logic overview"
     prefix: |
       here is the core logic:
     files:
@@ -144,7 +143,6 @@ components:
 ```
 
 running the command yields the composed payload.
-`comment` values are rendered as `comment="..."` lines using JSON string escaping (Unicode preserved), so quotes/backslashes are escaped and newlines are preserved as `\n`.
 
 ### content injection
 

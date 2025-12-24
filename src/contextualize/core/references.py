@@ -132,6 +132,7 @@ def create_file_references(
     ignore_patterns=None,
     format="md",
     label="relative",
+    label_suffix: str | None = None,
     include_token_count=False,
     token_target="cl100k_base",
     inject=False,
@@ -204,6 +205,7 @@ def create_file_references(
                     raw_path,
                     format=format,
                     label=label,
+                    label_suffix=label_suffix,
                     include_token_count=include_token_count,
                     token_target=token_target,
                     inject=inject,
@@ -254,6 +256,7 @@ def create_file_references(
                         symbols=symbols,
                         format=format,
                         label=label,
+                        label_suffix=label_suffix,
                         include_token_count=include_token_count,
                         token_target=token_target,
                         inject=inject,
@@ -307,6 +310,7 @@ def create_file_references(
                                 file_path,
                                 format=format,
                                 label=label,
+                                label_suffix=label_suffix,
                                 include_token_count=include_token_count,
                                 token_target=token_target,
                                 inject=inject,
@@ -362,6 +366,7 @@ class FileReference:
         label="relative",
         clean_contents=False,
         *,
+        label_suffix: str | None = None,
         include_token_count=False,
         token_target="cl100k_base",
         inject=False,
@@ -378,6 +383,7 @@ class FileReference:
         self.path = path
         self.format = format
         self.label = label
+        self.label_suffix = label_suffix
         self.clean_contents = clean_contents
         self.include_token_count = include_token_count
         self.token_target = token_target
@@ -442,6 +448,7 @@ class FileReference:
             ranges=ranges,
             format=self.format,
             label=self.get_label(),
+            label_suffix=self.label_suffix,
             token_target=self.token_target,
             include_token_count=self.include_token_count,
             symbols=self.symbols,
@@ -474,6 +481,7 @@ class URLReference:
     label: str = "relative"
     token_target: str = "cl100k_base"
     include_token_count: bool = False
+    label_suffix: str | None = None
     inject: bool = False
     depth: int = 5
     trace_collector: list = None
@@ -547,6 +555,7 @@ class URLReference:
             text,
             format=self.format,
             label=self.get_label(),
+            label_suffix=self.label_suffix,
             token_target=self.token_target,
             include_token_count=self.include_token_count,
         )

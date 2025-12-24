@@ -65,7 +65,7 @@ def add_prompt_wrappers(content, prompts):
 def segment_output(text, max_tokens, format_hint, token_target="cl100k_base"):
     """Split text into segments without breaking files."""
     if format_hint == "xml":
-        pattern = r"<file\b[^>]*>.*?</file>"
+        pattern = r"<(?:file|map)\b[^>]*>.*?</(?:file|map)>"
         files = re.findall(pattern, text, re.DOTALL)
         remaining = re.sub(pattern, "|||FILE|||", text, flags=re.DOTALL)
         parts = remaining.split("|||FILE|||")

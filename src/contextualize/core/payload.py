@@ -34,11 +34,11 @@ class _SimpleReference:
 
 
 class _MapReference:
-    def __init__(self, path: str, output: str):
+    def __init__(self, path: str, output: str, content: str):
         self.path = path
         self.output = output
-        self.file_content = output
-        self.original_file_content = output
+        self.file_content = content
+        self.original_file_content = content
         self.is_map = True
 
 
@@ -89,6 +89,7 @@ def _wrapped_url_reference(
     wrap: Optional[str],
     inject: bool,
     depth: int,
+    label_suffix: str | None,
 ) -> _SimpleReference:
     url_ref = URLReference(
         url,
@@ -97,7 +98,10 @@ def _wrapped_url_reference(
         inject=inject,
         depth=depth,
     )
-    wrapped = wrap_text(url_ref.output, wrap or "md", filename or url)
+    label = filename or url
+    if label_suffix:
+        label = f"{label} {label_suffix}"
+    wrapped = wrap_text(url_ref.output, wrap or "md", label)
     return _SimpleReference(wrapped)
 
 
@@ -181,6 +185,26 @@ def _map_output_is_compatible(output: str) -> bool:
     return len(lines) >= _MIN_MAP_NONEMPTY_LINES
 
 
+def _build_map_reference(
+    label: str,
+    output: str,
+    *,
+    label_suffix: str | None,
+    token_target: str,
+) -> _MapReference:
+    from .render import process_text
+
+    rendered = process_text(
+        output,
+        format="md",
+        label=label,
+        label_suffix=label_suffix,
+        token_target=token_target,
+        include_token_count=False,
+    )
+    return _MapReference(label, rendered, output)
+
+
 def _resolve_spec_to_seed_refs(
     raw_spec: Any,
     file_opts: Dict[str, Any],
@@ -189,6 +213,7 @@ def _resolve_spec_to_seed_refs(
     inject: bool,
     depth: int,
     component_name: str,
+    label_suffix: str | None,
 ) -> List[Any]:
     """Resolve a single file/url/git spec into a list of seed refs."""
     spec = os.path.expanduser(raw_spec)
@@ -216,6 +241,7 @@ def _resolve_spec_to_seed_refs(
                     ignore_patterns=None,
                     format="md",
                     label="relative",
+                    label_suffix=label_suffix,
                     inject=inject,
                     depth=depth,
                 )["refs"]
@@ -228,6 +254,7 @@ def _resolve_spec_to_seed_refs(
                     wrap=wrap,
                     inject=inject,
                     depth=depth,
+                    label_suffix=label_suffix,
                 )
             )
         return seed_refs
@@ -254,6 +281,7 @@ def _resolve_spec_to_seed_refs(
                 full,
                 format="md",
                 label=str(custom_label),
+                label_suffix=label_suffix,
                 inject=inject,
                 depth=depth,
             )
@@ -264,6 +292,7 @@ def _resolve_spec_to_seed_refs(
                 ignore_patterns=None,
                 format="md",
                 label="relative",
+                label_suffix=label_suffix,
                 inject=inject,
                 depth=depth,
             )["refs"]
@@ -281,11 +310,8 @@ def _render_attachment_block(
     comment: str | None,
 ) -> str:
     """Render an <attachment> block with optional wrap/prefix/suffix."""
-    attachment_lines = [f'<attachment label="{name}">']
-    if comment:
-        attachment_lines.append(comment)
-        if refs:
-            attachment_lines.append("")
+    comment_attr = f" {comment}" if comment else ""
+    attachment_lines = [f'<attachment label="{name}"{comment_attr}>']
     for idx, ref in enumerate(refs):
         attachment_lines.append(ref.output)
         if idx < len(refs) - 1:
@@ -326,19 +352,7 @@ def assemble_payload(
     ).payload
 
 
-def _append_refs_with_comment(
-    target: list[Any],
-    refs: list[Any],
-    comment: str | None,
-) -> None:
-    if comment:
-        if refs:
-            combined = _combine_comment(comment, refs[0].output)
-            target.append(_SimpleReference(combined))
-            target.extend(refs[1:])
-        else:
-            target.append(_SimpleReference(comment))
-        return
+def _append_refs(target: list[Any], refs: list[Any]) -> None:
     target.extend(refs)
 
 
@@ -442,12 +456,12 @@ def _build_payload_impl(
 
         for spec in files:
             spec, file_opts = _coerce_file_spec(spec)
-            spec = os.path.expanduser(spec)
+            raw_spec = spec
             item_comment = _format_comment(file_opts.get("comment"))
 
             if map_component:
                 map_paths = _resolve_spec_to_paths(
-                    spec,
+                    raw_spec,
                     base_dir,
                     component_name=name,
                 )
@@ -456,12 +470,13 @@ def _build_payload_impl(
                         map_paths, token_target=token_target
                     )
                     if _map_output_is_compatible(map_output):
-                        map_ref = _MapReference(spec, map_output)
-                        _append_refs_with_comment(
-                            refs_for_attachment,
-                            [map_ref],
-                            item_comment,
+                        map_ref = _build_map_reference(
+                            raw_spec,
+                            map_output,
+                            label_suffix=item_comment,
+                            token_target=token_target,
                         )
+                        _append_refs(refs_for_attachment, [map_ref])
                         input_refs_for_comp.append(map_ref)
                         continue
 
@@ -483,12 +498,13 @@ def _build_payload_impl(
                     resolved_link_skip.append(skip_path)
 
             seed_refs = _resolve_spec_to_seed_refs(
-                spec,
+                raw_spec,
                 file_opts,
                 base_dir,
                 inject=inject,
                 depth=depth,
                 component_name=name,
+                label_suffix=item_comment,
             )
 
             input_refs_for_comp.extend([r for r in seed_refs if hasattr(r, "path")])
@@ -510,9 +526,7 @@ def _build_payload_impl(
                         link_skip=resolved_link_skip if resolved_link_skip else None,
                     )
                 )
-                _append_refs_with_comment(
-                    refs_for_attachment, expanded_refs, item_comment
-                )
+                _append_refs(refs_for_attachment, expanded_refs)
                 all_trace_items.extend(comp_trace_items)
                 if resolved_link_skip:
                     for skip_path in resolved_link_skip:
@@ -522,7 +536,7 @@ def _build_payload_impl(
                 if comp_skip_impact:
                     all_skip_impact.update(comp_skip_impact)
             else:
-                _append_refs_with_comment(refs_for_attachment, seed_refs, item_comment)
+                _append_refs(refs_for_attachment, seed_refs)
 
         all_input_refs.extend(input_refs_for_comp)
 

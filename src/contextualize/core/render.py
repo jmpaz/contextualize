@@ -5,6 +5,8 @@ def process_text(
     ranges=None,
     format="md",
     label="",
+    label_suffix: str | None = None,
+    xml_tag: str | None = None,
     shell_cmd=None,
     rev: str | None = None,
     token_target: str = "cl100k_base",
@@ -36,6 +38,8 @@ def process_text(
         shell_cmd,
         rev,
         token_count,
+        label_suffix=label_suffix,
+        xml_tag=xml_tag,
         symbols=symbols,
         is_excerpt=bool(ranges),
     )
@@ -95,12 +99,16 @@ def _delimit(
     rev: str | None = None,
     token_count: int | None = None,
     *,
+    label_suffix: str | None = None,
+    xml_tag: str | None = None,
     symbols=None,
     is_excerpt=False,
 ):
     symbols_list = [s for s in (symbols or []) if s]
     sym_suffix = f":{','.join(symbols_list)}" if symbols_list else ""
     label_with_symbols = f"{label}{sym_suffix}"
+    if label_suffix:
+        label_with_symbols = f"{label_with_symbols} {label_suffix}"
 
     if format == "md":
         backticks_str = "`" * max(max_backticks + 2, 3)  # at least 3
@@ -109,13 +117,15 @@ def _delimit(
             info = f"{info} ({token_count} tokens)"
         return f"{backticks_str}{info}\n{text}\n{backticks_str}"
     elif format == "xml":
+        tag_name = xml_tag or "file"
         token_attr = f" token_count='{token_count}'" if token_count is not None else ""
         rev_attr = f" rev='{rev}'" if rev else ""
         symbols_attr = f" symbols='{','.join(symbols_list)}'" if symbols_list else ""
+        suffix_attr = f" {label_suffix}" if label_suffix else ""
         return (
-            f"<file path='{label}'{symbols_attr}{token_attr}{rev_attr}>\n"
+            f"<{tag_name} path='{label}'{symbols_attr}{token_attr}{rev_attr}{suffix_attr}>\n"
             f"{text}\n"
-            f"</file>"
+            f"</{tag_name}>"
         )
     elif format == "shell":
         target_label = f"{label_with_symbols}@{rev}" if rev else label_with_symbols

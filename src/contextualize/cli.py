@@ -1036,9 +1036,9 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
 @click.option(
     "-f",
     "--format",
-    type=click.Choice(["raw", "shell"], case_sensitive=False),
+    type=click.Choice(["raw", "shell", "md", "xml"], case_sensitive=False),
     default="raw",
-    help="Output format for the repo map (raw/shell)",
+    help="Output format for the repo map (raw/shell/md/xml)",
 )
 @click.option(
     "--tokens",
@@ -1059,7 +1059,7 @@ def map_cmd(
     ctx, paths, max_tokens, ignore, format, annotate_tokens, git_pull, git_reclone, rev
 ):
     """
-    Generate a repository map (raw).
+    Generate a repository map.
     """
     if not paths:
         click.echo(ctx.get_help())
@@ -1099,12 +1099,13 @@ def map_cmd(
                 )
             else:
                 expanded.append(expanded_path)
+        internal_format = "raw" if format in {"md", "xml"} else format
         result = generate_repo_map_data_from_git(
             repo_root,
             expanded,
             rev,
             max_tokens,
-            format,
+            internal_format,
             ignore,
             annotate_tokens=annotate_tokens,
             token_target=token_target,
@@ -1127,17 +1128,31 @@ def map_cmd(
             else:
                 expanded.append(p)
 
+        internal_format = "raw" if format in {"md", "xml"} else format
         result = generate_repo_map_data(
             expanded,
             max_tokens,
-            format,
+            internal_format,
             ignore,
             annotate_tokens=annotate_tokens,
             token_target=token_target,
         )
     if "error" in result:
         return result["error"]
-    return result["repo_map"]
+    repo_map = result["repo_map"]
+    if format in {"md", "xml"}:
+        from .core.render import process_text
+
+        label = " ".join(paths)
+        repo_map = process_text(
+            repo_map,
+            format=format,
+            label=label,
+            xml_tag="map" if format == "xml" else None,
+            token_target=token_target,
+            include_token_count=annotate_tokens,
+        )
+    return repo_map
 
 
 @cli.command("shell")
