@@ -72,9 +72,13 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
                     ch = target[i]
                     if ch == "{":
                         depth += 1
+                        continue
                     elif ch == "}":
                         depth = max(0, depth - 1)
-                    elif ch == ":" and depth == 0:
+                        continue
+                    if depth == 0 and target.startswith("://", i):
+                        break
+                    if ch == ":" and depth == 0:
                         colon_pos = i
                         break
                 if colon_pos != -1 and colon_pos + 1 < len(target):
