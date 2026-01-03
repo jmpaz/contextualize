@@ -122,14 +122,15 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
 
 
 def parse_git_target(target: str) -> GitTarget | None:
-    if target.startswith("gh:"):
-        rest = target[3:]
-        repo_part, _, path = rest.partition(":")
-        repo, _, rev = repo_part.partition("@")
-        repo = repo[:-4] if repo.endswith(".git") else repo
-        repo_url = f"git@github.com:{repo}.git"
-        cache_dir = os.path.join(CACHE_ROOT, "github", *repo.split("/"))
-        return GitTarget(repo_url, cache_dir, path or None, rev or None)
+    for prefix in ("github:", "gh:"):
+        if target.startswith(prefix):
+            rest = target[len(prefix) :]
+            repo_part, _, path = rest.partition(":")
+            repo, _, rev = repo_part.partition("@")
+            repo = repo[:-4] if repo.endswith(".git") else repo
+            repo_url = f"git@github.com:{repo}.git"
+            cache_dir = os.path.join(CACHE_ROOT, "github", *repo.split("/"))
+            return GitTarget(repo_url, cache_dir, path or None, rev or None)
 
     repo_url, rev, path = _extract_path_and_rev(target)
 

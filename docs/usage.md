@@ -39,7 +39,7 @@ Collect file contents, with optional wrapping and labels.
 contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell|raw] [--label relative|name|ext] [--tokens] [--git-pull] [--git-reclone]
 ```
 
-`PATH` may also start with a git repo spec such as `gh:user/repo` or `https://host/repo.git:path`.
+`PATH` may also start with a git repo spec such as `github:user/repo` or `https://host/repo.git:path`.
 It can also be an `http(s)` URL pointing to a UTF-8 file.
 Multiple paths can be separated with commas after the colon.
 Brace expressions and glob patterns in those paths are expanded after cloning.

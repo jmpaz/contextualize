@@ -38,7 +38,7 @@ All commands work with the global flags `--prompt`, `--wrap`, `--copy`, `--count
 contextualize cat src/ README.md --prompt "how does this work?" --copy
 
 # fetch a single file from a remote repo (cached under ~/.local/share/contextualize/cache/git/)
-contextualize cat gh:jmpaz/contextualize:README.md
+contextualize cat github:jmpaz/contextualize:README.md
 
 # gather multiple files/folder(s) from a repo
 contextualize cat https://git.sr.ht/~cismonx/bookmarkfs:README.md,doc
