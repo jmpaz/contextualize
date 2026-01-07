@@ -25,7 +25,7 @@ def preprocess_args():
     if len(sys.argv) < 2:
         return
 
-    subcommands = {"payload", "cat", "map", "shell", "paste"}
+    subcommands = {"payload", "cat", "map", "shell", "paste", "hydrate"}
 
     # options that should be moved / which take values
     forwardable = {
@@ -550,6 +550,191 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
         ctx.obj["trace_output"] = trace_output
 
     return payload_content
+
+
+def _confirm_overwrite(path: str) -> bool:
+    prompt = f"{path} exists. Replace it and all contents? [y/N]: "
+    try:
+        with open("/dev/tty", "r", encoding="utf-8", errors="ignore") as tty_in:
+            while True:
+                click.echo(prompt, nl=False, err=True)
+                response = tty_in.readline()
+                if not response:
+                    break
+                value = response.strip().lower()
+                if value in {"n", "no", ""}:
+                    return False
+                if value in {"y", "yes"}:
+                    return True
+    except OSError:
+        raise click.ClickException(
+            f"{path} exists. Use --overwrite to replace it."
+        ) from None
+    raise click.ClickException(f"{path} exists. Use --overwrite to replace it.")
+
+
+@cli.command("hydrate")
+@click.argument(
+    "manifest_path",
+    required=False,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option("--add", "add_paths", multiple=True, help="Add file(s) as new components")
+@click.option(
+    "--segment",
+    "segment_paths",
+    multiple=True,
+    help="Add file(s) to a named component (NAME:PATH)",
+)
+@click.option(
+    "--note",
+    "note_entries",
+    multiple=True,
+    help="Add notes to a named component (NAME:TEXT)",
+)
+@click.option(
+    "--dir",
+    "context_dir",
+    type=click.Path(),
+    help="Context root directory (default: .context)",
+)
+@click.option(
+    "--access",
+    type=click.Choice(["read-only", "writable"], case_sensitive=False),
+    help="Context folder access mode (default: read-only)",
+)
+@click.option(
+    "--path-strategy",
+    type=click.Choice(["on-disk", "by-component"], case_sensitive=False),
+    help="Path layout strategy (default: on-disk)",
+)
+@click.option(
+    "--agents-filename",
+    "agents_filenames",
+    multiple=True,
+    help="Filename to write agent prompt content (repeat, default: AGENTS.md with --agents-prompt)",
+)
+@click.option(
+    "--agents-prompt",
+    "agents_prompt",
+    type=str,
+    help="Agent prompt content (default: none)",
+)
+@click.option(
+    "--omit-meta",
+    is_flag=True,
+    help="Omit manifest and index metadata (default: false)",
+)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing context directory without prompting (default: false)",
+)
+@click.pass_context
+def hydrate_cmd(
+    ctx,
+    manifest_path,
+    add_paths,
+    segment_paths,
+    note_entries,
+    context_dir,
+    access,
+    path_strategy,
+    agents_filenames,
+    agents_prompt,
+    omit_meta,
+    overwrite,
+):
+    """
+    Materialize a manifest into a context folder.
+    """
+    try:
+        import yaml
+
+        from .core.hydrate import (
+            ContextDirExistsError,
+            ExtraInputs,
+            HydrateOverrides,
+            hydrate_manifest,
+            hydrate_manifest_data,
+        )
+    except ImportError:
+        raise click.ClickException("pyyaml is required")
+
+    prompt_value = agents_prompt
+    if prompt_value is not None and not prompt_value.strip():
+        raise click.BadParameter("--agents-prompt cannot be empty")
+
+    access_value = access.lower() if access else None
+    path_strategy_value = path_strategy.lower() if path_strategy else None
+    overrides = HydrateOverrides(
+        context_dir=context_dir,
+        access=access_value,
+        path_strategy=path_strategy_value,
+        agents_prompt=prompt_value,
+        agents_filenames=tuple(agents_filenames),
+        omit_meta=omit_meta,
+        overwrite=overwrite,
+    )
+    extras = ExtraInputs(
+        add=tuple(add_paths),
+        segment=tuple(segment_paths),
+        note=tuple(note_entries),
+    )
+    cwd = os.getcwd()
+    data = None
+    manifest_cwd = cwd
+    if not manifest_path:
+        stdin_data = ctx.obj.get("stdin_data", "")
+        if not stdin_data:
+            click.echo(ctx.get_help())
+            ctx.exit(1)
+
+        ctx.obj["stdin_data"] = ""
+        try:
+            data = yaml.safe_load(stdin_data)
+        except Exception as exc:
+            raise click.ClickException(f"Invalid YAML on stdin: {exc}")
+        if not isinstance(data, dict):
+            raise click.ClickException(
+                "Manifest must be a mapping with 'config' and 'components'"
+            )
+
+    def run_hydrate(active_overrides: HydrateOverrides):
+        if manifest_path:
+            return hydrate_manifest(
+                manifest_path,
+                overrides=active_overrides,
+                extra_inputs=extras,
+                cwd=cwd,
+            )
+        return hydrate_manifest_data(
+            data,
+            manifest_cwd=manifest_cwd,
+            overrides=active_overrides,
+            extra_inputs=extras,
+            cwd=cwd,
+        )
+
+    try:
+        result = run_hydrate(overrides)
+    except ContextDirExistsError as exc:
+        if overwrite:
+            raise click.ClickException(str(exc)) from exc
+        if not _confirm_overwrite(str(exc.path)):
+            ctx.exit(1)
+        from dataclasses import replace
+
+        overrides = replace(overrides, overwrite=True)
+        try:
+            result = run_hydrate(overrides)
+        except (ValueError, FileNotFoundError) as inner_exc:
+            raise click.ClickException(str(inner_exc)) from inner_exc
+    except (ValueError, FileNotFoundError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Hydrated {result.file_count} files into {result.context_dir}")
+    return None
 
 
 @cli.command("cat")
