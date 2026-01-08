@@ -572,6 +572,7 @@ class CommandReference:
         command: str,
         format: str = "shell",
         capture_stderr: bool = True,
+        shell_executable: str | None = None,
     ):
         """
         :param command: The raw command string, e.g. "ls --help"
@@ -581,6 +582,7 @@ class CommandReference:
         self.command = command
         self.format = format
         self.capture_stderr = capture_stderr
+        self.shell_executable = shell_executable
 
         self.command_output = self.run_command()
         self.output = self.get_contents()
@@ -592,12 +594,14 @@ class CommandReference:
         escape sequences removed.
         """
         try:
-            result = subprocess.run(
-                self.command,
-                shell=True,  # allows pipes, redirection, etc.
-                capture_output=True,
-                text=True,
-            )
+            run_kwargs: dict[str, str | bool] = {
+                "shell": True,
+                "capture_output": True,
+                "text": True,
+            }
+            if self.shell_executable:
+                run_kwargs["executable"] = self.shell_executable
+            result = subprocess.run(self.command, **run_kwargs)
             stdout = result.stdout
             stderr = result.stderr if self.capture_stderr else ""
             combined = stdout + ("\n" + stderr if stderr else "")
@@ -627,18 +631,39 @@ def remove_ansi(text: str) -> str:
     return ansi_escape.sub("", text)
 
 
+def _normalize_shell_executable(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _resolve_shell_executable(shell_override: str | None) -> str | None:
+    shell_override = _normalize_shell_executable(shell_override)
+    if shell_override:
+        return shell_override
+    return _normalize_shell_executable(os.environ.get("SHELL"))
+
+
 def create_command_references(
     commands: List[str],
     format: str = "shell",
     capture_stderr: bool = True,
+    shell_executable: str | None = None,
 ):
     """
     Runs each command, collects outputs as CommandReference objects,
     and concatenates them similarly to how file references are handled.
     """
     cmd_refs = []
+    resolved_shell = _resolve_shell_executable(shell_executable)
     for cmd in commands:
-        cmd_ref = CommandReference(cmd, format=format, capture_stderr=capture_stderr)
+        cmd_ref = CommandReference(
+            cmd,
+            format=format,
+            capture_stderr=capture_stderr,
+            shell_executable=resolved_shell,
+        )
         cmd_refs.append(cmd_ref)
 
     concatenated = "\n\n".join(ref.output for ref in cmd_refs)

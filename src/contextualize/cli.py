@@ -1328,8 +1328,14 @@ def map_cmd(
     default=True,
     help="Capture stderr along with stdout. Defaults to True.",
 )
+@click.option(
+    "--shell",
+    "shell_executable",
+    default=None,
+    help="Shell executable for running commands (defaults to $SHELL).",
+)
 @click.pass_context
-def shell_cmd(ctx, commands, format, capture_stderr):
+def shell_cmd(ctx, commands, format, capture_stderr, shell_executable):
     """
     Run arbitrary shell commands (returns raw combined output).
     """
@@ -1340,6 +1346,7 @@ def shell_cmd(ctx, commands, format, capture_stderr):
         commands=commands,
         format=format,
         capture_stderr=capture_stderr,
+        shell_executable=shell_executable,
     )
     return refs_data["concatenated"]
 
