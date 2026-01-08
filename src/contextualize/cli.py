@@ -1,12 +1,164 @@
 import os
 import sys
+from collections.abc import Sequence
 
 import click
+from click.formatting import term_len
 from pyperclip import copy
 from pyperclip import paste as clipboard_paste
 
 from .core.render import process_text
 from .core.utils import add_prompt_wrappers, count_tokens, wrap_text
+
+COMMAND_GROUPS = (
+    ("Sources", ("cat", "map", "shell", "paste")),
+    ("Manifest", ("hydrate", "payload")),
+)
+HELP_COL_MAX = 30
+HELP_COL_SPACING = 2
+
+GLOBAL_OPTION_LABELS = (
+    ("prompt", "--prompt"),
+    ("wrap_short", "-w"),
+    ("wrap_mode", "--wrap"),
+    ("copy", "--copy"),
+    ("count_only", "--count"),
+    ("copy_segments", "--copy-segments"),
+    ("write_file", "--write-file"),
+    ("token_target", "--token-target"),
+    ("md_model", "--md-model"),
+    ("output_position", "--position"),
+    ("append_flag", "--after"),
+    ("prepend_flag", "--before"),
+)
+
+GLOBAL_OPTION_DEFAULTS = {
+    "prompt": (),
+    "wrap_short": False,
+    "wrap_mode": None,
+    "copy": False,
+    "count_only": False,
+    "copy_segments": None,
+    "write_file": None,
+    "token_target": "cl100k_base",
+    "md_model": None,
+    "output_position": None,
+    "append_flag": False,
+    "prepend_flag": False,
+}
+
+
+def _write_bold_section(
+    formatter: click.HelpFormatter, title: str, records: list[tuple[str, str]]
+) -> None:
+    if not records:
+        return
+    formatter.write("\n")
+    formatter.write(click.style(title, bold=True) + "\n")
+    formatter.indent()
+    formatter.write_dl(records, col_max=HELP_COL_MAX, col_spacing=HELP_COL_SPACING)
+    formatter.dedent()
+
+
+def _collect_used_global_option_labels(ctx: click.Context) -> list[str]:
+    parent = ctx.parent
+    if parent is None:
+        return []
+    get_source = getattr(parent, "get_parameter_source", None)
+    used: list[str] = []
+    if callable(get_source):
+        for name, label in GLOBAL_OPTION_LABELS:
+            if name not in parent.params:
+                continue
+            if get_source(name) == click.core.ParameterSource.COMMANDLINE:
+                used.append(label)
+        return used
+    for name, label in GLOBAL_OPTION_LABELS:
+        if name not in parent.params:
+            continue
+        if parent.params.get(name) != GLOBAL_OPTION_DEFAULTS.get(name):
+            used.append(label)
+    return used
+
+
+def _command_help_limit(formatter: click.HelpFormatter, names: Sequence[str]) -> int:
+    if not names:
+        return 45
+    max_name = max(term_len(name) for name in names)
+    first_col = min(max_name, HELP_COL_MAX) + HELP_COL_SPACING
+    return max(formatter.width - first_col - 2, 10)
+
+
+class OrderedGroup(click.Group):
+    def __init__(
+        self,
+        *args,
+        commands_order: Sequence[str] | None = None,
+        command_groups: Sequence[tuple[str, Sequence[str]]] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._commands_order = list(commands_order or [])
+        self._command_groups = [
+            (title, set(commands)) for title, commands in (command_groups or [])
+        ]
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        if not self._commands_order:
+            return super().list_commands(ctx)
+        ordered = [name for name in self._commands_order if name in self.commands]
+        remaining = [
+            name
+            for name in super().list_commands(ctx)
+            if name not in self._commands_order
+        ]
+        return ordered + remaining
+
+    def format_commands(
+        self, ctx: click.Context, formatter: click.HelpFormatter
+    ) -> None:
+        if not self._command_groups:
+            return super().format_commands(ctx, formatter)
+        command_entries: list[tuple[str | None, str, click.Command]] = []
+        for subcommand in self.list_commands(ctx):
+            cmd = self.get_command(ctx, subcommand)
+            if cmd is None or cmd.hidden:
+                continue
+            group_title = None
+            for title, command_set in self._command_groups:
+                if subcommand in command_set:
+                    group_title = title
+                    break
+            command_entries.append((group_title, subcommand, cmd))
+        if not command_entries:
+            return
+        grouped_records: dict[str, list[tuple[str, click.Command]]] = {
+            title: [] for title, _ in self._command_groups
+        }
+        other_records: list[tuple[str, click.Command]] = []
+        for group_title, name, cmd in command_entries:
+            if group_title is None:
+                other_records.append((name, cmd))
+            else:
+                grouped_records[group_title].append((name, cmd))
+        for title, _ in self._command_groups:
+            entries = grouped_records[title]
+            if not entries:
+                continue
+            names = [name for name, _ in entries]
+            limit = _command_help_limit(formatter, names)
+            rows = [
+                (name, cmd.get_short_help_str(limit=limit)) for name, cmd in entries
+            ]
+            _write_bold_section(formatter, title.upper(), rows)
+        if other_records:
+            names = [name for name, _ in other_records]
+            limit = _command_help_limit(formatter, names)
+            rows = [
+                (name, cmd.get_short_help_str(limit=limit))
+                for name, cmd in other_records
+            ]
+            _write_bold_section(formatter, "OTHER", rows)
 
 
 def validate_prompt(ctx, param, value):
@@ -98,6 +250,9 @@ preprocess_args()
 
 
 @click.group(
+    cls=OrderedGroup,
+    commands_order=["cat", "map", "shell", "paste", "hydrate", "payload"],
+    command_groups=COMMAND_GROUPS,
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -417,7 +572,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 @click.pass_context
 def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_components):
     """
-    Render a context payload from a provided YAML manifest.
+    Render a context payload from a manifest.
     If no path is given and stdin is piped, read the manifest from stdin.
 
     Some common non-text formats are converted to text automatically:
@@ -630,8 +785,11 @@ def hydrate_cmd(
     overwrite,
 ):
     """
-    Materialize a manifest into a context folder.
+    Materialize a provided YAML manifest into a context folder.
     """
+    used_options = _collect_used_global_option_labels(ctx)
+    if used_options:
+        click.echo(f"ignoring global options [{', '.join(used_options)}]", err=True)
     try:
         import yaml
 
@@ -1316,7 +1474,7 @@ def map_cmd(
 
 
 @cli.command("shell")
-@click.argument("commands", nargs=-1, required=True)
+@click.argument("commands", nargs=-1, required=False)
 @click.option(
     "-f",
     "--format",
@@ -1339,6 +1497,9 @@ def shell_cmd(ctx, commands, format, capture_stderr, shell_executable):
     """
     Run arbitrary shell commands (returns raw combined output).
     """
+    if not commands:
+        click.echo(ctx.get_help())
+        ctx.exit()
     ctx.obj["format"] = format  # for segmentation
     from .core.references import create_command_references
 
