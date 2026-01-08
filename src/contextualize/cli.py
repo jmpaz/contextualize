@@ -652,11 +652,13 @@ def hydrate_cmd(
         import yaml
 
         from .core.hydrate import (
-            ContextDirExistsError,
             ExtraInputs,
             HydrateOverrides,
-            hydrate_manifest,
-            hydrate_manifest_data,
+            apply_hydration_plan,
+            build_hydration_plan,
+            build_hydration_plan_data,
+            clear_context_dir,
+            plan_matches_existing,
         )
     except ImportError:
         raise click.ClickException("pyyaml is required")
@@ -674,7 +676,6 @@ def hydrate_cmd(
         agents_prompt=prompt_value,
         agents_filenames=tuple(agents_filenames),
         omit_meta=omit_meta,
-        overwrite=overwrite,
     )
     extras = ExtraInputs(
         add=tuple(add_paths),
@@ -683,7 +684,6 @@ def hydrate_cmd(
     )
     cwd = os.getcwd()
     data = None
-    manifest_cwd = cwd
     if not manifest_path:
         stdin_data = ctx.obj.get("stdin_data", "")
         if not stdin_data:
@@ -700,39 +700,38 @@ def hydrate_cmd(
                 "Manifest must be a mapping with 'config' and 'components'"
             )
 
-    def run_hydrate(active_overrides: HydrateOverrides):
+    try:
         if manifest_path:
-            return hydrate_manifest(
+            plan = build_hydration_plan(
                 manifest_path,
-                overrides=active_overrides,
+                overrides=overrides,
                 extra_inputs=extras,
                 cwd=cwd,
             )
-        return hydrate_manifest_data(
-            data,
-            manifest_cwd=manifest_cwd,
-            overrides=active_overrides,
-            extra_inputs=extras,
-            cwd=cwd,
-        )
-
-    try:
-        result = run_hydrate(overrides)
-    except ContextDirExistsError as exc:
-        if overwrite:
-            raise click.ClickException(str(exc)) from exc
-        if not _confirm_overwrite(str(exc.path)):
-            ctx.exit(1)
-        from dataclasses import replace
-
-        overrides = replace(overrides, overwrite=True)
-        try:
-            result = run_hydrate(overrides)
-        except (ValueError, FileNotFoundError) as inner_exc:
-            raise click.ClickException(str(inner_exc)) from inner_exc
+        else:
+            plan = build_hydration_plan_data(
+                data,
+                manifest_cwd=cwd,
+                overrides=overrides,
+                extra_inputs=extras,
+                cwd=cwd,
+            )
     except (ValueError, FileNotFoundError) as exc:
         raise click.ClickException(str(exc)) from exc
 
+    if plan.context_dir.exists():
+        if plan_matches_existing(plan):
+            click.echo(f"{plan.context_dir} is already up to date.")
+            return None
+        if not overwrite:
+            if not _confirm_overwrite(str(plan.context_dir)):
+                ctx.exit(1)
+        try:
+            clear_context_dir(plan.context_dir)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    result = apply_hydration_plan(plan)
     click.echo(f"Hydrated {result.file_count} files into {result.context_dir}")
     return None
 

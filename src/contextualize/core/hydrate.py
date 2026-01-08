@@ -8,6 +8,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from .references import URLReference, create_file_references, split_path_and_symbols
@@ -21,7 +22,6 @@ class HydrateOverrides:
     agents_prompt: str | None = None
     agents_filenames: tuple[str, ...] = ()
     omit_meta: bool = False
-    overwrite: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,10 +50,82 @@ class ResolvedItem:
     manifest_spec: str
 
 
-class ContextDirExistsError(RuntimeError):
-    def __init__(self, path: Path) -> None:
-        super().__init__(f"Context dir already exists: {path}")
-        self.path = path
+@dataclass(frozen=True)
+class HydratePlan:
+    context_dir: Path
+    files_to_write: list[tuple[Path, str]]
+    used_paths: set[str]
+    component_count: int
+    include_meta: bool
+    access: str
+
+
+def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
+    _write_files(plan.files_to_write)
+    if plan.access == "read-only":
+        _apply_read_only(plan.context_dir)
+
+    file_count = len({path.as_posix() for path, _ in plan.files_to_write})
+    return HydrateResult(
+        context_dir=str(plan.context_dir),
+        component_count=plan.component_count,
+        file_count=file_count,
+        manifest_written=plan.include_meta,
+    )
+
+
+def plan_matches_existing(plan: HydratePlan) -> bool:
+    context_dir = plan.context_dir
+    if not context_dir.exists() or not context_dir.is_dir():
+        return False
+
+    expected_hashes: dict[str, tuple[int, str]] = {}
+    expected_dirs: set[str] = set()
+    for path, content in plan.files_to_write:
+        rel = path.relative_to(context_dir).as_posix()
+        data = content.encode("utf-8")
+        digest = hashlib.sha256(data).hexdigest()
+        expected_hashes[rel] = (len(data), digest)
+        _collect_parent_dirs(rel, expected_dirs)
+
+    seen_files: set[str] = set()
+    for root, dirs, files in os.walk(context_dir):
+        rel_root = os.path.relpath(root, context_dir)
+        if rel_root != "." and rel_root not in expected_dirs:
+            return False
+        for name in files:
+            file_path = Path(root) / name
+            rel_file = file_path.relative_to(context_dir).as_posix()
+            expected = expected_hashes.get(rel_file)
+            if expected is None:
+                return False
+            size, digest = expected
+            try:
+                if file_path.stat().st_size != size:
+                    return False
+            except OSError:
+                return False
+            if _hash_file(file_path) != digest:
+                return False
+            seen_files.add(rel_file)
+        for name in dirs:
+            dir_path = Path(root) / name
+            rel_dir = dir_path.relative_to(context_dir).as_posix()
+            if rel_dir not in expected_dirs:
+                return False
+
+    if seen_files != set(expected_hashes.keys()):
+        return False
+
+    if plan.access == "read-only":
+        if not _all_read_only(context_dir, expected_dirs, set(expected_hashes.keys())):
+            return False
+
+    return True
+
+
+def clear_context_dir(path: Path) -> None:
+    _clear_context_dir(path)
 
 
 _URL_SPEC_RE = re.compile(r'(filename|params|root|wrap)=(?:"([^"]*)"|([^"]*))')
@@ -67,21 +139,13 @@ def hydrate_manifest(
     extra_inputs: ExtraInputs,
     cwd: str,
 ) -> HydrateResult:
-    import yaml
-
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
-    if not isinstance(data, dict):
-        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
-    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
-    return hydrate_manifest_data(
-        data,
-        manifest_cwd=manifest_dir,
-        manifest_path=manifest_path,
+    plan = build_hydration_plan(
+        manifest_path,
         overrides=overrides,
         extra_inputs=extra_inputs,
         cwd=cwd,
     )
+    return apply_hydration_plan(plan)
 
 
 def hydrate_manifest_data(
@@ -93,6 +157,50 @@ def hydrate_manifest_data(
     extra_inputs: ExtraInputs,
     cwd: str,
 ) -> HydrateResult:
+    plan = build_hydration_plan_data(
+        data,
+        manifest_cwd,
+        manifest_path=manifest_path,
+        overrides=overrides,
+        extra_inputs=extra_inputs,
+        cwd=cwd,
+    )
+    return apply_hydration_plan(plan)
+
+
+def build_hydration_plan(
+    manifest_path: str,
+    *,
+    overrides: HydrateOverrides,
+    extra_inputs: ExtraInputs,
+    cwd: str,
+) -> HydratePlan:
+    import yaml
+
+    with open(manifest_path, "r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
+    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+    return build_hydration_plan_data(
+        data,
+        manifest_dir,
+        manifest_path=manifest_path,
+        overrides=overrides,
+        extra_inputs=extra_inputs,
+        cwd=cwd,
+    )
+
+
+def build_hydration_plan_data(
+    data: dict[str, Any],
+    manifest_cwd: str,
+    *,
+    manifest_path: str | None = None,
+    overrides: HydrateOverrides,
+    extra_inputs: ExtraInputs,
+    cwd: str,
+) -> HydratePlan:
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a mapping with 'config' and 'components'")
 
@@ -110,10 +218,6 @@ def hydrate_manifest_data(
     _assign_component_names(components)
 
     context_dir = context_cfg["dir"]
-    if context_dir.exists():
-        if not overrides.overwrite:
-            raise ContextDirExistsError(context_dir)
-        _clear_context_dir(context_dir)
 
     used_paths: set[str] = set()
     identity_paths: dict[tuple[Any, ...], Path] = {}
@@ -254,16 +358,13 @@ def hydrate_manifest_data(
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
 
-    _write_files(files_to_write)
-    if context_cfg["access"] == "read-only":
-        _apply_read_only(context_dir)
-
-    file_count = len(used_paths)
-    return HydrateResult(
-        context_dir=str(context_dir),
+    return HydratePlan(
+        context_dir=context_dir,
+        files_to_write=files_to_write,
+        used_paths=used_paths,
         component_count=len(components),
-        file_count=file_count,
-        manifest_written=context_cfg["include_meta"],
+        include_meta=context_cfg["include_meta"],
+        access=context_cfg["access"],
     )
 
 
@@ -982,6 +1083,51 @@ def _chmod(path: Path, mode: int) -> None:
         os.chmod(path, mode)
     except OSError:
         return
+
+
+def _collect_parent_dirs(rel_path: str, target: set[str]) -> None:
+    path = Path(rel_path)
+    parent = path.parent
+    while parent and parent.as_posix() != ".":
+        target.add(parent.as_posix())
+        parent = parent.parent
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
+
+
+def _all_read_only(
+    context_dir: Path, expected_dirs: set[str], expected_files: list[str] | set[str]
+) -> bool:
+    for rel in expected_files:
+        path = context_dir / rel
+        if not _is_read_only(path):
+            return False
+    for rel in expected_dirs:
+        path = context_dir / rel
+        if not _is_read_only(path):
+            return False
+    return True
+
+
+def _is_read_only(path: Path) -> bool:
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return False
+    return (
+        (mode & stat.S_IWUSR) == 0
+        and (mode & stat.S_IWGRP) == 0
+        and (mode & stat.S_IWOTH) == 0
+    )
 
 
 def _clear_context_dir(path: Path) -> None:
