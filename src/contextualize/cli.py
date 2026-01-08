@@ -579,19 +579,6 @@ def _confirm_overwrite(path: str) -> bool:
     required=False,
     type=click.Path(exists=True, dir_okay=False),
 )
-@click.option("--add", "add_paths", multiple=True, help="Add file(s) as new components")
-@click.option(
-    "--segment",
-    "segment_paths",
-    multiple=True,
-    help="Add file(s) to a named component (NAME:PATH)",
-)
-@click.option(
-    "--note",
-    "note_entries",
-    multiple=True,
-    help="Add notes to a named component (NAME:TEXT)",
-)
 @click.option(
     "--dir",
     "context_dir",
@@ -634,9 +621,6 @@ def _confirm_overwrite(path: str) -> bool:
 def hydrate_cmd(
     ctx,
     manifest_path,
-    add_paths,
-    segment_paths,
-    note_entries,
     context_dir,
     access,
     path_strategy,
@@ -652,7 +636,6 @@ def hydrate_cmd(
         import yaml
 
         from .core.hydrate import (
-            ExtraInputs,
             HydrateOverrides,
             apply_hydration_plan,
             build_hydration_plan,
@@ -677,11 +660,6 @@ def hydrate_cmd(
         agents_filenames=tuple(agents_filenames),
         omit_meta=omit_meta,
     )
-    extras = ExtraInputs(
-        add=tuple(add_paths),
-        segment=tuple(segment_paths),
-        note=tuple(note_entries),
-    )
     cwd = os.getcwd()
     data = None
     if not manifest_path:
@@ -705,7 +683,6 @@ def hydrate_cmd(
             plan = build_hydration_plan(
                 manifest_path,
                 overrides=overrides,
-                extra_inputs=extras,
                 cwd=cwd,
             )
         else:
@@ -713,7 +690,6 @@ def hydrate_cmd(
                 data,
                 manifest_cwd=cwd,
                 overrides=overrides,
-                extra_inputs=extras,
                 cwd=cwd,
             )
     except (ValueError, FileNotFoundError) as exc:

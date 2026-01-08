@@ -25,13 +25,6 @@ class HydrateOverrides:
 
 
 @dataclass(frozen=True)
-class ExtraInputs:
-    add: tuple[str, ...] = ()
-    segment: tuple[str, ...] = ()
-    note: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class HydrateResult:
     context_dir: str
     component_count: int
@@ -136,13 +129,11 @@ def hydrate_manifest(
     manifest_path: str,
     *,
     overrides: HydrateOverrides,
-    extra_inputs: ExtraInputs,
     cwd: str,
 ) -> HydrateResult:
     plan = build_hydration_plan(
         manifest_path,
         overrides=overrides,
-        extra_inputs=extra_inputs,
         cwd=cwd,
     )
     return apply_hydration_plan(plan)
@@ -154,7 +145,6 @@ def hydrate_manifest_data(
     *,
     manifest_path: str | None = None,
     overrides: HydrateOverrides,
-    extra_inputs: ExtraInputs,
     cwd: str,
 ) -> HydrateResult:
     plan = build_hydration_plan_data(
@@ -162,7 +152,6 @@ def hydrate_manifest_data(
         manifest_cwd,
         manifest_path=manifest_path,
         overrides=overrides,
-        extra_inputs=extra_inputs,
         cwd=cwd,
     )
     return apply_hydration_plan(plan)
@@ -172,7 +161,6 @@ def build_hydration_plan(
     manifest_path: str,
     *,
     overrides: HydrateOverrides,
-    extra_inputs: ExtraInputs,
     cwd: str,
 ) -> HydratePlan:
     import yaml
@@ -187,7 +175,6 @@ def build_hydration_plan(
         manifest_dir,
         manifest_path=manifest_path,
         overrides=overrides,
-        extra_inputs=extra_inputs,
         cwd=cwd,
     )
 
@@ -198,7 +185,6 @@ def build_hydration_plan_data(
     *,
     manifest_path: str | None = None,
     overrides: HydrateOverrides,
-    extra_inputs: ExtraInputs,
     cwd: str,
 ) -> HydratePlan:
     if not isinstance(data, dict):
@@ -214,7 +200,6 @@ def build_hydration_plan_data(
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
-    components = _apply_extra_inputs(components, extra_inputs)
     _assign_component_names(components)
 
     context_dir = context_cfg["dir"]
@@ -450,34 +435,6 @@ def _resolve_agents(
     return text, files
 
 
-def _apply_extra_inputs(
-    components: list[dict[str, Any]], extra_inputs: ExtraInputs
-) -> list[dict[str, Any]]:
-    for path in extra_inputs.add:
-        components.append({"files": [path]})
-
-    for entry in extra_inputs.segment:
-        name, value = _split_named_entry(entry, "segment")
-        comp = _find_or_create_component(components, name)
-        files = comp.setdefault("files", [])
-        if not isinstance(files, list):
-            raise ValueError(f"Component '{name}' files must be a list")
-        files.append(value)
-
-    for entry in extra_inputs.note:
-        name, value = _split_named_entry(entry, "note")
-        comp = _find_or_create_component(components, name)
-        existing = comp.get("text")
-        if existing is None:
-            comp["text"] = value
-        elif isinstance(existing, str):
-            comp["text"] = f"{existing.rstrip()}\n\n{value}"
-        else:
-            raise ValueError(f"Component '{name}' text must be a string")
-
-    return components
-
-
 def _queue_agent_files(
     files: list[tuple[Path, str]],
     context_dir: Path,
@@ -494,24 +451,6 @@ def _validate_agent_filename(name: str) -> None:
         raise ValueError("Agent filename must be a non-empty name")
     if "/" in name or "\\" in name:
         raise ValueError("Agent filename must not contain path separators")
-
-
-def _split_named_entry(value: str, label: str) -> tuple[str, str]:
-    name, sep, payload = value.partition(":")
-    if not sep or not name.strip() or payload == "":
-        raise ValueError(f"--{label} expects NAME:VALUE")
-    return name.strip(), payload
-
-
-def _find_or_create_component(
-    components: list[dict[str, Any]], name: str
-) -> dict[str, Any]:
-    for comp in components:
-        if comp.get("name") == name:
-            return comp
-    new_comp = {"name": name}
-    components.append(new_comp)
-    return new_comp
 
 
 def _assign_component_names(components: list[dict[str, Any]]) -> None:
