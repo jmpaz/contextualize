@@ -371,7 +371,7 @@ def _resolve_context_config(
     if not isinstance(context_cfg, dict):
         raise ValueError("'config.context' must be a mapping")
 
-    raw_access = overrides.access or context_cfg.get("access") or "read-only"
+    raw_access = overrides.access or context_cfg.get("access") or "writable"
     if not isinstance(raw_access, str):
         raise ValueError("context access must be a string")
     access = raw_access.lower()
@@ -959,7 +959,7 @@ def _build_normalized_config(
     normalized["root"] = base_dir
     context = dict(cfg.get("context") or {})
     context.pop("dir", None)
-    context["access"] = context_cfg["access"]
+    context.pop("access", None)
     if "path-strategy" in context:
         context["path-strategy"] = context_cfg["path_strategy"]
     if "include-meta" in context:
@@ -971,7 +971,10 @@ def _build_normalized_config(
         }
     else:
         context.pop("agents", None)
-    normalized["context"] = context
+    if context:
+        normalized["context"] = context
+    else:
+        normalized.pop("context", None)
     return normalized
 
 

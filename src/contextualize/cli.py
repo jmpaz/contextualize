@@ -588,7 +588,7 @@ def _confirm_overwrite(path: str) -> bool:
 @click.option(
     "--access",
     type=click.Choice(["read-only", "writable"], case_sensitive=False),
-    help="Context folder access mode (default: read-only)",
+    help="Context folder access mode (default: writable)",
 )
 @click.option(
     "--path-strategy",
