@@ -1307,7 +1307,49 @@ def _clear_context_dir(path: Path) -> None:
     if not path.exists():
         return
     _make_writable(path)
-    shutil.rmtree(path)
+    for item in path.iterdir():
+        if item.is_dir() and not item.is_symlink():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+
+
+def find_untracked_files(path: Path) -> list[str]:
+    if not path.exists() or not path.is_dir():
+        return []
+
+    index_path = path / "index.json"
+    tracked_paths: set[str] = set()
+
+    if index_path.exists():
+        try:
+            import json
+
+            with open(index_path, "r", encoding="utf-8") as fh:
+                index_data = json.load(fh)
+            components = index_data.get("components", {})
+            for entries in components.values():
+                for entry in entries:
+                    ctx_path = entry.get("context_path")
+                    if ctx_path:
+                        tracked_paths.add(ctx_path)
+            tracked_paths.add("manifest.yaml")
+            tracked_paths.add("index.json")
+        except (json.JSONDecodeError, OSError, KeyError, TypeError):
+            pass
+
+    untracked: list[str] = []
+    for root, _, files in os.walk(path):
+        for name in files:
+            file_path = Path(root) / name
+            try:
+                rel_path = file_path.relative_to(path).as_posix()
+            except ValueError:
+                continue
+            if rel_path not in tracked_paths:
+                untracked.append(rel_path)
+
+    return untracked
 
 
 def _make_writable(path: Path) -> None:

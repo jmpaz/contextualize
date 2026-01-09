@@ -707,8 +707,15 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
     return payload_content
 
 
-def _confirm_overwrite(path: str) -> bool:
-    prompt = f"{path} exists. Replace it and all contents? [y/N]: "
+def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
+    if untracked_count > 0:
+        prompt = (
+            f"{path} exists. Replace it and all contents? "
+            f"({untracked_count} untracked file{'s' if untracked_count != 1 else ''} "
+            f"will also be deleted) [y/N]: "
+        )
+    else:
+        prompt = f"{path} exists. Replace it and all contents? [y/N]: "
     try:
         with open("/dev/tty", "r", encoding="utf-8", errors="ignore") as tty_in:
             while True:
@@ -722,6 +729,11 @@ def _confirm_overwrite(path: str) -> bool:
                 if value in {"y", "yes"}:
                     return True
     except OSError:
+        if untracked_count > 0:
+            raise click.ClickException(
+                f"{path} contains {untracked_count} untracked file{'s' if untracked_count != 1 else ''}. "
+                f"Interactive confirmation required."
+            ) from None
         raise click.ClickException(
             f"{path} exists. Use --overwrite to replace it."
         ) from None
@@ -799,6 +811,7 @@ def hydrate_cmd(
             build_hydration_plan,
             build_hydration_plan_data,
             clear_context_dir,
+            find_untracked_files,
             plan_matches_existing,
         )
     except ImportError:
@@ -857,8 +870,10 @@ def hydrate_cmd(
         if plan_matches_existing(plan):
             click.echo(f"{plan.context_dir} is already up to date.")
             return None
-        if not overwrite:
-            if not _confirm_overwrite(str(plan.context_dir)):
+        untracked = find_untracked_files(plan.context_dir)
+        untracked_count = len(untracked)
+        if not (overwrite and untracked_count == 0):
+            if not _confirm_overwrite(str(plan.context_dir), untracked_count):
                 ctx.exit(1)
         try:
             clear_context_dir(plan.context_dir)
