@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Tuple
 
 GROUP_DELIMITER = "."
 GROUP_PATH_KEY = "__group_path"
@@ -125,3 +125,36 @@ def normalize_manifest_components(components: list[Any]) -> list[dict[str, Any]]
 
     process(components, [], {})
     return normalized
+
+
+def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
+    if isinstance(spec, dict):
+        raw = spec.get("path") or spec.get("target") or spec.get("url")
+        if not raw or not isinstance(raw, str):
+            raise ValueError(
+                f"Invalid file spec mapping; expected 'path' string: {spec}"
+            )
+        return raw, spec
+    if isinstance(spec, str):
+        return spec, {}
+    raise ValueError(
+        f"Invalid file spec; expected string or mapping, got: {type(spec)}"
+    )
+
+
+def _component_selectors(comp: dict[str, Any]) -> set[str]:
+    selectors: set[str] = set()
+    name = comp.get("name")
+    if isinstance(name, str) and name:
+        selectors.add(name)
+    group_path = comp.get(GROUP_PATH_KEY)
+    if group_path:
+        if isinstance(group_path, str):
+            group_parts = [group_path]
+        else:
+            group_parts = list(group_path)
+        prefix = ""
+        for part in group_parts:
+            prefix = part if not prefix else f"{prefix}{GROUP_DELIMITER}{part}"
+            selectors.add(prefix)
+    return selectors

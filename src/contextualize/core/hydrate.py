@@ -11,7 +11,12 @@ import shutil
 import stat
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
-from .manifest import GROUP_BASE_KEY, GROUP_PATH_KEY, normalize_manifest_components
+from .manifest import (
+    GROUP_BASE_KEY,
+    GROUP_PATH_KEY,
+    _coerce_file_spec,
+    normalize_manifest_components,
+)
 from .references import URLReference, create_file_references, split_path_and_symbols
 
 
@@ -514,18 +519,6 @@ def _build_normalized_component(comp: dict[str, Any], name: str) -> dict[str, An
     }
     normalized["name"] = name
     return normalized
-
-
-def _coerce_file_spec(spec: Any) -> tuple[str, dict[str, Any]]:
-    if isinstance(spec, dict):
-        raw = spec.get("path") or spec.get("target") or spec.get("url")
-        if not raw or not isinstance(raw, str):
-            raise ValueError(f"Invalid file spec mapping: {spec}")
-        extras = {k: v for k, v in spec.items() if k not in {"path", "target", "url"}}
-        return raw, extras
-    if isinstance(spec, str):
-        return spec, {}
-    raise ValueError(f"Invalid file spec: {spec}")
 
 
 def _find_flatten_groups(components: list[dict[str, Any]]) -> set[tuple[str, ...]]:

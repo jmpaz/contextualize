@@ -7,7 +7,11 @@ import yaml
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from .links import add_markdown_link_refs
-from .manifest import GROUP_DELIMITER, GROUP_PATH_KEY, normalize_manifest_components
+from .manifest import (
+    _coerce_file_spec,
+    _component_selectors,
+    normalize_manifest_components,
+)
 from .references import URLReference, create_file_references
 from .utils import wrap_text
 
@@ -45,21 +49,6 @@ class _MapReference:
 
 _DEFAULT_MAP_TOKENS = 10000
 _MIN_MAP_NONEMPTY_LINES = 2
-
-
-def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
-    if isinstance(spec, dict):
-        raw = spec.get("path") or spec.get("target") or spec.get("url")
-        if not raw or not isinstance(raw, str):
-            raise ValueError(
-                f"Invalid file spec mapping; expected 'path' string: {spec}"
-            )
-        return raw, spec
-    if isinstance(spec, str):
-        return spec, {}
-    raise ValueError(
-        f"Invalid file spec; expected string or mapping, got: {type(spec)}"
-    )
 
 
 def _format_comment(value: Any) -> str | None:
@@ -356,24 +345,6 @@ def assemble_payload(
 
 def _append_refs(target: list[Any], refs: list[Any]) -> None:
     target.extend(refs)
-
-
-def _component_selectors(comp: dict[str, Any]) -> set[str]:
-    selectors: set[str] = set()
-    name = comp.get("name")
-    if isinstance(name, str) and name:
-        selectors.add(name)
-    group_path = comp.get(GROUP_PATH_KEY)
-    if group_path:
-        if isinstance(group_path, str):
-            group_parts = [group_path]
-        else:
-            group_parts = list(group_path)
-        prefix = ""
-        for part in group_parts:
-            prefix = part if not prefix else f"{prefix}{GROUP_DELIMITER}{part}"
-            selectors.add(prefix)
-    return selectors
 
 
 def _should_map_component(
