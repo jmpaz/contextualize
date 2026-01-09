@@ -555,7 +555,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     "--map",
     "map_components",
     multiple=True,
-    help="Render maps only for named components.",
+    help="Render maps only for named components or groups.",
 )
 @click.option(
     "-m",
@@ -567,7 +567,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 @click.option(
     "--exclude",
     multiple=True,
-    help="Exclude named components from the manifest output.",
+    help="Exclude named components or groups from the manifest output.",
 )
 @click.pass_context
 def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_components):

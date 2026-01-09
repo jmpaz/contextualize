@@ -11,6 +11,7 @@ import shutil
 import stat
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
+from .manifest import GROUP_BASE_KEY, GROUP_PATH_KEY, normalize_manifest_components
 from .references import URLReference, create_file_references, split_path_and_symbols
 
 
@@ -197,12 +198,17 @@ def build_hydration_plan_data(
     components = data.get("components")
     if not isinstance(components, list):
         raise ValueError("'components' must be a list")
+    components = normalize_manifest_components(components)
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
-    _assign_component_names(components)
-
     context_dir = context_cfg["dir"]
+    use_external_root = context_cfg[
+        "path_strategy"
+    ] == "on-disk" and _manifest_has_local_sources(components)
+    flatten_groups: set[tuple[str, ...]] = set()
+    if context_cfg["path_strategy"] == "by-component":
+        flatten_groups = _find_flatten_groups(components)
 
     used_paths: set[str] = set()
     identity_paths: dict[tuple[Any, ...], Path] = {}
@@ -224,6 +230,13 @@ def build_hydration_plan_data(
         comp_text = comp.get("text")
         comp_prefix = comp.get("prefix")
         comp_suffix = comp.get("suffix")
+        component_root = _build_component_root(
+            comp_name,
+            comp.get(GROUP_PATH_KEY),
+            comp.get(GROUP_BASE_KEY),
+            context_cfg["path_strategy"],
+            flatten_groups=flatten_groups,
+        )
 
         if (
             not comp_files
@@ -247,7 +260,8 @@ def build_hydration_plan_data(
                 raise ValueError(
                     f"Component '{comp_name}' note '{note_name}' must be a string"
                 )
-            note_path = context_dir / comp_name / "notes" / note_name
+            note_root = component_root or Path(comp_name)
+            note_path = context_dir / note_root / "notes" / note_name
             files_to_write.append((note_path, note_value))
 
         if comp_files is not None and not isinstance(comp_files, list):
@@ -304,6 +318,8 @@ def build_hydration_plan_data(
                         context_cfg["path_strategy"],
                         ranges,
                         symbols,
+                        component_root=component_root,
+                        use_external_root=use_external_root,
                     )
                     if should_write:
                         files_to_write.append((context_dir / rel_path, content))
@@ -492,7 +508,9 @@ def _validate_component_name(name: str) -> None:
 
 def _build_normalized_component(comp: dict[str, Any], name: str) -> dict[str, Any]:
     normalized = {
-        k: v for k, v in comp.items() if k not in {"files", "name"} and v is not None
+        k: v
+        for k, v in comp.items()
+        if k not in {"files", "name", GROUP_PATH_KEY, GROUP_BASE_KEY} and v is not None
     }
     normalized["name"] = name
     return normalized
@@ -508,6 +526,102 @@ def _coerce_file_spec(spec: Any) -> tuple[str, dict[str, Any]]:
     if isinstance(spec, str):
         return spec, {}
     raise ValueError(f"Invalid file spec: {spec}")
+
+
+def _find_flatten_groups(components: list[dict[str, Any]]) -> set[tuple[str, ...]]:
+    grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for comp in components:
+        group_path = comp.get(GROUP_PATH_KEY)
+        if not group_path:
+            continue
+        grouped.setdefault(tuple(group_path), []).append(comp)
+
+    flatten: set[tuple[str, ...]] = set()
+    for group_path, comps in grouped.items():
+        if len(comps) < 2:
+            continue
+        shared_root: str | None = None
+        for comp in comps:
+            root = _component_external_root(comp)
+            if root is None:
+                shared_root = None
+                break
+            if shared_root is None:
+                shared_root = root
+            elif shared_root != root:
+                shared_root = None
+                break
+        if shared_root is not None:
+            flatten.add(group_path)
+    return flatten
+
+
+def _component_external_root(comp: dict[str, Any]) -> str | None:
+    if comp.get("text") is not None or comp.get("prefix") is not None:
+        return None
+    if comp.get("suffix") is not None:
+        return None
+    files = comp.get("files")
+    if not files or not isinstance(files, list):
+        return None
+    root: str | None = None
+    for file_spec in files:
+        raw_spec, _ = _coerce_file_spec(file_spec)
+        key = _external_root_key(raw_spec)
+        if key is None:
+            return None
+        if root is None:
+            root = key
+        elif root != key:
+            return None
+    return root
+
+
+def _external_root_key(raw_spec: str) -> str | None:
+    spec = os.path.expanduser(raw_spec)
+    if spec.startswith("http://") or spec.startswith("https://"):
+        opts = _parse_url_spec(spec)
+        url = opts.get("target", spec)
+        tgt = parse_git_target(url)
+        if tgt and (
+            tgt.path is not None or tgt.repo_url.endswith(".git") or tgt.repo_url != url
+        ):
+            rev = tgt.rev or ""
+            return f"git:{tgt.repo_url}@{rev}"
+        return f"http:{_url_origin(url)}"
+    tgt = parse_git_target(spec)
+    if tgt:
+        rev = tgt.rev or ""
+        return f"git:{tgt.repo_url}@{rev}"
+    return None
+
+
+def _url_origin(url: str) -> str:
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "https").lower()
+    netloc = parsed.netloc or parsed.hostname or ""
+    if netloc:
+        return f"{scheme}://{netloc}"
+    return url
+
+
+def _manifest_has_local_sources(components: list[dict[str, Any]]) -> bool:
+    for comp in components:
+        files = comp.get("files")
+        if not files or not isinstance(files, list):
+            continue
+        for file_spec in files:
+            raw_spec, _ = _coerce_file_spec(file_spec)
+            if not _is_external_spec(raw_spec):
+                return True
+    return False
+
+
+def _is_external_spec(raw_spec: str) -> bool:
+    spec = os.path.expanduser(raw_spec)
+    if spec.startswith("http://") or spec.startswith("https://"):
+        return True
+    return parse_git_target(spec) is not None
 
 
 def _split_spec_symbols(spec: str) -> tuple[str, list[str]]:
@@ -787,6 +901,26 @@ def _sanitize_symbol(symbol: str) -> str:
     return safe.strip("-") or "sym"
 
 
+def _build_component_root(
+    component_name: str,
+    group_path: Any | None,
+    base_name: Any | None,
+    path_strategy: str,
+    *,
+    flatten_groups: set[tuple[str, ...]] | None = None,
+) -> Path | None:
+    if path_strategy != "by-component":
+        return None
+    if group_path:
+        parts = [group_path] if isinstance(group_path, str) else list(group_path)
+        group_key = tuple(parts)
+        if flatten_groups and group_key in flatten_groups:
+            return Path(*parts)
+        name = base_name if isinstance(base_name, str) and base_name else component_name
+        return Path(*parts, name)
+    return Path(component_name)
+
+
 def _resolve_context_path(
     component_name: str,
     item: ResolvedItem,
@@ -796,8 +930,18 @@ def _resolve_context_path(
     path_strategy: str,
     ranges: list[tuple[int, int]] | None,
     symbols: list[str] | None,
+    *,
+    component_root: Path | None = None,
+    use_external_root: bool,
 ) -> tuple[Path, bool]:
-    rel_path = _build_base_context_path(component_name, item, suffix, path_strategy)
+    rel_path = _build_base_context_path(
+        component_name,
+        item,
+        suffix,
+        path_strategy,
+        component_root,
+        use_external_root,
+    )
     _ensure_relative(rel_path)
 
     if path_strategy == "on-disk":
@@ -818,17 +962,28 @@ def _build_base_context_path(
     item: ResolvedItem,
     suffix: str | None,
     path_strategy: str,
+    component_root: Path | None = None,
+    use_external_root: bool = True,
 ) -> Path:
-    subpath = _split_subpath(item.context_subpath)
     if item.source_type == "local":
+        subpath = _split_subpath(item.context_subpath)
         rel_path = (
-            subpath if path_strategy == "on-disk" else Path(component_name) / subpath
+            subpath
+            if path_strategy == "on-disk"
+            else (component_root or Path(component_name)) / subpath
         )
     else:
-        source_id = _build_source_id(item.source_type, item.source_ref, item.source_rev)
-        ext_path = Path("external") / source_id / subpath
+        if item.source_type == "http":
+            ext_path = _build_http_external_path(item)
+            if use_external_root:
+                ext_path = Path("external") / ext_path
+        else:
+            subpath = _split_subpath(item.context_subpath)
+            ext_path = _build_external_path(item, subpath, use_external_root)
         rel_path = (
-            ext_path if path_strategy == "on-disk" else Path(component_name) / ext_path
+            ext_path
+            if path_strategy == "on-disk"
+            else (component_root or Path(component_name)) / ext_path
         )
 
     if suffix:
@@ -892,16 +1047,97 @@ def _ensure_relative(path: Path) -> None:
         raise ValueError(f"Invalid context path: {path}")
 
 
-def _build_source_id(source_type: str, source_ref: str, source_rev: str | None) -> str:
-    base = f"{source_type}-{source_ref}"
+def _build_external_path(
+    item: ResolvedItem, subpath: Path, use_external_root: bool
+) -> Path:
+    prefix = Path("external") if use_external_root else Path()
+    if item.source_type == "git":
+        return (
+            prefix
+            / _build_git_external_root(item.source_ref, item.source_rev)
+            / subpath
+        )
+    return (
+        prefix
+        / _build_generic_external_root(item.source_type, item.source_ref)
+        / subpath
+    )
+
+
+def _build_http_external_path(item: ResolvedItem) -> Path:
+    host = _parse_http_host(item.source_ref)
+    leaf = _pick_http_leaf(item.source_path)
+    slug = f"{host}-{leaf}" if host else leaf
+    slug = _sanitize_path_segment(slug, fallback="external")
+    return Path(slug)
+
+
+def _parse_http_host(source_ref: str) -> str:
+    parsed = urlparse(source_ref)
+    host = parsed.hostname or parsed.netloc or source_ref
+    if parsed.port:
+        host = f"{host}-{parsed.port}"
+    return host
+
+
+def _pick_http_leaf(source_path: str) -> str:
+    path = Path(source_path)
+    name = path.name
+    if not name or name == "index":
+        parent = path.parent.name
+        if parent and parent != ".":
+            return parent
+        return "index"
+    return name
+
+
+def _build_git_external_root(source_ref: str, source_rev: str | None) -> Path:
+    _, host, repo_path = _parse_git_source_ref(source_ref)
+    repo_parts = [part for part in repo_path.split("/") if part]
+    if repo_parts:
+        slug = repo_parts[-1]
+    else:
+        slug = host or "repo"
     if source_rev:
-        base = f"{base}@{source_rev}"
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._-")
-    if not safe or len(safe) > 80:
-        digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:12]
-        prefix = safe[:60].rstrip("._-")
-        safe = f"{prefix}-{digest}" if prefix else digest
-    return safe
+        slug = f"{slug}@{_format_rev_for_path(source_rev)}"
+    slug = _sanitize_path_segment(slug, fallback="repo")
+    return Path(slug)
+
+
+def _build_generic_external_root(source_type: str, source_ref: str) -> Path:
+    safe_type = _sanitize_path_segment(source_type, fallback="external")
+    safe_ref = _sanitize_path_segment(source_ref, fallback="source")
+    return Path(f"{safe_type}-{safe_ref}")
+
+
+def _parse_git_source_ref(source_ref: str) -> tuple[str, str, str]:
+    if source_ref.startswith("git@"):
+        host_path = source_ref[4:]
+        host, _, path = host_path.partition(":")
+        scheme = "ssh"
+    else:
+        parsed = urlparse(source_ref)
+        scheme = (parsed.scheme or "https").lower()
+        host = parsed.hostname or parsed.netloc or ""
+        path = parsed.path.lstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not host:
+        host = source_ref
+    return scheme, host, path
+
+
+def _format_rev_for_path(value: str) -> str:
+    rev = value.strip()
+    if re.fullmatch(r"[0-9a-f]{7,40}", rev):
+        return rev[:8]
+    return rev
+
+
+def _sanitize_path_segment(value: str, *, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or fallback
 
 
 def _build_index_entry(

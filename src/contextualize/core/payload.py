@@ -7,6 +7,7 @@ import yaml
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from .links import add_markdown_link_refs
+from .manifest import GROUP_DELIMITER, GROUP_PATH_KEY, normalize_manifest_components
 from .references import URLReference, create_file_references
 from .utils import wrap_text
 
@@ -341,8 +342,9 @@ def assemble_payload(
     inject: bool = False,
     depth: int = 5,
 ) -> str:
+    normalized_components = normalize_manifest_components(components)
     return build_payload(
-        components,
+        normalized_components,
         base_dir,
         inject=inject,
         depth=depth,
@@ -356,20 +358,38 @@ def _append_refs(target: list[Any], refs: list[Any]) -> None:
     target.extend(refs)
 
 
+def _component_selectors(comp: dict[str, Any]) -> set[str]:
+    selectors: set[str] = set()
+    name = comp.get("name")
+    if isinstance(name, str) and name:
+        selectors.add(name)
+    group_path = comp.get(GROUP_PATH_KEY)
+    if group_path:
+        if isinstance(group_path, str):
+            group_parts = [group_path]
+        else:
+            group_parts = list(group_path)
+        prefix = ""
+        for part in group_parts:
+            prefix = part if not prefix else f"{prefix}{GROUP_DELIMITER}{part}"
+            selectors.add(prefix)
+    return selectors
+
+
 def _should_map_component(
-    name: str | None,
+    selectors: set[str],
     *,
     map_mode: bool,
     map_keys: set[str],
 ) -> bool:
-    if not name:
+    if not selectors:
         return False
     if map_mode:
         if map_keys:
-            return name in map_keys
+            return bool(selectors & map_keys)
         return True
     if map_keys:
-        return name in map_keys
+        return bool(selectors & map_keys)
     return False
 
 
@@ -400,9 +420,10 @@ def _build_payload_impl(
         raise ValueError(f"Components cannot be both mapped and excluded: {names}")
 
     for comp in components:
-        name = comp.get("name")
-        if name and name in exclude_set:
+        selectors = _component_selectors(comp)
+        if selectors and exclude_set and selectors & exclude_set:
             continue
+        name = comp.get("name")
         wrap_mode = comp.get("wrap")
         component_comment = _format_comment(comp.get("comment"))
 
@@ -432,7 +453,7 @@ def _build_payload_impl(
         prefix = comp.get("prefix", "").rstrip()
         suffix = comp.get("suffix", "").lstrip()
         map_component = _should_map_component(
-            name, map_mode=map_mode, map_keys=map_key_set
+            selectors, map_mode=map_mode, map_keys=map_key_set
         )
 
         comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
@@ -647,6 +668,7 @@ def render_manifest(
     comps = data.get("components")
     if not isinstance(comps, list):
         raise ValueError("'components' must be a list")
+    comps = normalize_manifest_components(comps)
 
     link_depth_default = int(cfg.get("link-depth", 0) or 0)
     link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
@@ -696,6 +718,7 @@ def render_manifest_data(
     comps = data.get("components")
     if not isinstance(comps, list):
         raise ValueError("'components' must be a list")
+    comps = normalize_manifest_components(comps)
 
     link_depth_default = int(cfg.get("link-depth", 0) or 0)
     link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
