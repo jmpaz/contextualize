@@ -7,8 +7,8 @@ from click.formatting import term_len
 from pyperclip import copy
 from pyperclip import paste as clipboard_paste
 
-from .core.render import process_text
-from .core.utils import add_prompt_wrappers, count_tokens, wrap_text
+from .render.text import process_text
+from .utils import add_prompt_wrappers, count_tokens, wrap_text
 
 COMMAND_GROUPS = (
     ("Sources", ("cat", "map", "shell", "paste")),
@@ -475,7 +475,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
             click.echo("\n-----\n")
         click.echo(f"Wrote {token_count} tokens ({token_method}) to {write_file}")
     elif copy_segments:
-        from .core.utils import build_segment, segment_output, wait_for_enter
+        from .utils import build_segment, segment_output, wait_for_enter
 
         segments = segment_output(
             raw_text, copy_segments, ctx.obj.get("format", "md"), token_target
@@ -604,8 +604,8 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
 
         import yaml
 
-        from .core.links import format_trace_output
-        from .core.payload import (
+        from .render.links import format_trace_output
+        from .manifest.payload import (
             render_manifest,
             render_manifest_data,
         )
@@ -613,7 +613,7 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
         raise click.ClickException("pyyaml is required")
 
     if manifest_path:
-        from .core.markitdown_adapter import MarkItDownConversionError
+        from .render.markitdown import MarkItDownConversionError
 
         try:
             result = render_manifest(
@@ -669,7 +669,7 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
         )
 
     try:
-        from .core.markitdown_adapter import MarkItDownConversionError
+        from .render.markitdown import MarkItDownConversionError
 
         result = render_manifest_data(
             data,
@@ -805,7 +805,7 @@ def hydrate_cmd(
     try:
         import yaml
 
-        from .core.hydrate import (
+        from .manifest.hydrate import (
             HydrateOverrides,
             apply_hydration_plan,
             build_hydration_plan,
@@ -978,12 +978,12 @@ def cat_cmd(
 
     from pathlib import Path
 
-    from .core.links import (
+    from .render.links import (
         add_markdown_link_refs,
         compute_input_token_details,
         format_trace_output,
     )
-    from .core.references import (
+    from .references import (
         FileReference,
         URLReference,
         concat_refs,
@@ -998,7 +998,7 @@ def cat_cmd(
 
     def add_file_refs(paths_list):
         """Helper to add file references for a list of paths"""
-        from .core.markitdown_adapter import MarkItDownConversionError
+        from .render.markitdown import MarkItDownConversionError
 
         try:
             result = create_file_references(
@@ -1022,7 +1022,7 @@ def cat_cmd(
     use_rev = bool(rev)
     repo_root = None
     ignore_spec = None
-    from .core.utils import brace_expand
+    from .utils import brace_expand
 
     if use_rev:
         from pathspec import PathSpec
@@ -1096,7 +1096,7 @@ def cat_cmd(
                 if symbols:
                     text_at_rev = read_file_at_rev(repo_root, rev, relf)
                     try:
-                        from .core.repomap import find_symbol_ranges
+                        from .render.map import find_symbol_ranges
 
                         match_map = find_symbol_ranges(relf, symbols, text=text_at_rev)
                     except Exception:
@@ -1147,7 +1147,7 @@ def cat_cmd(
     input_refs = [r for r in refs if isinstance(r, FileReference)]
 
     if link_depth > 0 and not use_rev:
-        from .core.markitdown_adapter import MarkItDownConversionError
+        from .render.markitdown import MarkItDownConversionError
 
         try:
             refs[:], trace_items, skip_impact = add_markdown_link_refs(
@@ -1269,7 +1269,7 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
     ctx.obj["format"] = format_hint
     token_target = ctx.obj.get("token_target", "cl100k_base")
 
-    from .core.utils import wait_for_enter
+    from .utils import wait_for_enter
 
     def wait_for_stage_signal():
         try:
@@ -1405,7 +1405,7 @@ def map_cmd(
 
     from pathlib import Path
 
-    from .core.repomap import (
+    from .render.map import (
         generate_repo_map_data,
         generate_repo_map_data_from_git,
     )
@@ -1474,7 +1474,7 @@ def map_cmd(
         return result["error"]
     repo_map = result["repo_map"]
     if format in {"md", "xml"}:
-        from .core.render import process_text
+        from .render.text import process_text
 
         label = " ".join(paths)
         repo_map = process_text(
@@ -1516,7 +1516,7 @@ def shell_cmd(ctx, commands, format, capture_stderr, shell_executable):
         click.echo(ctx.get_help())
         ctx.exit()
     ctx.obj["format"] = format  # for segmentation
-    from .core.references import create_command_references
+    from .references import create_command_references
 
     refs_data = create_command_references(
         commands=commands,

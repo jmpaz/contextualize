@@ -169,7 +169,7 @@ def create_file_references(
                             f"Symbol selection is only supported for text files: {path}"
                         )
                     try:
-                        from ..repomap import find_symbol_ranges
+                        from ..render.map import find_symbol_ranges
 
                         match_map = find_symbol_ranges(path, symbols)
                     except Exception:

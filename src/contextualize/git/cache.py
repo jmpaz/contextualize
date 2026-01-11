@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from ..core.utils import _split_brace_options, brace_expand
+from ..utils import _split_brace_options, brace_expand
 
 CACHE_ROOT = os.path.expanduser("~/.local/share/contextualize/cache/git")
 

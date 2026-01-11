@@ -1,5 +1,8 @@
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import IO, Any, Dict, Tuple, Union
+
+import yaml
 
 GROUP_DELIMITER = "."
 GROUP_PATH_KEY = "__group_path"
@@ -129,7 +132,6 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
 
 def extract_groups(normalized_components: list[dict[str, Any]]) -> dict[str, list[str]]:
     groups: dict[str, list[str]] = {}
-
     for comp in normalized_components:
         group_path = comp.get(GROUP_PATH_KEY)
         if group_path:
@@ -139,7 +141,6 @@ def extract_groups(normalized_components: list[dict[str, Any]]) -> dict[str, lis
                 if prefix not in groups:
                     groups[prefix] = []
                 groups[prefix].append(comp["name"])
-
     return groups
 
 
@@ -178,7 +179,6 @@ def component_selectors(comp: dict[str, Any]) -> set[str]:
 
 def validate_manifest(data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-
     if not isinstance(data, dict):
         errors.append("Manifest must be a mapping")
         return errors
@@ -205,20 +205,15 @@ def validate_manifest(data: dict[str, Any]) -> list[str]:
                     errors.append(f"Group at index {i} 'components' must be a list")
             else:
                 if "files" not in comp and "text" not in comp:
-                    errors.append(
-                        f"Component at index {i} must have 'files' or 'text'"
-                    )
-
+                    errors.append(f"Component at index {i} must have 'files' or 'text'")
                 files = comp.get("files")
                 if files is not None and not isinstance(files, list):
                     errors.append(f"Component at index {i} 'files' must be a list")
-
     return errors
 
 
 def validate_component(comp: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-
     name = comp.get("name")
     if not name:
         errors.append("Component must have a 'name'")
@@ -244,5 +239,95 @@ def validate_component(comp: dict[str, Any]) -> list[str]:
     wrap = comp.get("wrap")
     if wrap is not None and wrap not in {"md", "xml", None}:
         errors.append(f"Component '{name}' 'wrap' must be 'md' or 'xml'")
-
     return errors
+
+
+@dataclass
+class Component:
+    name: str
+    files: list[str] = field(default_factory=list)
+    text: str | None = None
+    prefix: str | None = None
+    suffix: str | None = None
+    wrap: str | None = None
+    comment: str | None = None
+    options: dict[str, Any] = field(default_factory=dict)
+    group_path: tuple[str, ...] | None = None
+    group_base: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Component":
+        return cls(
+            name=data.get("name", ""),
+            files=data.get("files", []),
+            text=data.get("text"),
+            prefix=data.get("prefix"),
+            suffix=data.get("suffix"),
+            wrap=data.get("wrap"),
+            comment=data.get("comment"),
+            options={
+                k: v
+                for k, v in data.items()
+                if k
+                not in {
+                    "name",
+                    "files",
+                    "text",
+                    "prefix",
+                    "suffix",
+                    "wrap",
+                    "comment",
+                    "__group_path",
+                    "__group_base",
+                }
+            },
+            group_path=data.get("__group_path"),
+            group_base=data.get("__group_base"),
+        )
+
+
+@dataclass
+class Manifest:
+    config: dict[str, Any] = field(default_factory=dict)
+    components: list[Component] = field(default_factory=list)
+    groups: dict[str, list[str]] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Manifest":
+        config = data.get("config", {})
+        raw_components = data.get("components", [])
+        normalized = normalize_components(raw_components)
+        components = [Component.from_dict(c) for c in normalized]
+        groups = extract_groups(normalized)
+        return cls(config=config, components=components, groups=groups)
+
+
+def parse_manifest(source: Union[str, Path, IO]) -> dict[str, Any]:
+    if isinstance(source, Path):
+        with open(source, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    elif isinstance(source, str):
+        if "\n" not in source and Path(source).exists():
+            with open(source, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        else:
+            data = yaml.safe_load(source)
+    else:
+        data = yaml.safe_load(source)
+
+    if data is None:
+        data = {}
+
+    if not isinstance(data, dict):
+        raise ValueError("Manifest must be a YAML mapping")
+
+    if "components" not in data:
+        data["components"] = []
+    if "config" not in data:
+        data["config"] = {}
+
+    return data
+
+
+def load_manifest(path: Union[str, Path]) -> dict[str, Any]:
+    return parse_manifest(Path(path))

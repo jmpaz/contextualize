@@ -4,7 +4,7 @@ import os
 import subprocess
 from typing import List
 
-from ..render import process_text
+from ..render.text import process_text
 from ..utils import count_tokens
 from .helpers import remove_ansi
 

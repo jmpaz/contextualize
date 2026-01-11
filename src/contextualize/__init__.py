@@ -12,7 +12,7 @@ def cat(
     inject: bool = False,
     depth: int = 5,
 ) -> str:
-    from .core.references import create_file_references
+    from .references import create_file_references
 
     result = create_file_references(
         paths,
@@ -35,7 +35,7 @@ def map_paths(
     ignore: list[str] | None = None,
     token_target: str = "cl100k_base",
 ) -> str:
-    from .core.repomap import generate_repo_map_data
+    from .render.map import generate_repo_map_data
 
     result = generate_repo_map_data(
         paths,
@@ -54,7 +54,7 @@ def shell(
     capture_stderr: bool = True,
     shell_executable: str | None = None,
 ) -> str:
-    from .core.references import create_command_references
+    from .references import create_command_references
 
     result = create_command_references(
         commands,
@@ -73,7 +73,7 @@ def paste(
     tokens: bool = False,
     token_target: str = "cl100k_base",
 ) -> str:
-    from .core.render import process_text
+    from .render.text import process_text
 
     if content is None:
         try:
@@ -102,7 +102,7 @@ def payload(
     map_mode: bool = False,
     token_target: str = "cl100k_base",
 ) -> str:
-    from .core.payload import render_manifest
+    from .manifest.payload import render_manifest
 
     result = render_manifest(
         manifest_path,
@@ -122,17 +122,22 @@ def hydrate(
     dir: str | Path = ".context",
     access: str = "writable",
     path_strategy: str = "on-disk",
-    force: bool = False,
+    cwd: str | None = None,
 ) -> Path:
-    from .core.hydrate import HydrateOverrides, hydrate_manifest
+    import os
+    from .manifest.hydrate import HydrateOverrides, hydrate_manifest
 
     overrides = HydrateOverrides(
         context_dir=str(dir),
         access=access,
         path_strategy=path_strategy,
     )
-    result = hydrate_manifest(manifest_path, overrides=overrides, force=force)
-    return result.context_dir
+    result = hydrate_manifest(
+        str(manifest_path),
+        overrides=overrides,
+        cwd=cwd or os.getcwd(),
+    )
+    return Path(result.context_dir)
 
 
 __all__ = [

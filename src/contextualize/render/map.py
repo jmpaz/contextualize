@@ -8,9 +8,9 @@ from aider.repomap import (
     Spinner,
     filter_important_files,
 )
-from .utils import count_tokens
+from ..utils import count_tokens
 from grep_ast import TreeContext
-from .references import is_utf8_file
+from ..references import is_utf8_file
 from ..git.rev import list_files_at_rev, read_file_at_rev
 
 

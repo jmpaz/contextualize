@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from ..render import process_text
+from ..render.text import process_text
 from ..utils import count_tokens
 from .helpers import (
     DISALLOWED_CONTENT_TYPES,
@@ -81,7 +81,7 @@ class URLReference:
         is_text = looks_like_text_content_type(content_type)
 
         if prefer_markitdown:
-            from ..markitdown_adapter import convert_response_to_markdown
+            from ..render.markitdown import convert_response_to_markdown
 
             text = convert_response_to_markdown(r).markdown
             self.original_file_content = text
@@ -97,12 +97,12 @@ class URLReference:
             try:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
-                from ..markitdown_adapter import convert_response_to_markdown
+                from ..render.markitdown import convert_response_to_markdown
 
                 text = convert_response_to_markdown(r).markdown
             self.original_file_content = text
         if self.inject:
-            from ..links import inject_content_in_text
+            from ..render.links import inject_content_in_text
 
             text = inject_content_in_text(
                 text, self.depth, self.trace_collector, self.url

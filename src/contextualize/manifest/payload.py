@@ -6,14 +6,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
-from .links import add_markdown_link_refs
+from ..render.links import add_markdown_link_refs
 from .manifest import (
     coerce_file_spec,
     component_selectors,
     normalize_components,
 )
-from .references import URLReference, create_file_references
-from .utils import wrap_text
+from ..references import URLReference, create_file_references
+from ..utils import wrap_text
 
 
 def _parse_url_spec(spec: str) -> dict[str, Any]:
@@ -153,7 +153,7 @@ def _generate_repo_map_output(
     *,
     token_target: str,
 ) -> str:
-    from .repomap import generate_repo_map_data
+    from ..render.map import generate_repo_map_data
 
     root = _compute_map_root(paths)
     result = generate_repo_map_data(
@@ -182,7 +182,7 @@ def _build_map_reference(
     label_suffix: str | None,
     token_target: str,
 ) -> _MapReference:
-    from .render import process_text
+    from ..render.text import process_text
 
     rendered = process_text(
         output,
@@ -265,7 +265,7 @@ def _resolve_spec_to_seed_refs(
             )
         custom_label = file_opts.get("filename")
         if custom_label and os.path.isfile(full):
-            from .references import FileReference
+            from ..references import FileReference
 
             fr = FileReference(
                 full,

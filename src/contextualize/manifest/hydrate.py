@@ -17,7 +17,7 @@ from .manifest import (
     coerce_file_spec,
     normalize_components,
 )
-from .references import URLReference, create_file_references, split_path_and_symbols
+from ..references import URLReference, create_file_references, split_path_and_symbols
 
 
 @dataclass(frozen=True)
@@ -1373,7 +1373,7 @@ def _find_symbol_ranges(
     file_path: str, symbols: list[str], content: str
 ) -> dict[str, tuple[int, int]]:
     try:
-        from .repomap import find_symbol_ranges
+        from ..render.map import find_symbol_ranges
     except Exception:
         return {}
     return find_symbol_ranges(file_path, symbols, text=content)

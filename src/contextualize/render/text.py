@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .references import Reference
+    from ..references import Reference
 
 
 def process_text(
@@ -30,7 +30,7 @@ def process_text(
 
     if use_token_count:
         if token_count is None:
-            from .utils import count_tokens
+            from ..utils import count_tokens
 
             token_count = count_tokens(text, target=token_target)["count"]
     else:
@@ -159,7 +159,7 @@ def render_map(
     max_tokens: int = 10000,
     format: str = "raw",
 ) -> str:
-    from .repomap import RepoMap
+    from .map import RepoMap
 
     paths = [ref.path for ref in refs if hasattr(ref, "path")]
     if not paths:

@@ -9,13 +9,13 @@ import yaml
 from urllib.parse import urlparse
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
-from .references import (
+from ..references import (
     FileReference,
     URLReference,
     create_file_references,
     is_utf8_file,
 )
-from .utils import count_tokens, wrap_text
+from ..utils import count_tokens, wrap_text
 
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s#]+)\)")  # ignore anchors/fragments
 _INJECTION_PATTERN = re.compile(r"\{cx::((?:[^{}]|\{[^{}]*\})*)\}")

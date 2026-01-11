@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from ..render import process_text
+from ..render.text import process_text
 from ..utils import count_tokens
 from .helpers import (
     DISALLOWED_EXTENSIONS,
@@ -86,12 +86,12 @@ class FileReference:
                 return ""
 
         if prefer_markitdown:
-            from ..markitdown_adapter import convert_path_to_markdown
+            from ..render.markitdown import convert_path_to_markdown
 
             result = convert_path_to_markdown(self.path)
             self.file_content = self.original_file_content = result.markdown
         if self.inject:
-            from ..links import inject_content_in_text
+            from ..render.links import inject_content_in_text
 
             self.file_content = inject_content_in_text(
                 self.file_content, self.depth, self.trace_collector, self.path
@@ -100,7 +100,7 @@ class FileReference:
         ranges = self.ranges
         if self.symbols and ranges is None:
             try:
-                from ..repomap import find_symbol_ranges
+                from ..render.map import find_symbol_ranges
 
                 match_map = find_symbol_ranges(
                     self.path, self.symbols, text=self.file_content
@@ -134,7 +134,7 @@ class FileReference:
     def get_label(self):
         """Compute the label based on label style."""
         if self._label_style == "relative":
-            from ...git.cache import CACHE_ROOT
+            from ..git.cache import CACHE_ROOT
 
             cache_root = os.path.join(CACHE_ROOT, "")
             if self.path.startswith(cache_root):

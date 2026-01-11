@@ -4,7 +4,7 @@ import sys
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
-from ..core.render import process_text
+from ..render.text import process_text
 
 
 def _run_git(repo_root: str, args: list[str]) -> subprocess.CompletedProcess:
@@ -165,7 +165,7 @@ class GitRevFileReference:
         symbols = [s for s in (self.symbols or []) if s]
         if symbols and ranges is None:
             try:
-                from ..core.repomap import find_symbol_ranges
+                from ..render.map import find_symbol_ranges
 
                 match_map = find_symbol_ranges(
                     self.rel_path, symbols, text=self.file_content
