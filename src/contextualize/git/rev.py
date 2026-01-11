@@ -1,10 +1,8 @@
+"""Git revision access utilities."""
+
 import os
 import subprocess
-import sys
-from dataclasses import dataclass
 from typing import Iterable, List, Optional
-
-from ..core.render import process_text
 
 
 def _run_git(repo_root: str, args: list[str]) -> subprocess.CompletedProcess:
@@ -123,75 +121,13 @@ def discover_repo_root(
     return next(iter(repo_roots))
 
 
-@dataclass
-class GitRevFileReference:
-    repo_root: str
-    rev: str
-    rel_path: str
-    format: str = "md"
-    label: str = "relative"
-    include_token_count: bool = False
-    token_target: str = "cl100k_base"
-    file_content: str | None = None
-    original_file_content: str | None = None
-    ranges: list[tuple[int, int]] | None = None
-    symbols: list[str] | None = None
+# Re-export GitRevFileReference for backwards compatibility
+from ..core.references import GitRevFileReference
 
-    @property
-    def path(self) -> str:
-        return os.path.join(self.repo_root, self.rel_path)
-
-    def get_label(self) -> str:
-        if self.label == "relative":
-            return self.rel_path
-        if self.label == "name":
-            return os.path.basename(self.rel_path)
-        if self.label == "ext":
-            return os.path.splitext(self.rel_path)[1]
-        return self.label
-
-    @property
-    def output(self) -> str:
-        if getattr(self, "_output", None) is not None:
-            return self._output
-        text = read_file_at_rev(self.repo_root, self.rev, self.rel_path)
-        if text is None:
-            self._output = ""
-            return self._output
-        self.original_file_content = text
-        self.file_content = text
-
-        ranges = self.ranges
-        symbols = [s for s in (self.symbols or []) if s]
-        if symbols and ranges is None:
-            try:
-                from ..core.repomap import find_symbol_ranges
-
-                match_map = find_symbol_ranges(
-                    self.rel_path, symbols, text=self.file_content
-                )
-            except Exception:
-                match_map = {}
-
-            missing = [s for s in symbols if s not in match_map]
-            if missing:
-                print(
-                    f"Warning: symbol(s) not found in {self.rel_path}@{self.rev}: {', '.join(missing)}",
-                    file=sys.stderr,
-                )
-            matched = [s for s in symbols if s in match_map]
-            if match_map and matched:
-                ranges = [match_map[s] for s in matched]
-                symbols = matched
-
-        self._output = process_text(
-            text,
-            format=self.format,
-            label=self.get_label(),
-            rev=self.rev,
-            token_target=self.token_target,
-            include_token_count=self.include_token_count,
-            ranges=ranges,
-            symbols=symbols,
-        )
-        return self._output
+__all__ = [
+    "get_repo_root",
+    "list_files_at_rev",
+    "read_file_at_rev",
+    "discover_repo_root",
+    "GitRevFileReference",
+]

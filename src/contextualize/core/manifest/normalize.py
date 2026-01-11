@@ -1,5 +1,7 @@
+"""Component normalization utilities."""
+
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 GROUP_DELIMITER = "."
 GROUP_PATH_KEY = "__group_path"
@@ -17,7 +19,24 @@ _DEFAULT_KEYS = {
 _GROUP_KEYS = {"group", "components", *_DEFAULT_KEYS}
 
 
-def normalize_manifest_components(components: list[Any]) -> list[dict[str, Any]]:
+def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
+    """Normalize a list of component definitions.
+
+    Handles:
+    - Group flattening with dotted names
+    - Default value inheritance from groups
+    - Auto-naming for unnamed components
+    - Validation of names and structure
+
+    Args:
+        components: Raw component list from manifest
+
+    Returns:
+        Flattened list of normalized component dicts
+
+    Raises:
+        ValueError: If the component structure is invalid
+    """
     if not isinstance(components, list):
         raise ValueError("'components' must be a list")
 
@@ -127,7 +146,45 @@ def normalize_manifest_components(components: list[Any]) -> list[dict[str, Any]]
     return normalized
 
 
-def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
+def extract_groups(normalized_components: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Extract group membership from normalized components.
+
+    Args:
+        normalized_components: List of normalized component dicts
+
+    Returns:
+        Dict mapping group names to lists of component names
+    """
+    groups: dict[str, list[str]] = {}
+
+    for comp in normalized_components:
+        group_path = comp.get(GROUP_PATH_KEY)
+        if not group_path:
+            continue
+
+        name = comp.get("name", "")
+
+        # Add to all parent groups
+        prefix = ""
+        for part in group_path:
+            prefix = part if not prefix else f"{prefix}{GROUP_DELIMITER}{part}"
+            if prefix not in groups:
+                groups[prefix] = []
+            if name not in groups[prefix]:
+                groups[prefix].append(name)
+
+    return groups
+
+
+def coerce_file_spec(spec: Any) -> tuple[str, dict[str, Any]]:
+    """Coerce a file spec to (path, options) tuple.
+
+    Args:
+        spec: String path or dict with path/target/url key
+
+    Returns:
+        Tuple of (path, options_dict)
+    """
     if isinstance(spec, dict):
         raw = spec.get("path") or spec.get("target") or spec.get("url")
         if not raw or not isinstance(raw, str):
@@ -142,7 +199,11 @@ def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
     )
 
 
-def _component_selectors(comp: dict[str, Any]) -> set[str]:
+def component_selectors(comp: dict[str, Any]) -> set[str]:
+    """Get all selectors that match a component.
+
+    Returns the component name and all parent group names.
+    """
     selectors: set[str] = set()
     name = comp.get("name")
     if isinstance(name, str) and name:

@@ -1,3 +1,8 @@
+"""Output rendering utilities."""
+
+from .formats import format_content
+
+
 def process_text(
     text,
     clean=False,
@@ -14,12 +19,34 @@ def process_text(
     include_token_count: bool = False,
     symbols=None,
 ):
+    """Process text content with optional cleaning, range extraction, and formatting.
+
+    Args:
+        text: The text content to process
+        clean: Whether to clean the text (convert spaces to tabs)
+        range: Single range tuple (start, end) for line extraction
+        ranges: List of range tuples for multi-region extraction
+        format: Output format (raw, md, xml, shell)
+        label: Label for the content
+        label_suffix: Optional suffix to add to the label
+        xml_tag: Tag name for XML format
+        shell_cmd: Shell command for shell format
+        rev: Git revision identifier
+        token_target: Token counting target/encoding
+        token_count: Pre-computed token count
+        include_token_count: Whether to include token count in output
+        symbols: List of symbol names
+
+    Returns:
+        Formatted text string
+    """
     if clean:
         text = _clean(text)
     if range and not ranges:
         ranges = [range]
     if ranges:
         text = _extract_ranges(text, ranges)
+
     use_token_count = include_token_count and format in {"md", "xml", "shell"}
 
     if use_token_count:
@@ -29,34 +56,39 @@ def process_text(
             token_count = count_tokens(text, target=token_target)["count"]
     else:
         token_count = None
-    max_backticks = _count_max_backticks(text)
-    return _delimit(
+
+    return format_content(
         text,
-        format,
-        label,
-        max_backticks,
-        shell_cmd,
-        rev,
-        token_count,
+        fmt=format,
+        label=label,
         label_suffix=label_suffix,
         xml_tag=xml_tag,
+        shell_cmd=shell_cmd,
+        rev=rev,
+        token_count=token_count,
         symbols=symbols,
         is_excerpt=bool(ranges),
     )
 
 
 def _clean(text):
-    # Example cleaning logic
+    """Clean text by converting spaces to tabs."""
     return text.replace("    ", "\t")
 
 
 def _extract_range(text, range_tuple):
+    """Extract a single range from text."""
     start, end = range_tuple
     lines = text.split("\n")
     return "\n".join(lines[start - 1 : end])
 
 
 def _extract_ranges(text, ranges):
+    """Extract and merge multiple ranges from text.
+
+    Adjacent or overlapping ranges are merged, and the resulting
+    snippets are joined with '...' separators.
+    """
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges, key=lambda r: r[0]):
         if not merged:
@@ -79,59 +111,13 @@ def _extract_ranges(text, ranges):
     return "\n...\n".join(snippets)
 
 
+# Legacy function for counting backticks (still used by some modules)
 def _count_max_backticks(text):
+    """Count the maximum consecutive backticks in text."""
     max_backticks = 0
     for line in text.split("\n"):
-        # If a line starts with backticks, count them
         stripped = line.lstrip("`")
         count = len(line) - len(stripped)
         if count > max_backticks:
             max_backticks = count
     return max_backticks
-
-
-def _delimit(
-    text,
-    format,
-    label,
-    max_backticks=0,
-    shell_cmd=None,
-    rev: str | None = None,
-    token_count: int | None = None,
-    *,
-    label_suffix: str | None = None,
-    xml_tag: str | None = None,
-    symbols=None,
-    is_excerpt=False,
-):
-    symbols_list = [s for s in (symbols or []) if s]
-    sym_suffix = f":{','.join(symbols_list)}" if symbols_list else ""
-    label_with_symbols = f"{label}{sym_suffix}"
-    if label_suffix:
-        label_with_symbols = f"{label_with_symbols} {label_suffix}"
-
-    if format == "md":
-        backticks_str = "`" * max(max_backticks + 2, 3)  # at least 3
-        info = f"{label_with_symbols}@{rev}" if rev else label_with_symbols
-        if token_count is not None:
-            info = f"{info} ({token_count} tokens)"
-        return f"{backticks_str}{info}\n{text}\n{backticks_str}"
-    elif format == "xml":
-        tag_name = xml_tag or "file"
-        token_attr = f" token_count='{token_count}'" if token_count is not None else ""
-        rev_attr = f" rev='{rev}'" if rev else ""
-        symbols_attr = f" symbols='{','.join(symbols_list)}'" if symbols_list else ""
-        suffix_attr = f" {label_suffix}" if label_suffix else ""
-        return (
-            f"<{tag_name} path='{label}'{symbols_attr}{token_attr}{rev_attr}{suffix_attr}>\n"
-            f"{text}\n"
-            f"</{tag_name}>"
-        )
-    elif format == "shell":
-        target_label = f"{label_with_symbols}@{rev}" if rev else label_with_symbols
-        token_suffix = f" ({token_count} tokens)" if token_count is not None else ""
-        if shell_cmd:
-            return f"❯ {shell_cmd}{token_suffix}\n{text}"
-        return f"❯ cat {target_label}{token_suffix}\n{text}"
-    else:
-        return text
