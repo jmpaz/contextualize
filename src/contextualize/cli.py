@@ -604,7 +604,7 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
 
         import yaml
 
-        from .render.links import format_trace_output
+        from .render.trace import format_trace_output
         from .manifest.payload import (
             render_manifest,
             render_manifest_data,
@@ -978,11 +978,8 @@ def cat_cmd(
 
     from pathlib import Path
 
-    from .render.links import (
-        add_markdown_link_refs,
-        compute_input_token_details,
-        format_trace_output,
-    )
+    from .render.links import add_markdown_link_refs
+    from .render.trace import compute_input_token_details, format_trace_output
     from .references import (
         FileReference,
         URLReference,

@@ -96,7 +96,7 @@ def payload(
     manifest_path: str | Path,
     *,
     inject: bool = False,
-    depth: int | None = None,
+    depth: int = 5,
     exclude: list[str] | None = None,
     include: list[str] | None = None,
     map_mode: bool = False,

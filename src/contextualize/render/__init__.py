@@ -16,7 +16,7 @@ def __getattr__(name):
 
         return add_markdown_link_refs
     if name == "compute_input_token_details":
-        from .links import compute_input_token_details
+        from .trace import compute_input_token_details
 
         return compute_input_token_details
     if name == "count_downstream":
@@ -24,11 +24,11 @@ def __getattr__(name):
 
         return count_downstream
     if name == "format_trace_output":
-        from .links import format_trace_output
+        from .trace import format_trace_output
 
         return format_trace_output
     if name == "inject_content_in_text":
-        from .links import inject_content_in_text
+        from .inject import inject_content_in_text
 
         return inject_content_in_text
     if name == "MarkItDownConversionError":

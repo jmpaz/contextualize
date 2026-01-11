@@ -102,7 +102,7 @@ class URLReference:
                 text = convert_response_to_markdown(r).markdown
             self.original_file_content = text
         if self.inject:
-            from ..render.links import inject_content_in_text
+            from ..render.inject import inject_content_in_text
 
             text = inject_content_in_text(
                 text, self.depth, self.trace_collector, self.url

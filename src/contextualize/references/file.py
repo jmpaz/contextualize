@@ -91,7 +91,7 @@ class FileReference:
             result = convert_path_to_markdown(self.path)
             self.file_content = self.original_file_content = result.markdown
         if self.inject:
-            from ..render.links import inject_content_in_text
+            from ..render.inject import inject_content_in_text
 
             self.file_content = inject_content_in_text(
                 self.file_content, self.depth, self.trace_collector, self.path
