@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from ..references.helpers import parse_target_spec
 from ..utils import _split_brace_options, brace_expand
 
 CACHE_ROOT = os.path.expanduser("~/.local/share/contextualize/cache/git")
@@ -122,6 +123,7 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
 
 
 def parse_git_target(target: str) -> GitTarget | None:
+    target = parse_target_spec(target).get("target", target)
     for prefix in ("github:", "gh:"):
         if target.startswith(prefix):
             rest = target[len(prefix) :]

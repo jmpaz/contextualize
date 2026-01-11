@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import yaml
 
@@ -13,41 +13,22 @@ from .manifest import normalize_components
 @dataclass
 class PayloadResult:
     payload: str
-    input_refs: List[Any]
-    trace_items: List[Any]
+    input_refs: list[Any]
+    trace_items: list[Any]
     base_dir: str
-    skipped_paths: List[str]
-    skip_impact: Dict[str, Any]
-
-
-def assemble_payload(
-    components: List[Dict[str, Any]],
-    base_dir: str,
-    *,
-    inject: bool = False,
-    depth: int = 5,
-) -> str:
-    normalized_components = normalize_components(components)
-    return build_payload(
-        normalized_components,
-        base_dir,
-        inject=inject,
-        depth=depth,
-        link_depth=0,
-        link_scope="all",
-        link_skip=None,
-    ).payload
+    skipped_paths: list[str]
+    skip_impact: dict[str, Any]
 
 
 def build_payload(
-    components: List[Dict[str, Any]],
+    components: list[dict[str, Any]],
     base_dir: str,
     *,
     inject: bool = False,
     depth: int = 5,
     link_depth: int = 0,
     link_scope: str = "all",
-    link_skip: Optional[List[str]] = None,
+    link_skip: list[str] | None = None,
     exclude_keys: list[str] | None = None,
     map_mode: bool = False,
     map_keys: list[str] | None = None,
@@ -69,14 +50,30 @@ def build_payload(
     return PayloadResult(payload, input_refs, trace_items, base, skipped, impact)
 
 
-def render_from_yaml(
-    manifest_path: str,
-    *,
-    inject: bool = False,
-    depth: int = 5,
-) -> str:
-    """Render manifest to payload text."""
-    return render_manifest(manifest_path, inject=inject, depth=depth).payload
+def _prepare_manifest_payload(
+    data: dict[str, Any], base_dir: str
+) -> tuple[list[dict[str, Any]], str, int, str, list[str]]:
+    if not isinstance(data, dict):
+        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
+
+    cfg = data.get("config", {})
+    if "root" in cfg:
+        base_dir = os.path.expanduser(cfg.get("root") or "~")
+
+    comps = data.get("components")
+    if not isinstance(comps, list):
+        raise ValueError("'components' must be a list")
+    comps = normalize_components(comps)
+
+    link_depth_default = int(cfg.get("link-depth", 0) or 0)
+    link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
+    link_skip_default = cfg.get("link-skip", [])
+    if link_skip_default is None:
+        link_skip_default = []
+    elif isinstance(link_skip_default, str):
+        link_skip_default = [link_skip_default]
+
+    return comps, base_dir, link_depth_default, link_scope_default, link_skip_default
 
 
 def render_manifest(
@@ -100,26 +97,14 @@ def render_manifest(
     with open(manifest_path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
 
-    if not isinstance(data, dict):
-        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
-
-    cfg = data.get("config", {})
-    if "root" in cfg:
-        raw = cfg.get("root") or "~"
-        base_dir = os.path.expanduser(raw)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(manifest_path))
-
-    comps = data.get("components")
-    if not isinstance(comps, list):
-        raise ValueError("'components' must be a list")
-    comps = normalize_components(comps)
-
-    link_depth_default = int(cfg.get("link-depth", 0) or 0)
-    link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
-    link_skip_default = cfg.get("link-skip", [])
-    if isinstance(link_skip_default, str):
-        link_skip_default = [link_skip_default]
+    base_dir_default = os.path.dirname(os.path.abspath(manifest_path))
+    (
+        comps,
+        base_dir,
+        link_depth_default,
+        link_scope_default,
+        link_skip_default,
+    ) = _prepare_manifest_payload(data, base_dir_default)
 
     return build_payload(
         comps,
@@ -137,7 +122,7 @@ def render_manifest(
 
 
 def render_manifest_data(
-    data: Dict[str, Any],
+    data: dict[str, Any],
     manifest_cwd: str,
     *,
     inject: bool = False,
@@ -150,25 +135,13 @@ def render_manifest_data(
     """
     Assemble from an already-parsed YAML mapping (used for stdin case).
     """
-    if not isinstance(data, dict):
-        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
-
-    cfg = data.get("config", {})
-    if "root" in cfg:
-        base_dir = os.path.expanduser(cfg.get("root") or "~")
-    else:
-        base_dir = manifest_cwd
-
-    comps = data.get("components")
-    if not isinstance(comps, list):
-        raise ValueError("'components' must be a list")
-    comps = normalize_components(comps)
-
-    link_depth_default = int(cfg.get("link-depth", 0) or 0)
-    link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
-    link_skip_default = cfg.get("link-skip", [])
-    if isinstance(link_skip_default, str):
-        link_skip_default = [link_skip_default]
+    (
+        comps,
+        base_dir,
+        link_depth_default,
+        link_scope_default,
+        link_skip_default,
+    ) = _prepare_manifest_payload(data, manifest_cwd)
 
     return build_payload(
         comps,

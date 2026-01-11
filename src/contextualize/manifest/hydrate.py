@@ -17,7 +17,15 @@ from .manifest import (
     coerce_file_spec,
     normalize_components,
 )
-from ..references import URLReference, create_file_references, split_path_and_symbols
+from ..references import URLReference, create_file_references
+from ..references.helpers import (
+    is_http_url,
+    parse_git_url_target,
+    parse_target_spec,
+    resolve_symbol_ranges,
+    split_spec_symbols,
+)
+from ..utils import extract_ranges
 
 
 @dataclass(frozen=True)
@@ -127,7 +135,6 @@ def clear_context_dir(path: Path) -> None:
     _clear_context_dir(path)
 
 
-_URL_SPEC_RE = re.compile(r'(filename|params|root|wrap)=(?:"([^"]*)"|([^"]*))')
 _RANGE_RE = re.compile(r"^\s*L?(\d+)\s*(?:-|:)\s*L?(\d+)\s*$")
 
 
@@ -279,7 +286,7 @@ def build_hydration_plan_data(
                 symbols_value = file_opts.pop("symbols", None)
                 range_spec = _parse_range_value(range_value)
                 symbols_spec = _parse_symbols_value(symbols_value)
-                raw_spec, path_symbols = _split_spec_symbols(raw_spec)
+                raw_spec, path_symbols = split_spec_symbols(raw_spec)
                 if path_symbols:
                     symbols_spec = _merge_symbols(symbols_spec, path_symbols)
 
@@ -293,25 +300,22 @@ def build_hydration_plan_data(
                     symbols = symbols_spec[:] if symbols_spec else None
 
                     if symbols:
-                        match_map = _find_symbol_ranges(
-                            item.context_subpath, symbols, item.content
+                        ranges, symbols, should_skip = resolve_symbol_ranges(
+                            item.context_subpath,
+                            symbols,
+                            text=item.content,
+                            ranges=ranges,
+                            warn_label=item.context_subpath,
+                            append_to_ranges=True,
+                            keep_missing=False,
+                            skip_on_missing=True,
+                            warn_on_partial=False,
                         )
-                        matched = [s for s in symbols if s in match_map]
-                        if matched:
-                            sym_ranges = [match_map[s] for s in matched]
-                            ranges = (ranges or []) + sym_ranges
-                            symbols = matched
-                        elif ranges is None:
-                            _warn_missing_symbols(item.context_subpath, symbols)
+                        if should_skip:
                             continue
-                        else:
-                            _warn_missing_symbols(item.context_subpath, symbols)
-                            symbols = None
 
                     content = (
-                        _extract_ranges(item.content, ranges)
-                        if ranges
-                        else item.content
+                        extract_ranges(item.content, ranges) if ranges else item.content
                     )
                     suffix = _build_suffix(ranges, symbols)
                     rel_path, should_write = _resolve_context_path(
@@ -572,13 +576,11 @@ def _component_external_root(comp: dict[str, Any]) -> str | None:
 
 def _external_root_key(raw_spec: str) -> str | None:
     spec = os.path.expanduser(raw_spec)
-    if spec.startswith("http://") or spec.startswith("https://"):
-        opts = _parse_url_spec(spec)
+    if is_http_url(spec):
+        opts = parse_target_spec(spec)
         url = opts.get("target", spec)
-        tgt = parse_git_target(url)
-        if tgt and (
-            tgt.path is not None or tgt.repo_url.endswith(".git") or tgt.repo_url != url
-        ):
+        tgt = parse_git_url_target(url)
+        if tgt:
             rev = tgt.rev or ""
             return f"git:{tgt.repo_url}@{rev}"
         return f"http:{_url_origin(url)}"
@@ -612,23 +614,9 @@ def _manifest_has_local_sources(components: list[dict[str, Any]]) -> bool:
 
 def _is_external_spec(raw_spec: str) -> bool:
     spec = os.path.expanduser(raw_spec)
-    if spec.startswith("http://") or spec.startswith("https://"):
+    if is_http_url(spec):
         return True
     return parse_git_target(spec) is not None
-
-
-def _split_spec_symbols(spec: str) -> tuple[str, list[str]]:
-    if spec.startswith("http://") or spec.startswith("https://"):
-        return spec, []
-    if _looks_like_windows_drive(spec):
-        return spec, []
-    if parse_git_target(spec):
-        return spec, []
-    return split_path_and_symbols(spec)
-
-
-def _looks_like_windows_drive(spec: str) -> bool:
-    return bool(re.match(r"^[A-Za-z]:[\\/]", spec))
 
 
 def _parse_comment(value: Any) -> str | None:
@@ -708,15 +696,13 @@ def _resolve_spec_items(
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
 
-    if spec.startswith("http://") or spec.startswith("https://"):
-        opts = _parse_url_spec(spec)
+    if is_http_url(spec):
+        opts = parse_target_spec(spec)
         url = opts.get("target", spec)
         filename = filename_hint or opts.get("filename")
 
-        tgt = parse_git_target(url)
-        if tgt and (
-            tgt.path is not None or tgt.repo_url.endswith(".git") or tgt.repo_url != url
-        ):
+        tgt = parse_git_url_target(url)
+        if tgt:
             return _resolve_git_items(tgt, component_name)
         return [_resolve_http_item(url, filename)]
 
@@ -839,42 +825,6 @@ def _relative_path(path: str, root: str) -> str:
 def _format_git_spec(repo_url: str, rev: str | None, path: str) -> str:
     base = f"{repo_url}@{rev}" if rev else repo_url
     return f"{base}:{path}" if path else base
-
-
-def _parse_url_spec(spec: str) -> dict[str, str | None]:
-    parts = spec.split("::")
-    opts: dict[str, str | None] = {}
-    target_parts: list[str] = []
-    for part in parts:
-        match = _URL_SPEC_RE.fullmatch(part)
-        if match:
-            opts[match.group(1)] = match.group(2) or match.group(3)
-        else:
-            target_parts.append(part)
-    opts["target"] = "::".join(target_parts)
-    return opts
-
-
-def _extract_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(ranges, key=lambda r: r[0]):
-        if not merged:
-            merged.append((start, end))
-            continue
-        prev_start, prev_end = merged[-1]
-        if start <= prev_end + 1:
-            merged[-1] = (prev_start, max(prev_end, end))
-        else:
-            merged.append((start, end))
-
-    lines = text.split("\n")
-    snippets = []
-    for start, end in merged:
-        start_idx = max(0, start - 1)
-        end_idx = min(len(lines), end)
-        snippet = "\n".join(lines[start_idx:end_idx])
-        snippets.append(snippet)
-    return "\n...\n".join(snippets)
 
 
 def _build_suffix(
@@ -1367,22 +1317,3 @@ def _make_writable(path: Path) -> None:
             _chmod(target, 0o777)
     if not path.is_symlink():
         _chmod(path, 0o777)
-
-
-def _find_symbol_ranges(
-    file_path: str, symbols: list[str], content: str
-) -> dict[str, tuple[int, int]]:
-    try:
-        from ..render.map import find_symbol_ranges
-    except Exception:
-        return {}
-    return find_symbol_ranges(file_path, symbols, text=content)
-
-
-def _warn_missing_symbols(path: str, symbols: list[str]) -> None:
-    import sys
-
-    print(
-        f"Warning: symbol(s) not found in {path}: {', '.join(symbols)}",
-        file=sys.stderr,
-    )

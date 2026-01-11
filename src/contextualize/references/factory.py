@@ -9,58 +9,11 @@ from .file import FileReference
 from .helpers import (
     MARKITDOWN_PREFERRED_EXTENSIONS,
     is_utf8_file,
-    split_path_and_symbols,
+    is_http_url,
+    parse_target_spec,
+    split_spec_symbols,
 )
 from .url import URLReference
-
-
-def resolve(
-    targets: list[str],
-    ignore_patterns=None,
-    format="md",
-    label="relative",
-    label_suffix: str | None = None,
-    include_token_count=False,
-    token_target="cl100k_base",
-    inject=False,
-    depth=5,
-    trace_collector=None,
-) -> dict:
-    """
-    Resolve target strings into Reference objects.
-
-    Handles:
-    - Local paths with glob expansion
-    - HTTP/HTTPS URLs
-    - Symbol extraction (path:SymbolName)
-
-    Args:
-        targets: List of target strings (paths, URLs, etc.)
-        ignore_patterns: Patterns for files to ignore
-        format: Output format ("md", "xml", "shell", "raw")
-        label: Label style ("relative", "name", "ext", or custom)
-        label_suffix: Optional suffix for labels
-        include_token_count: Whether to include token counts
-        token_target: Encoding for token counting
-        inject: Whether to inject linked content
-        depth: Injection depth for links
-        trace_collector: List to collect trace items
-
-    Returns:
-        Dict with 'refs', 'concatenated', 'ignored_files', 'ignored_folders'
-    """
-    return create_file_references(
-        targets,
-        ignore_patterns=ignore_patterns,
-        format=format,
-        label=label,
-        label_suffix=label_suffix,
-        include_token_count=include_token_count,
-        token_target=token_target,
-        inject=inject,
-        depth=depth,
-        trace_collector=trace_collector,
-    )
 
 
 def create_file_references(
@@ -133,12 +86,14 @@ def create_file_references(
             expanded_all_paths.append(raw_path)
 
     for raw_path in expanded_all_paths:
-        path, symbols = split_path_and_symbols(raw_path)
+        spec_opts = parse_target_spec(raw_path)
+        target = spec_opts.get("target", raw_path)
+        path, symbols = split_spec_symbols(target)
 
-        if raw_path.startswith("http://") or raw_path.startswith("https://"):
+        if is_http_url(target):
             file_references.append(
                 URLReference(
-                    raw_path,
+                    target,
                     format=format,
                     label=label,
                     label_suffix=label_suffix,
@@ -283,6 +238,9 @@ def create_file_references(
         "ignored_files": ignored_files,
         "ignored_folders": consolidated_folders,
     }
+
+
+resolve = create_file_references
 
 
 def concat_refs(file_references):

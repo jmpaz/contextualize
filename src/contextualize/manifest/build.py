@@ -1,31 +1,14 @@
 """Internal payload building logic."""
 
 import os
-import re
 from typing import Any, Dict, List, Optional
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..render.links import add_markdown_link_refs
 from .manifest import coerce_file_spec, component_selectors, normalize_components
 from ..references import URLReference, create_file_references
+from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
 from ..utils import wrap_text
-
-
-def _parse_url_spec(spec: str) -> dict[str, Any]:
-    """Parse URL spec like 'https://example.com::filename=file.py::wrap=md' into an options dict."""
-    parts = spec.split("::")
-    opts: dict[str, str | None] = {}
-    target_parts: list[str] = []
-
-    for part in parts:
-        m = re.fullmatch(r'(filename|params|root|wrap)=(?:"([^"]*)"|([^"]*))', part)
-        if m:
-            opts[m.group(1)] = m.group(2) or m.group(3)
-        else:
-            target_parts.append(part)
-
-    opts["target"] = "::".join(target_parts)
-    return opts
 
 
 class _SimpleReference:
@@ -98,15 +81,11 @@ def _resolve_spec_to_paths(
 ) -> list[str]:
     spec = os.path.expanduser(raw_spec)
 
-    if spec.startswith("http://") or spec.startswith("https://"):
-        opts = _parse_url_spec(spec)
+    if is_http_url(spec):
+        opts = parse_target_spec(spec)
         url = opts.get("target", spec)
-        tgt = parse_git_target(url)
-        if not tgt or (
-            tgt.path is None
-            and not tgt.repo_url.endswith(".git")
-            and tgt.repo_url == url
-        ):
+        tgt = parse_git_url_target(url)
+        if not tgt:
             return []
         repo_dir = ensure_repo(tgt)
         paths = [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
@@ -204,16 +183,14 @@ def _resolve_spec_to_seed_refs(
     spec = os.path.expanduser(raw_spec)
     seed_refs: List[Any] = []
 
-    if spec.startswith("http://") or spec.startswith("https://"):
-        opts = _parse_url_spec(spec)
+    if is_http_url(spec):
+        opts = parse_target_spec(spec)
         url = opts.get("target", spec)
         filename = file_opts.get("filename") or opts.get("filename")
         wrap = file_opts.get("wrap") or opts.get("wrap")
 
-        tgt = parse_git_target(url)
-        if tgt and (
-            tgt.path is not None or tgt.repo_url.endswith(".git") or tgt.repo_url != url
-        ):
+        tgt = parse_git_url_target(url)
+        if tgt:
             repo_dir = ensure_repo(tgt)
             paths = [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
             for full in paths:

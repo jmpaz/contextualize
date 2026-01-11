@@ -6,23 +6,10 @@ from typing import Any, Optional
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..references import URLReference, create_file_references
+from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
 from ..utils import count_tokens, wrap_text
 
 _INJECTION_PATTERN = re.compile(r"\{cx::((?:[^{}]|\{[^{}]*\})*)\}")
-
-
-def _parse_injection_spec(piece: str) -> dict[str, Any]:
-    parts = piece.split("::")
-    opts: dict[str, str | None] = {}
-    target_parts: list[str] = []
-    for part in parts:
-        m = re.fullmatch(r'(filename|params|root|wrap)=(?:"([^\"]*)"|([^\"]*))', part)
-        if m:
-            opts[m.group(1)] = m.group(2) or m.group(3)
-        else:
-            target_parts.append(part)
-    opts["target"] = "::".join(target_parts)
-    return opts
 
 
 def _http_fetch(
@@ -141,13 +128,13 @@ def _process_injection(
                 )
             )
 
-    if tgt.startswith(("http://", "https://")):
+    if is_http_url(tgt):
         try:
             result = _http_fetch(
                 tgt, opts.get("filename"), depth, opts.get("wrap"), trace_collector
             )
         except Exception:
-            if not parse_git_target(tgt):
+            if not parse_git_url_target(tgt):
                 raise
             result = _git_fetch(
                 tgt, opts.get("params"), depth, opts.get("wrap"), trace_collector
@@ -193,7 +180,7 @@ def inject_content_in_text(
         return text
     new = _INJECTION_PATTERN.sub(
         lambda m: _process_injection(
-            _parse_injection_spec(m.group(1)),
+            parse_target_spec(m.group(1)),
             depth - 1,
             trace_collector,
             source_file,

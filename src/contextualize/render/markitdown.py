@@ -137,6 +137,89 @@ def _file_md5(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _image_context() -> tuple[bool, str, str, str, str | None]:
+    _load_dotenv_once()
+    llm_enabled = bool(
+        (os.getenv("OPENAI_API_KEY") or "").strip()
+        or (os.getenv("OPENROUTER_API_KEY") or "").strip()
+    )
+    base_url = (
+        os.getenv("OPENAI_BASE_URL") or ""
+    ).strip() or "https://openrouter.ai/api/v1"
+    model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-2.5-flash"
+    prompt = (
+        os.getenv("OPENAI_PROMPT") or ""
+    ).strip() or "Write a detailed caption for this image."
+    exiftool_path = (os.getenv("EXIFTOOL_PATH") or "").strip() or shutil.which(
+        "exiftool"
+    )
+    return llm_enabled, base_url, model, prompt, exiftool_path
+
+
+def _image_cache_payload(
+    media_md5: str,
+    *,
+    llm_enabled: bool,
+    base_url: str,
+    model: str,
+    prompt: str,
+    exiftool_path: str | None,
+) -> dict[str, Any]:
+    return {
+        "v": 1,
+        "type": "image",
+        "media_md5": media_md5,
+        "markitdown_version": _markitdown_version(),
+        "llm_enabled": llm_enabled,
+        "provider": base_url if llm_enabled else None,
+        "model": model if llm_enabled else None,
+        "prompt": prompt if llm_enabled else None,
+        "exiftool_path": exiftool_path,
+        "description_heading": "auto-generated",
+    }
+
+
+def _image_cache_lookup(
+    payload: dict[str, Any],
+) -> tuple[str, MarkItDownResult | None]:
+    key = _cache_key(payload)
+    cached = _read_cache_entry(key)
+    if isinstance(cached, dict):
+        cached_markdown = cached.get("markdown")
+        cached_title = cached.get("title")
+        if isinstance(cached_markdown, str):
+            title = cached_title if isinstance(cached_title, str) else None
+            return (
+                key,
+                MarkItDownResult(
+                    markdown=_postprocess_image_markdown(cached_markdown),
+                    title=title,
+                ),
+            )
+    return key, None
+
+
+def _convert_markitdown(
+    source: object,
+    *,
+    error_label: str,
+) -> tuple[str, str | None]:
+    try:
+        result = _get_converter().convert(source)
+    except Exception as exc:
+        raise MarkItDownConversionError(
+            f"MarkItDown failed to convert {error_label}: {exc}"
+        ) from exc
+
+    markdown = getattr(result, "markdown", None)
+    if not isinstance(markdown, str):
+        markdown = str(result)
+    title = getattr(result, "title", None)
+    if title is not None and not isinstance(title, str):
+        title = str(title)
+    return markdown, title
+
+
 @lru_cache(maxsize=1)
 def _build_llm_config() -> tuple[object | None, str | None]:
     _load_dotenv_once()
@@ -185,52 +268,24 @@ def convert_path_to_markdown(path: str | Path) -> MarkItDownResult:
     path_obj = Path(path)
     is_image = path_obj.suffix.lower() in {".jpg", ".jpeg", ".png"}
     media_md5: str | None = None
-    llm_enabled = False
-    exiftool_path: str | None = None
-    base_url = ""
-    model = ""
-    prompt = ""
+    cache_key_payload: dict[str, Any] | None = None
+    cache_key = ""
 
     if is_image:
-        _load_dotenv_once()
-        llm_enabled = bool(
-            (os.getenv("OPENAI_API_KEY") or "").strip()
-            or (os.getenv("OPENROUTER_API_KEY") or "").strip()
-        )
-        base_url = (
-            os.getenv("OPENAI_BASE_URL") or ""
-        ).strip() or "https://openrouter.ai/api/v1"
-        model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-2.5-flash"
-        prompt = (
-            os.getenv("OPENAI_PROMPT") or ""
-        ).strip() or "Write a detailed caption for this image."
-        exiftool_path = (os.getenv("EXIFTOOL_PATH") or "").strip() or shutil.which(
-            "exiftool"
-        )
         media_md5 = _file_md5(path_obj)
+        llm_enabled, base_url, model, prompt, exiftool_path = _image_context()
 
-        cache_key_payload = {
-            "v": 1,
-            "type": "image",
-            "media_md5": media_md5,
-            "markitdown_version": _markitdown_version(),
-            "llm_enabled": llm_enabled,
-            "provider": base_url if llm_enabled else None,
-            "model": model if llm_enabled else None,
-            "prompt": prompt if llm_enabled else None,
-            "exiftool_path": exiftool_path,
-            "description_heading": "auto-generated",
-        }
-        key = _cache_key(cache_key_payload)
-        cached = _read_cache_entry(key)
-        if isinstance(cached, dict):
-            cached_markdown = cached.get("markdown")
-            cached_title = cached.get("title")
-            if isinstance(cached_markdown, str):
-                title = cached_title if isinstance(cached_title, str) else None
-                return MarkItDownResult(
-                    markdown=_postprocess_image_markdown(cached_markdown), title=title
-                )
+        cache_key_payload = _image_cache_payload(
+            media_md5,
+            llm_enabled=llm_enabled,
+            base_url=base_url,
+            model=model,
+            prompt=prompt,
+            exiftool_path=exiftool_path,
+        )
+        cache_key, cached = _image_cache_lookup(cache_key_payload)
+        if cached:
+            return cached
 
         if not _image_text_tools_available():
             raise MarkItDownConversionError(
@@ -238,25 +293,12 @@ def convert_path_to_markdown(path: str | Path) -> MarkItDownResult:
                 "OPENAI_API_KEY/OPENROUTER_API_KEY."
             )
 
-    try:
-        result = _get_converter().convert(path_obj)
-    except Exception as exc:
-        raise MarkItDownConversionError(
-            f"MarkItDown failed to convert {path_obj}: {exc}"
-        ) from exc
-
-    markdown = getattr(result, "markdown", None)
-    if not isinstance(markdown, str):
-        markdown = str(result)
-    title = getattr(result, "title", None)
-    if title is not None and not isinstance(title, str):
-        title = str(title)
-
+    markdown, title = _convert_markitdown(path_obj, error_label=str(path_obj))
     out_markdown = _postprocess_image_markdown(markdown) if is_image else markdown
     out = MarkItDownResult(markdown=out_markdown, title=title)
     if is_image and media_md5 is not None:
         _write_cache_entry(
-            key, payload=cache_key_payload, markdown=markdown, title=out.title
+            cache_key, payload=cache_key_payload, markdown=markdown, title=out.title
         )
     return out
 
@@ -271,52 +313,24 @@ def convert_response_to_markdown(response: ResponseLike) -> MarkItDownResult:
     )
 
     media_md5: str | None = None
-    llm_enabled = False
-    exiftool_path: str | None = None
-    base_url = ""
-    model = ""
-    prompt = ""
+    cache_key_payload: dict[str, Any] | None = None
+    cache_key = ""
 
     if is_image:
-        _load_dotenv_once()
-        llm_enabled = bool(
-            (os.getenv("OPENAI_API_KEY") or "").strip()
-            or (os.getenv("OPENROUTER_API_KEY") or "").strip()
-        )
-        base_url = (
-            os.getenv("OPENAI_BASE_URL") or ""
-        ).strip() or "https://openrouter.ai/api/v1"
-        model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-2.5-flash"
-        prompt = (
-            os.getenv("OPENAI_PROMPT") or ""
-        ).strip() or "Write a detailed caption for this image."
-        exiftool_path = (os.getenv("EXIFTOOL_PATH") or "").strip() or shutil.which(
-            "exiftool"
-        )
+        llm_enabled, base_url, model, prompt, exiftool_path = _image_context()
         media_md5 = hashlib.md5(response.content).hexdigest()
 
-        cache_key_payload = {
-            "v": 1,
-            "type": "image",
-            "media_md5": media_md5,
-            "markitdown_version": _markitdown_version(),
-            "llm_enabled": llm_enabled,
-            "provider": base_url if llm_enabled else None,
-            "model": model if llm_enabled else None,
-            "prompt": prompt if llm_enabled else None,
-            "exiftool_path": exiftool_path,
-            "description_heading": "auto-generated",
-        }
-        key = _cache_key(cache_key_payload)
-        cached = _read_cache_entry(key)
-        if isinstance(cached, dict):
-            cached_markdown = cached.get("markdown")
-            cached_title = cached.get("title")
-            if isinstance(cached_markdown, str):
-                title = cached_title if isinstance(cached_title, str) else None
-                return MarkItDownResult(
-                    markdown=_postprocess_image_markdown(cached_markdown), title=title
-                )
+        cache_key_payload = _image_cache_payload(
+            media_md5,
+            llm_enabled=llm_enabled,
+            base_url=base_url,
+            model=model,
+            prompt=prompt,
+            exiftool_path=exiftool_path,
+        )
+        cache_key, cached = _image_cache_lookup(cache_key_payload)
+        if cached:
+            return cached
 
         if not _image_text_tools_available():
             raise MarkItDownConversionError(
@@ -324,24 +338,11 @@ def convert_response_to_markdown(response: ResponseLike) -> MarkItDownResult:
                 "OPENAI_API_KEY/OPENROUTER_API_KEY."
             )
 
-    try:
-        result = _get_converter().convert(response)
-    except Exception as exc:
-        raise MarkItDownConversionError(
-            f"MarkItDown failed to convert {response.url}: {exc}"
-        ) from exc
-
-    markdown = getattr(result, "markdown", None)
-    if not isinstance(markdown, str):
-        markdown = str(result)
-    title = getattr(result, "title", None)
-    if title is not None and not isinstance(title, str):
-        title = str(title)
-
+    markdown, title = _convert_markitdown(response, error_label=str(response.url))
     out_markdown = _postprocess_image_markdown(markdown) if is_image else markdown
     out = MarkItDownResult(markdown=out_markdown, title=title)
     if is_image and media_md5 is not None:
         _write_cache_entry(
-            key, payload=cache_key_payload, markdown=markdown, title=out.title
+            cache_key, payload=cache_key_payload, markdown=markdown, title=out.title
         )
     return out

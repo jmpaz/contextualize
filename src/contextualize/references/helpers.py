@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 import codecs
 import os
 import re
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TYPE_CHECKING, runtime_checkable
 from urllib.parse import unquote, urlparse
+
+if TYPE_CHECKING:
+    from ..git.cache import GitTarget
 
 
 @runtime_checkable
@@ -23,6 +28,54 @@ def split_path_and_symbols(raw_path: str) -> tuple[str, list[str]]:
     return base or raw_path, symbols
 
 
+_SPEC_OPTION_RE = re.compile(r'(filename|params|root|wrap)=(?:"([^"]*)"|([^"]*))')
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_URL_PREFIXES = ("http://", "https://")
+
+
+def is_http_url(value: str) -> bool:
+    return value.startswith(_URL_PREFIXES)
+
+
+def parse_target_spec(spec: str) -> dict[str, str | None]:
+    parts = spec.split("::")
+    opts: dict[str, str | None] = {}
+    target_parts: list[str] = []
+    for part in parts:
+        match = _SPEC_OPTION_RE.fullmatch(part)
+        if match:
+            opts[match.group(1)] = match.group(2) or match.group(3)
+        else:
+            target_parts.append(part)
+    opts["target"] = "::".join(target_parts)
+    return opts
+
+
+def looks_like_windows_drive(spec: str) -> bool:
+    return bool(_WINDOWS_DRIVE_RE.match(spec))
+
+
+def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
+    if is_http_url(spec) or looks_like_windows_drive(spec):
+        return spec, []
+    from ..git.cache import parse_git_target
+
+    if parse_git_target(spec):
+        return spec, []
+    return split_path_and_symbols(spec)
+
+
+def parse_git_url_target(url: str) -> GitTarget | None:
+    from ..git.cache import parse_git_target
+
+    tgt = parse_git_target(url)
+    if not tgt:
+        return None
+    if tgt.path is None and not tgt.repo_url.endswith(".git") and tgt.repo_url == url:
+        return None
+    return tgt
+
+
 def is_utf8_file(path: str, sample_size: int = 4096) -> bool:
     try:
         with open(path, "rb") as f:
@@ -40,6 +93,63 @@ def is_utf8_file(path: str, sample_size: int = 4096) -> bool:
         return False
 
     return True
+
+
+def _find_symbol_ranges(
+    file_path: str, symbols: list[str], *, text: str | None = None
+) -> dict[str, tuple[int, int]]:
+    try:
+        from ..render.map import find_symbol_ranges
+    except Exception:
+        return {}
+    return find_symbol_ranges(file_path, symbols, text=text)
+
+
+def warn_missing_symbols(path_label: str, symbols: list[str]) -> None:
+    import sys
+
+    print(
+        f"Warning: symbol(s) not found in {path_label}: {', '.join(symbols)}",
+        file=sys.stderr,
+    )
+
+
+def resolve_symbol_ranges(
+    file_path: str,
+    symbols: list[str] | None,
+    *,
+    text: str | None = None,
+    ranges: list[tuple[int, int]] | None = None,
+    warn_label: str | None = None,
+    append_to_ranges: bool = False,
+    keep_missing: bool = True,
+    skip_on_missing: bool = False,
+    warn_on_partial: bool = True,
+) -> tuple[list[tuple[int, int]] | None, list[str] | None, bool]:
+    if not symbols:
+        return ranges, symbols, False
+
+    match_map = _find_symbol_ranges(file_path, symbols, text=text)
+    matched = [s for s in symbols if s in match_map]
+    missing = [s for s in symbols if s not in match_map]
+
+    if missing and (warn_on_partial or not matched):
+        if warn_label:
+            warn_missing_symbols(warn_label, missing)
+
+    if not matched:
+        if skip_on_missing and ranges is None:
+            return ranges, symbols, True
+        if keep_missing:
+            return ranges, symbols, False
+        return ranges, None, False
+
+    sym_ranges = [match_map[s] for s in matched]
+    if append_to_ranges and ranges:
+        ranges = ranges + sym_ranges
+    else:
+        ranges = sym_ranges
+    return ranges, matched, False
 
 
 MARKITDOWN_PREFERRED_EXTENSIONS: frozenset[str] = frozenset(

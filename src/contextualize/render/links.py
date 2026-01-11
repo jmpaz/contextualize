@@ -56,15 +56,8 @@ def _resolve_to_path(href: str, base_dir: str) -> str | None:
     return None
 
 
-def _collect_linked_paths(seed_path, seed_content, max_depth, seen):
-    """
-    BFS from seed file following Markdown links up to max_depth.
-    'seen' prevents re-crawl across all depths/seeds.
-    """
+def _walk_markdown_links(seed_path, seed_content, max_depth, seen):
     queue = [(seed_path, seed_content, 0)]
-    found = []
-    trace_items = []
-
     while queue:
         path, content, depth = queue.pop(0)
         if depth >= max_depth:
@@ -76,15 +69,14 @@ def _collect_linked_paths(seed_path, seed_content, max_depth, seen):
             if not tgt or tgt in seen:
                 continue
             seen.add(tgt)
-            found.append(tgt)
-            trace_items.append((tgt, path, depth + 1))
             try:
                 with open(tgt, "r", encoding="utf-8") as fh:
-                    queue.append((tgt, fh.read(), depth + 1))
+                    next_content = fh.read()
             except Exception:
-                pass
-
-    return found, trace_items
+                next_content = None
+            yield tgt, path, depth + 1, next_content
+            if next_content is not None:
+                queue.append((tgt, next_content, depth + 1))
 
 
 def count_downstream(path, content, depth, seen_set=None, token_target="cl100k_base"):
@@ -94,34 +86,19 @@ def count_downstream(path, content, depth, seen_set=None, token_target="cl100k_b
     else:
         seen_set = seen_set.copy()
 
-    queue = [(path, content, 0)]
-    found_files = []
+    found_files = 0
     total_tokens = 0
 
-    while queue:
-        current_path, current_content, current_depth = queue.pop(0)
-        if current_depth >= depth:
+    for target, _, _, next_content in _walk_markdown_links(
+        path, content, depth, seen_set
+    ):
+        found_files += 1
+        if next_content is None:
             continue
+        token_info = count_tokens(next_content, target=token_target)
+        total_tokens += token_info["count"]
 
-        base_dir = os.path.dirname(current_path)
-        for href in _extract_local_hrefs(current_content):
-            target = _resolve_to_path(href, base_dir)
-            if not target or target in seen_set:
-                continue
-
-            seen_set.add(target)
-            found_files.append(target)
-
-            try:
-                with open(target, "r", encoding="utf-8") as fh:
-                    content = fh.read()
-                    token_info = count_tokens(content, target=token_target)
-                    total_tokens += token_info["count"]
-                    queue.append((target, content, current_depth + 1))
-            except Exception:
-                pass
-
-    return len(found_files), total_tokens
+    return found_files, total_tokens
 
 
 def add_markdown_link_refs(
@@ -185,11 +162,11 @@ def add_markdown_link_refs(
     trace_items: list[tuple[str, str, int]] = []
 
     for seed in seeds:
-        paths, new_traces = _collect_linked_paths(
+        for path, parent, depth, _ in _walk_markdown_links(
             seed.path, seed.file_content, link_depth, seen
-        )
-        to_add.extend(paths)
-        trace_items.extend(new_traces)
+        ):
+            to_add.append(path)
+            trace_items.append((path, parent, depth))
 
     if not to_add:
         return refs, trace_items, skip_impact

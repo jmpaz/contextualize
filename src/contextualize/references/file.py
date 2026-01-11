@@ -1,7 +1,6 @@
 """FileReference - Local filesystem file references."""
 
 import os
-import sys
 from pathlib import Path
 
 from ..render.text import process_text
@@ -10,6 +9,7 @@ from .helpers import (
     DISALLOWED_EXTENSIONS,
     MARKITDOWN_PREFERRED_EXTENSIONS,
     is_utf8_file,
+    resolve_symbol_ranges,
 )
 
 
@@ -99,25 +99,13 @@ class FileReference:
 
         ranges = self.ranges
         if self.symbols and ranges is None:
-            try:
-                from ..render.map import find_symbol_ranges
-
-                match_map = find_symbol_ranges(
-                    self.path, self.symbols, text=self.file_content
-                )
-            except Exception:
-                match_map = {}
-
-            missing = [s for s in self.symbols if s not in match_map]
-            if missing:
-                print(
-                    f"Warning: symbol(s) not found in {self.path}: {', '.join(missing)}",
-                    file=sys.stderr,
-                )
-            if match_map:
-                matched = [s for s in self.symbols if s in match_map]
-                ranges = [match_map[s] for s in matched]
-                self.symbols = matched
+            ranges, symbols, _ = resolve_symbol_ranges(
+                self.path,
+                self.symbols,
+                text=self.file_content,
+                warn_label=self.path,
+            )
+            self.symbols = symbols or []
 
         return process_text(
             self.file_content,

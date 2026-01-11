@@ -1,10 +1,10 @@
 import os
 import subprocess
-import sys
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
 from ..render.text import process_text
+from ..references.helpers import resolve_symbol_ranges
 
 
 def _run_git(repo_root: str, args: list[str]) -> subprocess.CompletedProcess:
@@ -164,25 +164,12 @@ class GitRevFileReference:
         ranges = self.ranges
         symbols = [s for s in (self.symbols or []) if s]
         if symbols and ranges is None:
-            try:
-                from ..render.map import find_symbol_ranges
-
-                match_map = find_symbol_ranges(
-                    self.rel_path, symbols, text=self.file_content
-                )
-            except Exception:
-                match_map = {}
-
-            missing = [s for s in symbols if s not in match_map]
-            if missing:
-                print(
-                    f"Warning: symbol(s) not found in {self.rel_path}@{self.rev}: {', '.join(missing)}",
-                    file=sys.stderr,
-                )
-            matched = [s for s in symbols if s in match_map]
-            if match_map and matched:
-                ranges = [match_map[s] for s in matched]
-                symbols = matched
+            ranges, symbols, _ = resolve_symbol_ranges(
+                self.rel_path,
+                symbols,
+                text=self.file_content,
+                warn_label=f"{self.rel_path}@{self.rev}",
+            )
 
         self._output = process_text(
             text,

@@ -1,9 +1,16 @@
+import re
 from typing import Callable
 
 FormatHandler = Callable[..., str]
 
 
-def _count_max_backticks(text: str) -> int:
+_BACKTICK_RE = re.compile(r"`+")
+
+
+def _max_backticks(text: str, *, scan_any: bool) -> int:
+    if scan_any:
+        runs = _BACKTICK_RE.findall(text)
+        return max((len(run) for run in runs), default=0)
     max_backticks = 0
     for line in text.split("\n"):
         stripped = line.lstrip("`")
@@ -11,6 +18,15 @@ def _count_max_backticks(text: str) -> int:
         if count > max_backticks:
             max_backticks = count
     return max_backticks
+
+
+def md_fence(text: str, *, scan_any: bool = False, extend_short: bool = True) -> str:
+    max_backticks = _max_backticks(text, scan_any=scan_any)
+    if extend_short:
+        fence_len = max(max_backticks + 2, 3)
+    else:
+        fence_len = max_backticks + 2 if max_backticks >= 3 else 3
+    return "`" * fence_len
 
 
 def wrap_raw(content: str, label: str | None = None, **kwargs) -> str:
@@ -33,8 +49,7 @@ def wrap_md(
     if label_suffix:
         label_with_symbols = f"{label_with_symbols} {label_suffix}"
 
-    max_backticks = _count_max_backticks(content)
-    backticks_str = "`" * max(max_backticks + 2, 3)
+    backticks_str = md_fence(content)
     info = f"{label_with_symbols}@{rev}" if rev else label_with_symbols
     if token_count is not None:
         info = f"{info} ({token_count} tokens)"

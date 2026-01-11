@@ -34,11 +34,9 @@ def wrap_text(content: str, wrap_mode: str, filename: str | None = None) -> str:
         return f"<paste>\n{content}\n</paste>"
 
     if wrap_mode in ("md", "markdown"):
-        backtick_runs = re.findall(r"`+", content)
-        longest = max(len(run) for run in backtick_runs) if backtick_runs else 0
+        from .render.formats import md_fence
 
-        fence_len = longest + 2 if longest >= 3 else 3
-        fence = "`" * fence_len
+        fence = md_fence(content, scan_any=True, extend_short=False)
 
         fence_header = fence + (filename if filename else "")
 
@@ -60,6 +58,30 @@ def add_prompt_wrappers(content, prompts):
         return f"{prompts[0]}\n{content}"
     else:
         return f"{prompts[0]}\n{content}\n\n{prompts[1]}"
+
+
+def merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges, key=lambda r: r[0]):
+        if not merged:
+            merged.append((start, end))
+            continue
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end + 1:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def extract_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
+    lines = text.split("\n")
+    snippets = []
+    for start, end in merge_ranges(ranges):
+        start_idx = max(0, start - 1)
+        end_idx = min(len(lines), end)
+        snippets.append("\n".join(lines[start_idx:end_idx]))
+    return "\n...\n".join(snippets)
 
 
 def segment_output(text, max_tokens, format_hint, token_target="cl100k_base"):
