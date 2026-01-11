@@ -10,7 +10,7 @@ from aider.repomap import (
 )
 from .utils import count_tokens
 from grep_ast import TreeContext
-from .references import _is_utf8_file
+from .references import is_utf8_file
 from ..git.rev import list_files_at_rev, read_file_at_rev
 
 
@@ -163,7 +163,7 @@ def _collect_files(paths: list[str], ignore_paths: list[str] | None) -> list[str
     files: list[str] = []
     for path in paths:
         if os.path.isfile(path):
-            if not _is_ignored(path, patterns) and _is_utf8_file(path):
+            if not _is_ignored(path, patterns) and is_utf8_file(path):
                 files.append(path)
         elif os.path.isdir(path):
             for root, dirs, names in os.walk(path):
@@ -172,7 +172,7 @@ def _collect_files(paths: list[str], ignore_paths: list[str] | None) -> list[str
                 ]
                 for name in names:
                     fp = os.path.join(root, name)
-                    if not _is_ignored(fp, patterns) and _is_utf8_file(fp):
+                    if not _is_ignored(fp, patterns) and is_utf8_file(fp):
                         files.append(fp)
     return files
 

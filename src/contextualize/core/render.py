@@ -1,3 +1,9 @@
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .references import Reference
+
+
 def process_text(
     text,
     clean=False,
@@ -46,7 +52,6 @@ def process_text(
 
 
 def _clean(text):
-    # Example cleaning logic
     return text.replace("    ", "\t")
 
 
@@ -82,7 +87,6 @@ def _extract_ranges(text, ranges):
 def _count_max_backticks(text):
     max_backticks = 0
     for line in text.split("\n"):
-        # If a line starts with backticks, count them
         stripped = line.lstrip("`")
         count = len(line) - len(stripped)
         if count > max_backticks:
@@ -111,7 +115,7 @@ def _delimit(
         label_with_symbols = f"{label_with_symbols} {label_suffix}"
 
     if format == "md":
-        backticks_str = "`" * max(max_backticks + 2, 3)  # at least 3
+        backticks_str = "`" * max(max_backticks + 2, 3)
         info = f"{label_with_symbols}@{rev}" if rev else label_with_symbols
         if token_count is not None:
             info = f"{info} ({token_count} tokens)"
@@ -135,3 +139,31 @@ def _delimit(
         return f"❯ cat {target_label}{token_suffix}\n{text}"
     else:
         return text
+
+
+def render_references(
+    refs: list["Reference"],
+    format: str = "raw",
+    tokens: bool = False,
+    label_style: str = "relative",
+    separator: str = "\n\n",
+) -> str:
+    outputs = []
+    for ref in refs:
+        outputs.append(ref.output)
+    return separator.join(outputs)
+
+
+def render_map(
+    refs: list["Reference"],
+    max_tokens: int = 10000,
+    format: str = "raw",
+) -> str:
+    from .repomap import RepoMap
+
+    paths = [ref.path for ref in refs if hasattr(ref, "path")]
+    if not paths:
+        return ""
+
+    repo_map = RepoMap(max_map_tokens=max_tokens)
+    return repo_map.get_map(paths)

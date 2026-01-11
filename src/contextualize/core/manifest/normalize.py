@@ -17,7 +17,7 @@ _DEFAULT_KEYS = {
 _GROUP_KEYS = {"group", "components", *_DEFAULT_KEYS}
 
 
-def normalize_manifest_components(components: list[Any]) -> list[dict[str, Any]]:
+def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
     if not isinstance(components, list):
         raise ValueError("'components' must be a list")
 
@@ -127,7 +127,23 @@ def normalize_manifest_components(components: list[Any]) -> list[dict[str, Any]]
     return normalized
 
 
-def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
+def extract_groups(normalized_components: list[dict[str, Any]]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+
+    for comp in normalized_components:
+        group_path = comp.get(GROUP_PATH_KEY)
+        if group_path:
+            prefix = ""
+            for part in group_path:
+                prefix = part if not prefix else f"{prefix}{GROUP_DELIMITER}{part}"
+                if prefix not in groups:
+                    groups[prefix] = []
+                groups[prefix].append(comp["name"])
+
+    return groups
+
+
+def coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
     if isinstance(spec, dict):
         raw = spec.get("path") or spec.get("target") or spec.get("url")
         if not raw or not isinstance(raw, str):
@@ -142,7 +158,7 @@ def _coerce_file_spec(spec: Any) -> Tuple[str, Dict[str, Any]]:
     )
 
 
-def _component_selectors(comp: dict[str, Any]) -> set[str]:
+def component_selectors(comp: dict[str, Any]) -> set[str]:
     selectors: set[str] = set()
     name = comp.get("name")
     if isinstance(name, str) and name:
@@ -158,3 +174,75 @@ def _component_selectors(comp: dict[str, Any]) -> set[str]:
             prefix = part if not prefix else f"{prefix}{GROUP_DELIMITER}{part}"
             selectors.add(prefix)
     return selectors
+
+
+def validate_manifest(data: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+
+    if not isinstance(data, dict):
+        errors.append("Manifest must be a mapping")
+        return errors
+
+    config = data.get("config", {})
+    if not isinstance(config, dict):
+        errors.append("'config' must be a mapping")
+
+    components = data.get("components")
+    if components is not None and not isinstance(components, list):
+        errors.append("'components' must be a list")
+    elif isinstance(components, list):
+        for i, comp in enumerate(components):
+            if not isinstance(comp, dict):
+                errors.append(f"Component at index {i} must be a mapping")
+                continue
+
+            if "group" in comp:
+                if not isinstance(comp.get("group"), str):
+                    errors.append(f"Group at index {i} must have a string 'group' name")
+                if "components" not in comp:
+                    errors.append(f"Group at index {i} must define 'components'")
+                elif not isinstance(comp.get("components"), list):
+                    errors.append(f"Group at index {i} 'components' must be a list")
+            else:
+                if "files" not in comp and "text" not in comp:
+                    errors.append(
+                        f"Component at index {i} must have 'files' or 'text'"
+                    )
+
+                files = comp.get("files")
+                if files is not None and not isinstance(files, list):
+                    errors.append(f"Component at index {i} 'files' must be a list")
+
+    return errors
+
+
+def validate_component(comp: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+
+    name = comp.get("name")
+    if not name:
+        errors.append("Component must have a 'name'")
+    elif not isinstance(name, str):
+        errors.append("Component 'name' must be a string")
+
+    files = comp.get("files")
+    text = comp.get("text")
+
+    if files is None and text is None:
+        errors.append(f"Component '{name}' must have 'files' or 'text'")
+
+    if files is not None:
+        if not isinstance(files, list):
+            errors.append(f"Component '{name}' 'files' must be a list")
+        else:
+            for i, f in enumerate(files):
+                if not isinstance(f, (str, dict)):
+                    errors.append(
+                        f"Component '{name}' file at index {i} must be string or mapping"
+                    )
+
+    wrap = comp.get("wrap")
+    if wrap is not None and wrap not in {"md", "xml", None}:
+        errors.append(f"Component '{name}' 'wrap' must be 'md' or 'xml'")
+
+    return errors

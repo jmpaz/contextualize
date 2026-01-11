@@ -8,9 +8,9 @@ import yaml
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from .links import add_markdown_link_refs
 from .manifest import (
-    _coerce_file_spec,
-    _component_selectors,
-    normalize_manifest_components,
+    coerce_file_spec,
+    component_selectors,
+    normalize_components,
 )
 from .references import URLReference, create_file_references
 from .utils import wrap_text
@@ -331,7 +331,7 @@ def assemble_payload(
     inject: bool = False,
     depth: int = 5,
 ) -> str:
-    normalized_components = normalize_manifest_components(components)
+    normalized_components = normalize_components(components)
     return build_payload(
         normalized_components,
         base_dir,
@@ -391,7 +391,7 @@ def _build_payload_impl(
         raise ValueError(f"Components cannot be both mapped and excluded: {names}")
 
     for comp in components:
-        selectors = _component_selectors(comp)
+        selectors = component_selectors(comp)
         if selectors and exclude_set and selectors & exclude_set:
             continue
         name = comp.get("name")
@@ -447,7 +447,7 @@ def _build_payload_impl(
         input_refs_for_comp = []
 
         for spec in files:
-            spec, file_opts = _coerce_file_spec(spec)
+            spec, file_opts = coerce_file_spec(spec)
             raw_spec = spec
             item_comment = _format_comment(file_opts.get("comment"))
 
@@ -639,7 +639,7 @@ def render_manifest(
     comps = data.get("components")
     if not isinstance(comps, list):
         raise ValueError("'components' must be a list")
-    comps = normalize_manifest_components(comps)
+    comps = normalize_components(comps)
 
     link_depth_default = int(cfg.get("link-depth", 0) or 0)
     link_scope_default = (cfg.get("link-scope", "all") or "all").lower()
@@ -689,7 +689,7 @@ def render_manifest_data(
     comps = data.get("components")
     if not isinstance(comps, list):
         raise ValueError("'components' must be a list")
-    comps = normalize_manifest_components(comps)
+    comps = normalize_components(comps)
 
     link_depth_default = int(cfg.get("link-depth", 0) or 0)
     link_scope_default = (cfg.get("link-scope", "all") or "all").lower()

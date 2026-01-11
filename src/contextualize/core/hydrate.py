@@ -14,8 +14,8 @@ from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from .manifest import (
     GROUP_BASE_KEY,
     GROUP_PATH_KEY,
-    _coerce_file_spec,
-    normalize_manifest_components,
+    coerce_file_spec,
+    normalize_components,
 )
 from .references import URLReference, create_file_references, split_path_and_symbols
 
@@ -203,7 +203,7 @@ def build_hydration_plan_data(
     components = data.get("components")
     if not isinstance(components, list):
         raise ValueError("'components' must be a list")
-    components = normalize_manifest_components(components)
+    components = normalize_components(components)
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
@@ -273,7 +273,7 @@ def build_hydration_plan_data(
             raise ValueError(f"Component '{comp_name}' files must be a list")
         if comp_files:
             for file_spec in comp_files:
-                raw_spec, file_opts = _coerce_file_spec(file_spec)
+                raw_spec, file_opts = coerce_file_spec(file_spec)
                 spec_comment = _parse_comment(file_opts.pop("comment", None))
                 range_value = file_opts.pop("range", None)
                 symbols_value = file_opts.pop("symbols", None)
@@ -559,7 +559,7 @@ def _component_external_root(comp: dict[str, Any]) -> str | None:
         return None
     root: str | None = None
     for file_spec in files:
-        raw_spec, _ = _coerce_file_spec(file_spec)
+        raw_spec, _ = coerce_file_spec(file_spec)
         key = _external_root_key(raw_spec)
         if key is None:
             return None
@@ -604,7 +604,7 @@ def _manifest_has_local_sources(components: list[dict[str, Any]]) -> bool:
         if not files or not isinstance(files, list):
             continue
         for file_spec in files:
-            raw_spec, _ = _coerce_file_spec(file_spec)
+            raw_spec, _ = coerce_file_spec(file_spec)
             if not _is_external_spec(raw_spec):
                 return True
     return False

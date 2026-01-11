@@ -12,8 +12,8 @@ from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from .references import (
     FileReference,
     URLReference,
-    _is_utf8_file,
     create_file_references,
+    is_utf8_file,
 )
 from .utils import count_tokens, wrap_text
 
@@ -63,7 +63,7 @@ def _resolve_to_path(href: str, base_dir: str) -> str | None:
         )
     for c in candidates:
         c = os.path.abspath(c)
-        if os.path.exists(c) and _is_utf8_file(c):
+        if os.path.exists(c) and is_utf8_file(c):
             return c
     return None
 
