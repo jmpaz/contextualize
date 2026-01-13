@@ -228,6 +228,10 @@ def build_hydration_plan_data(
     index_components: dict[str, list[dict[str, Any]]] = {}
     normalized_components: list[dict[str, Any]] = []
 
+    global_strip_prefix: Path | None = None
+    if context_cfg["path_strategy"] == "by-component":
+        global_strip_prefix = _find_global_subpath_prefix(components, base_dir)
+
     if context_cfg["agents_text"] is not None:
         _queue_agent_files(
             files_to_write,
@@ -279,6 +283,18 @@ def build_hydration_plan_data(
         if comp_files is not None and not isinstance(comp_files, list):
             raise ValueError(f"Component '{comp_name}' files must be a list")
         if comp_files:
+            resolved_items: list[
+                tuple[
+                    ResolvedItem,
+                    str,
+                    str | None,
+                    list[tuple[int, int]] | None,
+                    list[str] | None,
+                    list[tuple[int, int]] | None,
+                    str | None,
+                    dict[str, Any],
+                ]
+            ] = []
             for file_spec in comp_files:
                 raw_spec, file_opts = coerce_file_spec(file_spec)
                 spec_comment = _parse_comment(file_opts.pop("comment", None))
@@ -318,38 +334,62 @@ def build_hydration_plan_data(
                         extract_ranges(item.content, ranges) if ranges else item.content
                     )
                     suffix = _build_suffix(ranges, symbols)
-                    rel_path, should_write = _resolve_context_path(
-                        comp_name,
-                        item,
-                        suffix,
-                        used_paths,
-                        identity_paths,
-                        context_cfg["path_strategy"],
-                        ranges,
-                        symbols,
-                        component_root=component_root,
-                        use_external_root=use_external_root,
-                    )
-                    if should_write:
-                        files_to_write.append((context_dir / rel_path, content))
-                    index_components.setdefault(comp_name, []).append(
-                        _build_index_entry(
-                            rel_path,
+                    resolved_items.append(
+                        (
                             item,
+                            content,
+                            suffix,
                             ranges,
                             symbols,
-                            content,
-                        )
-                    )
-                    normalized_files.append(
-                        _build_manifest_file_entry(
-                            item,
                             range_spec,
-                            symbols,
                             spec_comment,
                             file_opts,
                         )
                     )
+
+            for (
+                item,
+                content,
+                suffix,
+                ranges,
+                symbols,
+                range_spec,
+                spec_comment,
+                file_opts,
+            ) in resolved_items:
+                rel_path, should_write = _resolve_context_path(
+                    comp_name,
+                    item,
+                    suffix,
+                    used_paths,
+                    identity_paths,
+                    context_cfg["path_strategy"],
+                    ranges,
+                    symbols,
+                    component_root=component_root,
+                    use_external_root=use_external_root,
+                    strip_prefix=global_strip_prefix,
+                )
+                if should_write:
+                    files_to_write.append((context_dir / rel_path, content))
+                index_components.setdefault(comp_name, []).append(
+                    _build_index_entry(
+                        rel_path,
+                        item,
+                        ranges,
+                        symbols,
+                        content,
+                    )
+                )
+                normalized_files.append(
+                    _build_manifest_file_entry(
+                        item,
+                        range_spec,
+                        symbols,
+                        spec_comment,
+                        file_opts,
+                    )
+                )
 
         if normalized_files:
             normalized_comp["files"] = normalized_files
@@ -523,6 +563,56 @@ def _build_normalized_component(comp: dict[str, Any], name: str) -> dict[str, An
     }
     normalized["name"] = name
     return normalized
+
+
+def _find_common_subpath_prefix(subpaths: list[str]) -> Path | None:
+    if not subpaths:
+        return None
+
+    parents = [Path(sp).parent for sp in subpaths]
+    if any(p == Path(".") or not p.parts for p in parents):
+        return None
+
+    if len(parents) == 1:
+        return parents[0] if parents[0].parts else None
+
+    first = parents[0].parts
+    common_parts: list[str] = []
+    for i, part in enumerate(first):
+        if all(len(p.parts) > i and p.parts[i] == part for p in parents):
+            common_parts.append(part)
+        else:
+            break
+
+    if not common_parts:
+        return None
+
+    return Path(*common_parts)
+
+
+def _find_global_subpath_prefix(
+    components: list[dict[str, Any]], base_dir: str
+) -> Path | None:
+    all_subpaths: list[str] = []
+    for comp in components:
+        comp_name = comp["name"]
+        comp_files = comp.get("files")
+        if not comp_files or not isinstance(comp_files, list):
+            continue
+        for file_spec in comp_files:
+            raw_spec, file_opts = coerce_file_spec(file_spec)
+            raw_spec, _ = split_spec_symbols(raw_spec)
+            try:
+                for item in _resolve_spec_items(
+                    raw_spec,
+                    base_dir,
+                    component_name=comp_name,
+                    filename_hint=file_opts.get("filename"),
+                ):
+                    all_subpaths.append(item.context_subpath)
+            except (FileNotFoundError, ValueError):
+                pass
+    return _find_common_subpath_prefix(all_subpaths)
 
 
 def _find_flatten_groups(components: list[dict[str, Any]]) -> set[tuple[str, ...]]:
@@ -876,6 +966,7 @@ def _resolve_context_path(
     *,
     component_root: Path | None = None,
     use_external_root: bool,
+    strip_prefix: Path | None = None,
 ) -> tuple[Path, bool]:
     rel_path = _build_base_context_path(
         component_name,
@@ -884,6 +975,7 @@ def _resolve_context_path(
         path_strategy,
         component_root,
         use_external_root,
+        strip_prefix,
     )
     _ensure_relative(rel_path)
 
@@ -900,6 +992,15 @@ def _resolve_context_path(
     return rel_path, True
 
 
+def _strip_subpath_prefix(subpath: Path, prefix: Path | None) -> Path:
+    if prefix is None:
+        return subpath
+    try:
+        return subpath.relative_to(prefix)
+    except ValueError:
+        return subpath
+
+
 def _build_base_context_path(
     component_name: str,
     item: ResolvedItem,
@@ -907,9 +1008,12 @@ def _build_base_context_path(
     path_strategy: str,
     component_root: Path | None = None,
     use_external_root: bool = True,
+    strip_prefix: Path | None = None,
 ) -> Path:
     if item.source_type == "local":
         subpath = _split_subpath(item.context_subpath)
+        if path_strategy == "by-component":
+            subpath = _strip_subpath_prefix(subpath, strip_prefix)
         rel_path = (
             subpath
             if path_strategy == "on-disk"
@@ -922,6 +1026,8 @@ def _build_base_context_path(
                 ext_path = Path("external") / ext_path
         else:
             subpath = _split_subpath(item.context_subpath)
+            if path_strategy == "by-component":
+                subpath = _strip_subpath_prefix(subpath, strip_prefix)
             ext_path = _build_external_path(item, subpath, use_external_root)
         rel_path = (
             ext_path
