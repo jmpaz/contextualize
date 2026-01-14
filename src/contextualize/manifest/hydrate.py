@@ -1114,8 +1114,12 @@ def _build_external_path(
 
 
 def _build_http_external_path(item: ResolvedItem) -> Path:
+    context_leaf = Path(item.context_subpath).name
+    source_leaf = Path(item.source_path).name
+    if context_leaf != source_leaf:
+        return Path(context_leaf)
     host = _parse_http_host(item.source_ref)
-    leaf = _pick_http_leaf(item.source_path)
+    leaf = _pick_http_leaf(item.context_subpath)
     slug = f"{host}-{leaf}" if host else leaf
     slug = _sanitize_path_segment(slug, fallback="external")
     return Path(slug)
