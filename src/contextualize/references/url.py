@@ -9,8 +9,10 @@ from .helpers import (
     DISALLOWED_EXTENSIONS,
     MARKITDOWN_PREFERRED_EXTENSIONS,
     RAW_PREFIX,
+    fetch_gist_filename,
     infer_url_suffix,
     looks_like_text_content_type,
+    parse_gist_url,
     strip_content_type,
 )
 
@@ -30,11 +32,15 @@ class URLReference:
     depth: int = 5
     trace_collector: list = None
     _bypass_jina: bool = field(default=False, init=False, repr=False)
+    _gist_filename: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.url.startswith(RAW_PREFIX):
             self.url = self.url[len(RAW_PREFIX):]
             self._bypass_jina = True
+        gist_id = parse_gist_url(self.url)
+        if gist_id:
+            self._gist_filename = fetch_gist_filename(gist_id)
         self.file_content = ""
         self.original_file_content = ""
         self.output = self._get_contents()
@@ -63,10 +69,16 @@ class URLReference:
     def get_label(self) -> str:
         path = urlparse(self.url).path
         if self.label == "relative":
+            if self._gist_filename:
+                return self._gist_filename
             return self.url
         if self.label == "name":
+            if self._gist_filename:
+                return self._gist_filename
             return os.path.basename(path)
         if self.label == "ext":
+            if self._gist_filename:
+                return os.path.splitext(self._gist_filename)[1]
             return os.path.splitext(path)[1]
         return self.label
 

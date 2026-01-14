@@ -242,3 +242,34 @@ def looks_like_text_content_type(content_type: str) -> bool:
 def remove_ansi(text: str) -> str:
     ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
     return ansi_escape.sub("", text)
+
+
+_GIST_URL_RE = re.compile(
+    r"^https?://gist\.github\.com/[^/]+/(?P<gist_id>[a-f0-9]+)(?:/|$)"
+)
+
+
+def parse_gist_url(url: str) -> str | None:
+    match = _GIST_URL_RE.match(url)
+    return match.group("gist_id") if match else None
+
+
+def fetch_gist_filename(gist_id: str) -> str | None:
+    import requests
+
+    api_url = f"https://api.github.com/gists/{gist_id}"
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"token {token}"
+    try:
+        r = requests.get(api_url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        files = data.get("files", {})
+        if not files:
+            return None
+        return next(iter(files.keys()))
+    except Exception:
+        return None

@@ -19,7 +19,9 @@ from .manifest import (
 )
 from ..references import URLReference, create_file_references
 from ..references.helpers import (
+    fetch_gist_filename,
     is_http_url,
+    parse_gist_url,
     parse_git_url_target,
     parse_target_spec,
     resolve_symbol_ranges,
@@ -862,7 +864,12 @@ def _resolve_git_items(tgt, component_name: str) -> list[ResolvedItem]:
 def _resolve_http_item(url: str, filename_hint: Any | None) -> ResolvedItem:
     url_ref = URLReference(url, format="raw")
     origin, url_path = _split_url_path(url)
-    context_path = _apply_filename_hint(url_path, filename_hint)
+    effective_hint = filename_hint
+    if effective_hint is None:
+        gist_id = parse_gist_url(url)
+        if gist_id:
+            effective_hint = fetch_gist_filename(gist_id)
+    context_path = _apply_filename_hint(url_path, effective_hint)
     return ResolvedItem(
         source_type="http",
         source_ref=origin,
