@@ -19,7 +19,7 @@ from .manifest import (
 )
 from ..references import URLReference, create_file_references
 from ..references.helpers import (
-    fetch_gist_filename,
+    fetch_gist_files,
     is_http_url,
     parse_gist_url,
     parse_git_url_target,
@@ -796,6 +796,20 @@ def _resolve_spec_items(
         tgt = parse_git_url_target(url)
         if tgt:
             return _resolve_git_items(tgt, component_name)
+
+        gist_id = parse_gist_url(url)
+        if gist_id:
+            gist_files = fetch_gist_files(gist_id)
+            if gist_files:
+                if filename and len(gist_files) == 1:
+                    return [_resolve_gist_item(gist_files[0][1], filename)]
+                elif filename:
+                    return [
+                        _resolve_gist_item(raw_url, f"{filename}-{fname}")
+                        for fname, raw_url in gist_files
+                    ]
+                return [_resolve_gist_item(raw_url, fname) for fname, raw_url in gist_files]
+
         return [_resolve_http_item(url, filename)]
 
     tgt = parse_git_target(spec)
@@ -864,12 +878,7 @@ def _resolve_git_items(tgt, component_name: str) -> list[ResolvedItem]:
 def _resolve_http_item(url: str, filename_hint: Any | None) -> ResolvedItem:
     url_ref = URLReference(url, format="raw")
     origin, url_path = _split_url_path(url)
-    effective_hint = filename_hint
-    if effective_hint is None:
-        gist_id = parse_gist_url(url)
-        if gist_id:
-            effective_hint = fetch_gist_filename(gist_id)
-    context_path = _apply_filename_hint(url_path, effective_hint)
+    context_path = _apply_filename_hint(url_path, filename_hint)
     return ResolvedItem(
         source_type="http",
         source_ref=origin,
@@ -878,6 +887,20 @@ def _resolve_http_item(url: str, filename_hint: Any | None) -> ResolvedItem:
         context_subpath=context_path,
         content=url_ref.file_content,
         manifest_spec=url,
+    )
+
+
+def _resolve_gist_item(raw_url: str, filename: str) -> ResolvedItem:
+    url_ref = URLReference(raw_url, format="raw")
+    origin, url_path = _split_url_path(raw_url)
+    return ResolvedItem(
+        source_type="http",
+        source_ref=origin,
+        source_rev=None,
+        source_path=url_path,
+        context_subpath=filename,
+        content=url_ref.file_content,
+        manifest_spec=raw_url,
     )
 
 

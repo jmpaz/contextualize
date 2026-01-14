@@ -8,8 +8,10 @@ from ..utils import brace_expand, count_tokens
 from .file import FileReference
 from .helpers import (
     MARKITDOWN_PREFERRED_EXTENSIONS,
-    is_utf8_file,
+    fetch_gist_files,
     is_http_url,
+    is_utf8_file,
+    parse_gist_url,
     parse_target_spec,
     split_spec_symbols,
 )
@@ -91,6 +93,25 @@ def create_file_references(
         path, symbols = split_spec_symbols(target)
 
         if is_http_url(target):
+            gist_id = parse_gist_url(target)
+            if gist_id:
+                gist_files = fetch_gist_files(gist_id)
+                if gist_files:
+                    for _, raw_url in gist_files:
+                        file_references.append(
+                            URLReference(
+                                raw_url,
+                                format=format,
+                                label=label,
+                                label_suffix=label_suffix,
+                                include_token_count=include_token_count,
+                                token_target=token_target,
+                                inject=inject,
+                                depth=depth,
+                                trace_collector=trace_collector,
+                            )
+                        )
+                    continue
             file_references.append(
                 URLReference(
                     target,

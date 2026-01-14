@@ -9,7 +9,7 @@ from .helpers import (
     DISALLOWED_EXTENSIONS,
     MARKITDOWN_PREFERRED_EXTENSIONS,
     RAW_PREFIX,
-    fetch_gist_filename,
+    fetch_gist_files,
     infer_url_suffix,
     looks_like_text_content_type,
     parse_gist_url,
@@ -31,6 +31,7 @@ class URLReference:
     inject: bool = False
     depth: int = 5
     trace_collector: list = None
+    filename_override: str | None = None
     _bypass_jina: bool = field(default=False, init=False, repr=False)
     _gist_filename: str | None = field(default=None, init=False, repr=False)
 
@@ -38,9 +39,14 @@ class URLReference:
         if self.url.startswith(RAW_PREFIX):
             self.url = self.url[len(RAW_PREFIX):]
             self._bypass_jina = True
-        gist_id = parse_gist_url(self.url)
-        if gist_id:
-            self._gist_filename = fetch_gist_filename(gist_id)
+        if self.filename_override:
+            self._gist_filename = self.filename_override
+        else:
+            gist_id = parse_gist_url(self.url)
+            if gist_id:
+                gist_files = fetch_gist_files(gist_id)
+                if gist_files:
+                    self._gist_filename = gist_files[0][0]
         self.file_content = ""
         self.original_file_content = ""
         self.output = self._get_contents()

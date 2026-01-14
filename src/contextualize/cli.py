@@ -1065,18 +1065,7 @@ def cat_cmd(
                 for path in expanded_paths:
                     add_file_refs([path])
             else:
-                refs.append(
-                    URLReference(
-                        p,
-                        format=format,
-                        label=label,
-                        token_target=token_target,
-                        include_token_count=annotate_tokens,
-                        inject=inject,
-                        depth=5,
-                        trace_collector=injection_trace_items,
-                    )
-                )
+                add_file_refs([p])
         elif use_rev:
             base_path, symbols = split_path_and_symbols(p)
             try:

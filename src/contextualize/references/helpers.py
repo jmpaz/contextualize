@@ -254,7 +254,7 @@ def parse_gist_url(url: str) -> str | None:
     return match.group("gist_id") if match else None
 
 
-def fetch_gist_filename(gist_id: str) -> str | None:
+def fetch_gist_files(gist_id: str) -> list[tuple[str, str]] | None:
     import requests
 
     api_url = f"https://api.github.com/gists/{gist_id}"
@@ -270,6 +270,6 @@ def fetch_gist_filename(gist_id: str) -> str | None:
         files = data.get("files", {})
         if not files:
             return None
-        return next(iter(files.keys()))
+        return [(f["filename"], f["raw_url"]) for f in files.values()]
     except Exception:
         return None
