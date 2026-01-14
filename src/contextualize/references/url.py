@@ -8,10 +8,14 @@ from .helpers import (
     DISALLOWED_CONTENT_TYPES,
     DISALLOWED_EXTENSIONS,
     MARKITDOWN_PREFERRED_EXTENSIONS,
+    RAW_PREFIX,
     infer_url_suffix,
     looks_like_text_content_type,
     strip_content_type,
 )
+
+_JINA_HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+_JINA_ENDPOINT = "https://r.jina.ai/"
 
 
 @dataclass
@@ -25,8 +29,12 @@ class URLReference:
     inject: bool = False
     depth: int = 5
     trace_collector: list = None
+    _bypass_jina: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.url.startswith(RAW_PREFIX):
+            self.url = self.url[len(RAW_PREFIX):]
+            self._bypass_jina = True
         self.file_content = ""
         self.original_file_content = ""
         self.output = self._get_contents()
@@ -62,10 +70,78 @@ class URLReference:
             return os.path.splitext(path)[1]
         return self.label
 
+    def _fetch_via_jina(self) -> str:
+        import requests
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Md-Heading-Style": "atx",
+            "X-Md-Bullet-List-Marker": "-",
+        }
+        api_key = os.environ.get("JINA_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        r = requests.post(
+            _JINA_ENDPOINT,
+            json={"url": self.url},
+            headers=headers,
+            timeout=30,
+        )
+        if r.status_code == 429:
+            raise ValueError(
+                f"Jina Reader rate limit exceeded for {self.url}. "
+                "Set JINA_API_KEY for higher limits: https://jina.ai/?sui=apikey"
+            )
+        r.raise_for_status()
+
+        data = r.json()
+        if data.get("code") != 200:
+            raise ValueError(f"Jina Reader error for {self.url}: {data}")
+
+        return data.get("data", {}).get("content", "")
+
     def _get_contents(self) -> str:
         import json
 
         import requests
+
+        try:
+            head_r = requests.head(
+                self.url,
+                timeout=10,
+                headers={"User-Agent": "contextualize"},
+                allow_redirects=True,
+            )
+            head_r.raise_for_status()
+            head_content_type = strip_content_type(
+                head_r.headers.get("Content-Type", "")
+            )
+        except Exception:
+            head_content_type = ""
+
+        use_jina = not self._bypass_jina and head_content_type in _JINA_HTML_TYPES
+
+        if use_jina:
+            text = self._fetch_via_jina()
+            self.original_file_content = text
+            self.file_content = text
+            if self.inject:
+                from ..render.inject import inject_content_in_text
+
+                text = inject_content_in_text(
+                    text, self.depth, self.trace_collector, self.url
+                )
+                self.file_content = text
+            return process_text(
+                text,
+                format=self.format,
+                label=self.get_label(),
+                label_suffix=self.label_suffix,
+                token_target=self.token_target,
+                include_token_count=self.include_token_count,
+            )
 
         r = requests.get(self.url, timeout=30, headers={"User-Agent": "contextualize"})
         r.raise_for_status()

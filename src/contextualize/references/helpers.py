@@ -31,9 +31,12 @@ def split_path_and_symbols(raw_path: str) -> tuple[str, list[str]]:
 _SPEC_OPTION_RE = re.compile(r'(filename|params|root|wrap)=(?:"([^"]*)"|([^"]*))')
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _URL_PREFIXES = ("http://", "https://")
+RAW_PREFIX = "raw:"
 
 
 def is_http_url(value: str) -> bool:
+    if value.startswith(RAW_PREFIX):
+        value = value[len(RAW_PREFIX):]
     return value.startswith(_URL_PREFIXES)
 
 
