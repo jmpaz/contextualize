@@ -57,6 +57,7 @@ class ResolvedItem:
     context_subpath: str
     content: str
     manifest_spec: str
+    alias: str | None = None
 
 
 @dataclass(frozen=True)
@@ -308,11 +309,12 @@ def build_hydration_plan_data(
                 if path_symbols:
                     symbols_spec = _merge_symbols(symbols_spec, path_symbols)
 
+                alias_hint = file_opts.get("alias") or file_opts.get("filename")
                 for item in _resolve_spec_items(
                     raw_spec,
                     base_dir,
                     component_name=comp_name,
-                    filename_hint=file_opts.get("filename"),
+                    alias_hint=alias_hint,
                 ):
                     ranges = range_spec[:] if range_spec else None
                     symbols = symbols_spec[:] if symbols_spec else None
@@ -621,11 +623,12 @@ def _find_global_subpath_prefix(
             raw_spec, file_opts = coerce_file_spec(file_spec)
             raw_spec, _ = split_spec_symbols(raw_spec)
             try:
+                alias_hint = file_opts.get("alias") or file_opts.get("filename")
                 for item in _resolve_spec_items(
                     raw_spec,
                     base_dir,
                     component_name=comp_name,
-                    filename_hint=file_opts.get("filename"),
+                    alias_hint=alias_hint,
                 ):
                     all_subpaths.append(item.context_subpath)
             except (FileNotFoundError, ValueError):
@@ -800,39 +803,39 @@ def _resolve_spec_items(
     base_dir: str,
     *,
     component_name: str,
-    filename_hint: Any | None,
+    alias_hint: Any | None,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
 
     if is_http_url(spec):
         opts = parse_target_spec(spec)
         url = opts.get("target", spec)
-        filename = filename_hint or opts.get("filename")
+        alias = alias_hint or opts.get("filename")
 
         tgt = parse_git_url_target(url)
         if tgt:
-            return _resolve_git_items(tgt, component_name)
+            return _resolve_git_items(tgt, component_name, alias=alias)
 
         gist_id = parse_gist_url(url)
         if gist_id:
             gist_files = fetch_gist_files(gist_id)
             if gist_files:
-                if filename and len(gist_files) == 1:
-                    return [_resolve_gist_item(gist_files[0][1], filename)]
-                elif filename:
+                if alias and len(gist_files) == 1:
+                    return [_resolve_gist_item(gist_files[0][1], alias)]
+                elif alias:
                     return [
-                        _resolve_gist_item(raw_url, f"{filename}-{fname}")
+                        _resolve_gist_item(raw_url, f"{alias}-{fname}")
                         for fname, raw_url in gist_files
                     ]
                 return [
                     _resolve_gist_item(raw_url, fname) for fname, raw_url in gist_files
                 ]
 
-        return [_resolve_http_item(url, filename)]
+        return [_resolve_http_item(url, alias)]
 
     tgt = parse_git_target(spec)
     if tgt:
-        return _resolve_git_items(tgt, component_name)
+        return _resolve_git_items(tgt, component_name, alias=alias_hint)
 
     base = "" if os.path.isabs(spec) else base_dir
     paths = expand_git_paths(base, spec)
@@ -861,7 +864,9 @@ def _resolve_spec_items(
     return resolved
 
 
-def _resolve_git_items(tgt, component_name: str) -> list[ResolvedItem]:
+def _resolve_git_items(
+    tgt, component_name: str, *, alias: Any | None = None
+) -> list[ResolvedItem]:
     repo_dir = ensure_repo(tgt)
     if tgt.path:
         paths = expand_git_paths(repo_dir, tgt.path)
@@ -888,15 +893,16 @@ def _resolve_git_items(tgt, component_name: str) -> list[ResolvedItem]:
                     context_subpath=rel_path,
                     content=ref.file_content,
                     manifest_spec=manifest_spec,
+                    alias=alias if isinstance(alias, str) else None,
                 )
             )
     return resolved
 
 
-def _resolve_http_item(url: str, filename_hint: Any | None) -> ResolvedItem:
+def _resolve_http_item(url: str, alias: Any | None) -> ResolvedItem:
     url_ref = URLReference(url, format="raw")
     origin, url_path = _split_url_path(url)
-    context_path = _apply_filename_hint(url_path, filename_hint)
+    context_path = _apply_filename_hint(url_path, alias)
     return ResolvedItem(
         source_type="http",
         source_ref=origin,
@@ -905,6 +911,7 @@ def _resolve_http_item(url: str, filename_hint: Any | None) -> ResolvedItem:
         context_subpath=context_path,
         content=url_ref.file_content,
         manifest_spec=url,
+        alias=alias if isinstance(alias, str) else None,
     )
 
 
@@ -1151,7 +1158,7 @@ def _build_external_path(
     if item.source_type == "git":
         return (
             prefix
-            / _build_git_external_root(item.source_ref, item.source_rev)
+            / _build_git_external_root(item.source_ref, item.source_rev, item.alias)
             / subpath
         )
     return (
@@ -1192,7 +1199,15 @@ def _pick_http_leaf(source_path: str) -> str:
     return name
 
 
-def _build_git_external_root(source_ref: str, source_rev: str | None) -> Path:
+def _build_git_external_root(
+    source_ref: str, source_rev: str | None, alias: str | None = None
+) -> Path:
+    if alias:
+        slug = alias
+        if source_rev:
+            slug = f"{slug}@{_format_rev_for_path(source_rev)}"
+        slug = _sanitize_path_segment(slug, fallback="repo")
+        return Path(slug)
     _, host, repo_path = _parse_git_source_ref(source_ref)
     repo_parts = [part for part in repo_path.split("/") if part]
     if repo_parts:
