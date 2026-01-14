@@ -445,7 +445,14 @@ def _resolve_context_config(
     if access not in {"read-only", "writable"}:
         raise ValueError("context access must be 'read-only' or 'writable'")
 
-    raw_dir_value = overrides.context_dir or context_cfg.get("dir") or ".context"
+    raw_dir_value = overrides.context_dir or context_cfg.get("dir")
+    if not raw_dir_value:
+        manifest_name = cfg.get("name")
+        if manifest_name:
+            _validate_manifest_name(manifest_name)
+            raw_dir_value = f".context/{manifest_name}"
+        else:
+            raw_dir_value = ".context"
     dir_value = str(raw_dir_value)
     dir_path = Path(os.path.expanduser(dir_value))
     if not dir_path.is_absolute():
@@ -518,6 +525,15 @@ def _validate_agent_filename(name: str) -> None:
         raise ValueError("Agent filename must be a non-empty name")
     if "/" in name or "\\" in name:
         raise ValueError("Agent filename must not contain path separators")
+
+
+def _validate_manifest_name(name: Any) -> None:
+    if not isinstance(name, str):
+        raise ValueError("config.name must be a string")
+    if not name or name in {".", ".."}:
+        raise ValueError("config.name must be a non-empty name")
+    if "/" in name or "\\" in name:
+        raise ValueError("config.name must not contain path separators")
 
 
 def _assign_component_names(components: list[dict[str, Any]]) -> None:
@@ -808,7 +824,9 @@ def _resolve_spec_items(
                         _resolve_gist_item(raw_url, f"{filename}-{fname}")
                         for fname, raw_url in gist_files
                     ]
-                return [_resolve_gist_item(raw_url, fname) for fname, raw_url in gist_files]
+                return [
+                    _resolve_gist_item(raw_url, fname) for fname, raw_url in gist_files
+                ]
 
         return [_resolve_http_item(url, filename)]
 

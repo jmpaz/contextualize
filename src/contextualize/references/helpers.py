@@ -36,7 +36,7 @@ RAW_PREFIX = "raw:"
 
 def is_http_url(value: str) -> bool:
     if value.startswith(RAW_PREFIX):
-        value = value[len(RAW_PREFIX):]
+        value = value[len(RAW_PREFIX) :]
     return value.startswith(_URL_PREFIXES)
 
 

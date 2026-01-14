@@ -37,7 +37,7 @@ class URLReference:
 
     def __post_init__(self) -> None:
         if self.url.startswith(RAW_PREFIX):
-            self.url = self.url[len(RAW_PREFIX):]
+            self.url = self.url[len(RAW_PREFIX) :]
             self._bypass_jina = True
         if self.filename_override:
             self._gist_filename = self.filename_override
