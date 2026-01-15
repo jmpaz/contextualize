@@ -13,6 +13,7 @@ _DEFAULT_KEYS = {
     "link-depth",
     "link-scope",
     "link-skip",
+    "strip-paths",
 }
 _GROUP_KEYS = {"group", "components", *_DEFAULT_KEYS}
 

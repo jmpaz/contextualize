@@ -351,6 +351,20 @@ def build_hydration_plan_data(
                         )
                     )
 
+            comp_strip = comp.get("strip-paths", False)
+
+            if context_cfg["path_strategy"] == "by-component" and comp_strip:
+                all_subpaths = [
+                    item.context_subpath
+                    for item, *_ in resolved_items
+                    if item.source_type in ("local", "git")
+                ]
+                effective_strip_prefix = _find_common_subpath_prefix(all_subpaths)
+                skip_external_root = True
+            else:
+                effective_strip_prefix = global_strip_prefix
+                skip_external_root = False
+
             for (
                 item,
                 content,
@@ -372,7 +386,8 @@ def build_hydration_plan_data(
                     symbols,
                     component_root=component_root,
                     use_external_root=use_external_root,
-                    strip_prefix=global_strip_prefix,
+                    strip_prefix=effective_strip_prefix,
+                    skip_external_root=skip_external_root,
                 )
                 if should_write:
                     files_to_write.append((context_dir / rel_path, content))
@@ -1022,6 +1037,7 @@ def _resolve_context_path(
     component_root: Path | None = None,
     use_external_root: bool,
     strip_prefix: Path | None = None,
+    skip_external_root: bool = False,
 ) -> tuple[Path, bool]:
     rel_path = _build_base_context_path(
         component_name,
@@ -1031,6 +1047,7 @@ def _resolve_context_path(
         component_root,
         use_external_root,
         strip_prefix,
+        skip_external_root,
     )
     _ensure_relative(rel_path)
 
@@ -1064,6 +1081,7 @@ def _build_base_context_path(
     component_root: Path | None = None,
     use_external_root: bool = True,
     strip_prefix: Path | None = None,
+    skip_external_root: bool = False,
 ) -> Path:
     if item.source_type == "local":
         subpath = _split_subpath(item.context_subpath)
@@ -1083,7 +1101,10 @@ def _build_base_context_path(
             subpath = _split_subpath(item.context_subpath)
             if path_strategy == "by-component":
                 subpath = _strip_subpath_prefix(subpath, strip_prefix)
-            ext_path = _build_external_path(item, subpath, use_external_root)
+            if skip_external_root:
+                ext_path = subpath
+            else:
+                ext_path = _build_external_path(item, subpath, use_external_root)
         rel_path = (
             ext_path
             if path_strategy == "on-disk"
