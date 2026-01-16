@@ -784,6 +784,12 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     is_flag=True,
     help="Overwrite existing context directory without prompting (default: false)",
 )
+@click.option(
+    "--copy",
+    "copy_files",
+    is_flag=True,
+    help="Copy files instead of symlinking (default: symlink)",
+)
 @click.pass_context
 def hydrate_cmd(
     ctx,
@@ -795,6 +801,7 @@ def hydrate_cmd(
     agents_prompt,
     omit_meta,
     overwrite,
+    copy_files,
 ):
     """
     Materialize a provided YAML manifest into a context folder.
@@ -830,6 +837,7 @@ def hydrate_cmd(
         agents_prompt=prompt_value,
         agents_filenames=tuple(agents_filenames),
         omit_meta=omit_meta,
+        copy=copy_files,
     )
     cwd = os.getcwd()
     data = None

@@ -39,6 +39,7 @@ class HydrateOverrides:
     agents_prompt: str | None = None
     agents_filenames: tuple[str, ...] = ()
     omit_meta: bool = False
+    copy: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,12 +60,14 @@ class ResolvedItem:
     content: str
     manifest_spec: str
     alias: str | None = None
+    source_full_path: str | None = None
 
 
 @dataclass(frozen=True)
 class HydratePlan:
     context_dir: Path
     files_to_write: list[tuple[Path, str]]
+    files_to_symlink: list[tuple[Path, Path]]
     used_paths: set[str]
     component_count: int
     include_meta: bool
@@ -73,10 +76,13 @@ class HydratePlan:
 
 def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
     _write_files(plan.files_to_write)
+    _create_symlinks(plan.files_to_symlink)
     if plan.access == "read-only":
         _apply_read_only(plan.context_dir)
 
-    file_count = len({path.as_posix() for path, _ in plan.files_to_write})
+    written_paths = {path.as_posix() for path, _ in plan.files_to_write}
+    symlinked_paths = {path.as_posix() for path, _ in plan.files_to_symlink}
+    file_count = len(written_paths | symlinked_paths)
     return HydrateResult(
         context_dir=str(plan.context_dir),
         component_count=plan.component_count,
@@ -91,7 +97,9 @@ def plan_matches_existing(plan: HydratePlan) -> bool:
         return False
 
     expected_hashes: dict[str, tuple[int, str]] = {}
+    expected_symlinks: dict[str, Path] = {}
     expected_dirs: set[str] = set()
+
     for path, content in plan.files_to_write:
         rel = path.relative_to(context_dir).as_posix()
         data = content.encode("utf-8")
@@ -99,37 +107,58 @@ def plan_matches_existing(plan: HydratePlan) -> bool:
         expected_hashes[rel] = (len(data), digest)
         _collect_parent_dirs(rel, expected_dirs)
 
+    for dest, source in plan.files_to_symlink:
+        rel = dest.relative_to(context_dir).as_posix()
+        expected_symlinks[rel] = source.resolve()
+        _collect_parent_dirs(rel, expected_dirs)
+
+    all_expected_files = set(expected_hashes.keys()) | set(expected_symlinks.keys())
+
     seen_files: set[str] = set()
-    for root, dirs, files in os.walk(context_dir):
+    for root, dirs, files in os.walk(context_dir, followlinks=False):
         rel_root = os.path.relpath(root, context_dir)
         if rel_root != "." and rel_root not in expected_dirs:
             return False
         for name in files:
             file_path = Path(root) / name
             rel_file = file_path.relative_to(context_dir).as_posix()
-            expected = expected_hashes.get(rel_file)
-            if expected is None:
-                return False
-            size, digest = expected
-            try:
-                if file_path.stat().st_size != size:
+
+            if rel_file in expected_symlinks:
+                if not file_path.is_symlink():
                     return False
-            except OSError:
+                try:
+                    target = file_path.resolve()
+                except OSError:
+                    return False
+                if target != expected_symlinks[rel_file]:
+                    return False
+                seen_files.add(rel_file)
+            elif rel_file in expected_hashes:
+                if file_path.is_symlink():
+                    return False
+                size, digest = expected_hashes[rel_file]
+                try:
+                    if file_path.stat().st_size != size:
+                        return False
+                except OSError:
+                    return False
+                if _hash_file(file_path) != digest:
+                    return False
+                seen_files.add(rel_file)
+            else:
                 return False
-            if _hash_file(file_path) != digest:
-                return False
-            seen_files.add(rel_file)
         for name in dirs:
             dir_path = Path(root) / name
             rel_dir = dir_path.relative_to(context_dir).as_posix()
             if rel_dir not in expected_dirs:
                 return False
 
-    if seen_files != set(expected_hashes.keys()):
+    if seen_files != all_expected_files:
         return False
 
     if plan.access == "read-only":
-        if not _all_read_only(context_dir, expected_dirs, set(expected_hashes.keys())):
+        writable_files = set(expected_hashes.keys())
+        if not _all_read_only(context_dir, expected_dirs, writable_files):
             return False
 
     return True
@@ -229,6 +258,7 @@ def build_hydration_plan_data(
     used_paths: set[str] = set()
     identity_paths: dict[tuple[Any, ...], Path] = {}
     files_to_write: list[tuple[Path, str]] = []
+    files_to_symlink: list[tuple[Path, Path]] = []
     index_components: dict[str, list[dict[str, Any]]] = {}
     normalized_components: list[dict[str, Any]] = []
 
@@ -399,7 +429,19 @@ def build_hydration_plan_data(
                     skip_external_root=skip_external_root,
                 )
                 if should_write:
-                    files_to_write.append((context_dir / rel_path, content))
+                    can_symlink = (
+                        not context_cfg["copy"]
+                        and item.source_type == "local"
+                        and item.source_full_path
+                        and not ranges
+                        and not symbols
+                    )
+                    if can_symlink:
+                        files_to_symlink.append(
+                            (context_dir / rel_path, Path(item.source_full_path))
+                        )
+                    else:
+                        files_to_write.append((context_dir / rel_path, content))
                 index_components.setdefault(comp_name, []).append(
                     _build_index_entry(
                         rel_path,
@@ -439,6 +481,7 @@ def build_hydration_plan_data(
     return HydratePlan(
         context_dir=context_dir,
         files_to_write=files_to_write,
+        files_to_symlink=files_to_symlink,
         used_paths=used_paths,
         component_count=len(components),
         include_meta=context_cfg["include_meta"],
@@ -513,6 +556,7 @@ def _resolve_context_config(
         "agents_text": agents_text,
         "agents_files": agents_files,
         "gitignore": gitignore_value,
+        "copy": overrides.copy,
     }
 
 
@@ -901,6 +945,7 @@ def _resolve_spec_items(
                     context_subpath=rel_path,
                     content=ref.file_content,
                     manifest_spec=rel_path,
+                    source_full_path=ref.path,
                 )
             )
     return resolved
@@ -1414,6 +1459,12 @@ def _write_files(files: list[tuple[Path, str]]) -> None:
     for path, content in files:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+
+def _create_symlinks(links: list[tuple[Path, Path]]) -> None:
+    for dest, source in links:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.symlink_to(source.resolve())
 
 
 def _apply_read_only(root: Path) -> None:
