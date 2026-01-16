@@ -985,17 +985,22 @@ def _resolve_spec_items(
     paths = expand_git_paths(base, spec)
     resolved: list[ResolvedItem] = []
 
-    ignore_patterns = None
-    if gitignore:
-        repo_root = get_repo_root(base_dir)
-        if repo_root:
-            ignore_patterns = read_gitignore_patterns(repo_root)
+    ignore_cache: dict[str, list[str] | None] = {}
 
     for full in paths:
         if not os.path.exists(full):
             raise FileNotFoundError(
                 f"Component '{component_name}' path not found: {full}"
             )
+
+        ignore_patterns = None
+        if gitignore:
+            repo_root = get_repo_root(full)
+            cache_key = repo_root or ""
+            if cache_key not in ignore_cache:
+                ignore_cache[cache_key] = read_gitignore_patterns(repo_root)
+            ignore_patterns = ignore_cache[cache_key]
+
         refs = create_file_references(
             [full], ignore_patterns=ignore_patterns, format="raw", text_only=True
         )["refs"]

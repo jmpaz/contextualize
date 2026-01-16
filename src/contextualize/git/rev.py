@@ -21,12 +21,47 @@ def get_repo_root(start_path: str) -> Optional[str]:
         return None
 
 
-def read_gitignore_patterns(repo_root: str) -> List[str]:
-    gitignore_path = os.path.join(repo_root, ".gitignore")
-    if not os.path.isfile(gitignore_path):
-        return []
-    with open(gitignore_path, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+def read_gitignore_patterns(repo_root: Optional[str] = None) -> List[str]:
+    patterns: List[str] = []
+
+    for path in _get_gitignore_paths(repo_root):
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        patterns.append(line)
+
+    return patterns
+
+
+def _get_gitignore_paths(repo_root: Optional[str]) -> List[str]:
+    paths: List[str] = []
+
+    if repo_root:
+        paths.append(os.path.join(repo_root, ".gitignore"))
+        paths.append(os.path.join(repo_root, ".git", "info", "exclude"))
+
+    global_excludes = _get_global_excludes_path()
+    if global_excludes:
+        paths.append(global_excludes)
+
+    return paths
+
+
+def _get_global_excludes_path() -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "config", "--global", "core.excludesFile"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return os.path.expanduser(result.stdout.strip())
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    return None
 
 
 def _to_rel(repo_root: str, p: str) -> str:
