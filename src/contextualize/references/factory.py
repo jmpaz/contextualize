@@ -29,6 +29,7 @@ def create_file_references(
     inject=False,
     depth=5,
     trace_collector=None,
+    text_only=False,
 ):
     """
     Build a list of file references from the specified paths.
@@ -56,10 +57,22 @@ def create_file_references(
     ignored_folders = {}
     dirs_with_non_ignored_files = set()
     default_ignore_patterns = [
-        ".gitignore",
         ".git/",
+        ".gitignore",
+        ".venv/",
+        "venv/",
         "__pycache__/",
         "__init__.py",
+        ".tox/",
+        ".pytest_cache/",
+        ".mypy_cache/",
+        ".ruff_cache/",
+        "*.egg-info/",
+        ".gradle/",
+        ".cache/",
+        "node_modules/",
+        "target/",
+        "vendor/",
     ]
 
     all_ignore_patterns = default_ignore_patterns[:]
@@ -134,9 +147,9 @@ def create_file_references(
                 ):
                     token_count = get_file_token_count(path)
                     ignored_files.append((path, token_count))
-            elif (
-                is_utf8_file(path)
-                or Path(path).suffix.lower() in MARKITDOWN_PREFERRED_EXTENSIONS
+            elif is_utf8_file(path) or (
+                not text_only
+                and Path(path).suffix.lower() in MARKITDOWN_PREFERRED_EXTENSIONS
             ):
                 ranges = None
                 if symbols:
@@ -200,9 +213,9 @@ def create_file_references(
                             if root not in dir_ignored_files:
                                 dir_ignored_files[root] = []
                             dir_ignored_files[root].append((file_path, token_count))
-                    elif (
-                        is_utf8_file(file_path)
-                        or Path(file_path).suffix.lower()
+                    elif is_utf8_file(file_path) or (
+                        not text_only
+                        and Path(file_path).suffix.lower()
                         in MARKITDOWN_PREFERRED_EXTENSIONS
                     ):
                         dirs_with_non_ignored_files.add(root)

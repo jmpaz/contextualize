@@ -80,16 +80,25 @@ class FileReference:
                 with open(self.path, "r", encoding="utf-8") as file:
                     self.file_content = self.original_file_content = file.read()
             except UnicodeDecodeError:
+                if self.format == "raw":
+                    return ""
                 prefer_markitdown = True
             except Exception as e:
                 print(f"Error reading file {self.path}: {str(e)}")
                 return ""
 
         if prefer_markitdown:
-            from ..render.markitdown import convert_path_to_markdown
+            from ..render.markitdown import (
+                MarkItDownConversionError,
+                convert_path_to_markdown,
+            )
 
-            result = convert_path_to_markdown(self.path)
-            self.file_content = self.original_file_content = result.markdown
+            try:
+                result = convert_path_to_markdown(self.path)
+                self.file_content = self.original_file_content = result.markdown
+            except MarkItDownConversionError as e:
+                print(f"Error converting file {self.path}: {e}")
+                return ""
         if self.inject:
             from ..render.inject import inject_content_in_text
 
