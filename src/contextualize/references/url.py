@@ -17,6 +17,7 @@ from .helpers import (
 )
 
 _JINA_HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+_MARKDOWN_CONTENT_TYPES = frozenset({"text/markdown", "text/x-markdown"})
 _JINA_ENDPOINT = "https://r.jina.ai/"
 
 
@@ -120,6 +121,27 @@ class URLReference:
 
         return data.get("data", {}).get("content", "")
 
+    def _try_fetch_markdown(self) -> tuple[str, bool]:
+        import requests
+
+        try:
+            r = requests.get(
+                self.url,
+                timeout=30,
+                headers={
+                    "User-Agent": "contextualize",
+                    "Accept": "text/markdown, text/x-markdown",
+                },
+                allow_redirects=True,
+            )
+            r.raise_for_status()
+            content_type = strip_content_type(r.headers.get("Content-Type", ""))
+            if content_type in _MARKDOWN_CONTENT_TYPES:
+                return r.text, True
+        except Exception:
+            pass
+        return "", False
+
     def _get_contents(self) -> str:
         import json
 
@@ -142,7 +164,8 @@ class URLReference:
         use_jina = not self._bypass_jina and head_content_type in _JINA_HTML_TYPES
 
         if use_jina:
-            text = self._fetch_via_jina()
+            md_content, got_markdown = self._try_fetch_markdown()
+            text = md_content if got_markdown else self._fetch_via_jina()
             self.original_file_content = text
             self.file_content = text
             if self.inject:
