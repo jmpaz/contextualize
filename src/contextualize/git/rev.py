@@ -21,6 +21,14 @@ def get_repo_root(start_path: str) -> Optional[str]:
         return None
 
 
+def read_gitignore_patterns(repo_root: str) -> List[str]:
+    gitignore_path = os.path.join(repo_root, ".gitignore")
+    if not os.path.isfile(gitignore_path):
+        return []
+    with open(gitignore_path, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
+
 def _to_rel(repo_root: str, p: str) -> str:
     if not os.path.isabs(p):
         p = os.path.abspath(p)

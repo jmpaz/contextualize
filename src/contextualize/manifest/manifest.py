@@ -14,6 +14,7 @@ _DEFAULT_KEYS = {
     "link-scope",
     "link-skip",
     "strip-paths",
+    "gitignore",
 }
 _GROUP_KEYS = {"group", "components", *_DEFAULT_KEYS}
 

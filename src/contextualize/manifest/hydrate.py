@@ -11,6 +11,7 @@ import shutil
 import stat
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
+from ..git.rev import get_repo_root, read_gitignore_patterns
 from .manifest import (
     GROUP_BASE_KEY,
     GROUP_PATH_KEY,
@@ -249,6 +250,13 @@ def build_hydration_plan_data(
         comp_text = comp.get("text")
         comp_prefix = comp.get("prefix")
         comp_suffix = comp.get("suffix")
+        comp_gitignore_raw = comp.get("gitignore")
+        if comp_gitignore_raw is None:
+            comp_gitignore = context_cfg["gitignore"]
+        elif isinstance(comp_gitignore_raw, bool):
+            comp_gitignore = comp_gitignore_raw
+        else:
+            raise ValueError(f"Component '{comp_name}' gitignore must be a boolean")
         component_root = _build_component_root(
             comp_name,
             comp.get(GROUP_PATH_KEY),
@@ -315,6 +323,7 @@ def build_hydration_plan_data(
                     base_dir,
                     component_name=comp_name,
                     alias_hint=alias_hint,
+                    gitignore=comp_gitignore,
                 ):
                     ranges = range_spec[:] if range_spec else None
                     symbols = symbols_spec[:] if symbols_spec else None
@@ -490,6 +499,11 @@ def _resolve_context_config(
     include_meta = False if overrides.omit_meta else include_meta_value
 
     agents_text, agents_files = _resolve_agents(context_cfg, overrides)
+
+    gitignore_value = context_cfg.get("gitignore", False)
+    if not isinstance(gitignore_value, bool):
+        raise ValueError("gitignore must be a boolean")
+
     return {
         "dir": dir_path,
         "dir_value": dir_value,
@@ -498,6 +512,7 @@ def _resolve_context_config(
         "path_strategy": path_strategy,
         "agents_text": agents_text,
         "agents_files": agents_files,
+        "gitignore": gitignore_value,
     }
 
 
@@ -819,6 +834,7 @@ def _resolve_spec_items(
     *,
     component_name: str,
     alias_hint: Any | None,
+    gitignore: bool = False,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
 
@@ -829,7 +845,9 @@ def _resolve_spec_items(
 
         tgt = parse_git_url_target(url)
         if tgt:
-            return _resolve_git_items(tgt, component_name, alias=alias)
+            return _resolve_git_items(
+                tgt, component_name, alias=alias, gitignore=gitignore
+            )
 
         gist_id = parse_gist_url(url)
         if gist_id:
@@ -850,19 +868,28 @@ def _resolve_spec_items(
 
     tgt = parse_git_target(spec)
     if tgt:
-        return _resolve_git_items(tgt, component_name, alias=alias_hint)
+        return _resolve_git_items(
+            tgt, component_name, alias=alias_hint, gitignore=gitignore
+        )
 
     base = "" if os.path.isabs(spec) else base_dir
     paths = expand_git_paths(base, spec)
     resolved: list[ResolvedItem] = []
+
+    ignore_patterns = None
+    if gitignore:
+        repo_root = get_repo_root(base_dir)
+        if repo_root:
+            ignore_patterns = read_gitignore_patterns(repo_root)
+
     for full in paths:
         if not os.path.exists(full):
             raise FileNotFoundError(
                 f"Component '{component_name}' path not found: {full}"
             )
-        refs = create_file_references([full], ignore_patterns=None, format="raw")[
-            "refs"
-        ]
+        refs = create_file_references(
+            [full], ignore_patterns=ignore_patterns, format="raw", text_only=True
+        )["refs"]
         for ref in refs:
             rel_path = _relative_path(ref.path, base_dir)
             resolved.append(
@@ -880,7 +907,7 @@ def _resolve_spec_items(
 
 
 def _resolve_git_items(
-    tgt, component_name: str, *, alias: Any | None = None
+    tgt, component_name: str, *, alias: Any | None = None, gitignore: bool = False
 ) -> list[ResolvedItem]:
     repo_dir = ensure_repo(tgt)
     if tgt.path:
@@ -888,14 +915,19 @@ def _resolve_git_items(
     else:
         paths = [repo_dir]
     resolved: list[ResolvedItem] = []
+
+    ignore_patterns = None
+    if gitignore:
+        ignore_patterns = read_gitignore_patterns(repo_dir)
+
     for full in paths:
         if not os.path.exists(full):
             raise FileNotFoundError(
                 f"Component '{component_name}' path not found: {full}"
             )
-        refs = create_file_references([full], ignore_patterns=None, format="raw")[
-            "refs"
-        ]
+        refs = create_file_references(
+            [full], ignore_patterns=ignore_patterns, format="raw", text_only=True
+        )["refs"]
         for ref in refs:
             rel_path = _relative_path(ref.path, repo_dir)
             manifest_spec = _format_git_spec(tgt.repo_url, tgt.rev, rel_path)
