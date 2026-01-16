@@ -1138,8 +1138,8 @@ def _apply_filename_hint(path: str, filename_hint: Any | None) -> str:
 
 
 def _relative_path(path: str, root: str) -> str:
-    path_obj = Path(path).resolve()
-    root_obj = Path(root).resolve()
+    path_obj = Path(os.path.abspath(path))
+    root_obj = Path(os.path.abspath(root))
     try:
         rel = path_obj.relative_to(root_obj)
     except ValueError as exc:
