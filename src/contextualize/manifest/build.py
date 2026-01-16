@@ -1,11 +1,14 @@
 """Internal payload building logic."""
 
+from __future__ import annotations
+
 import os
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..render.links import add_markdown_link_refs
-from .manifest import coerce_file_spec, component_selectors, normalize_components
+from .manifest import coerce_file_spec, component_selectors
 from ..references import URLReference, create_file_references
 from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
 from ..utils import wrap_text
@@ -58,6 +61,9 @@ def _wrapped_url_reference(
     inject: bool,
     depth: int,
     label_suffix: str | None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
 ) -> _SimpleReference:
     url_ref = URLReference(
         url,
@@ -65,6 +71,9 @@ def _wrapped_url_reference(
         label=filename or url,
         inject=inject,
         depth=depth,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
     )
     label = filename or url
     if label_suffix:
@@ -178,6 +187,9 @@ def _resolve_spec_to_seed_refs(
     depth: int,
     component_name: str,
     label_suffix: str | None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
 ) -> List[Any]:
     """Resolve a single file/url/git spec into a list of seed refs."""
     spec = os.path.expanduser(raw_spec)
@@ -206,6 +218,9 @@ def _resolve_spec_to_seed_refs(
                     label_suffix=label_suffix,
                     inject=inject,
                     depth=depth,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
                 )["refs"]
                 seed_refs.extend(refs)
         else:
@@ -217,6 +232,9 @@ def _resolve_spec_to_seed_refs(
                     inject=inject,
                     depth=depth,
                     label_suffix=label_suffix,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
                 )
             )
         return seed_refs
@@ -329,6 +347,9 @@ def build_payload_impl(
     map_mode: bool = False,
     map_keys: list[str] | None = None,
     token_target: str = "cl100k_base",
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
 ):
     parts: List[str] = []
     all_input_refs = []
@@ -448,6 +469,9 @@ def build_payload_impl(
                 depth=depth,
                 component_name=name,
                 label_suffix=item_comment,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
             )
 
             input_refs_for_comp.extend([r for r in seed_refs if hasattr(r, "path")])

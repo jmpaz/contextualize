@@ -1,7 +1,10 @@
 """Factory function for resolving targets into references."""
 
+from __future__ import annotations
+
 import os
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 from ..utils import brace_expand, count_tokens
@@ -30,6 +33,9 @@ def create_file_references(
     depth=5,
     trace_collector=None,
     text_only=False,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
 ):
     """
     Build a list of file references from the specified paths.
@@ -122,6 +128,9 @@ def create_file_references(
                                 inject=inject,
                                 depth=depth,
                                 trace_collector=trace_collector,
+                                use_cache=use_cache,
+                                cache_ttl=cache_ttl,
+                                refresh_cache=refresh_cache,
                             )
                         )
                     continue
@@ -136,6 +145,9 @@ def create_file_references(
                     inject=inject,
                     depth=depth,
                     trace_collector=trace_collector,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
                 )
             )
         elif os.path.isfile(path):

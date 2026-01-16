@@ -8,7 +8,6 @@ from ..utils import count_tokens
 from .helpers import (
     DISALLOWED_EXTENSIONS,
     MARKITDOWN_PREFERRED_EXTENSIONS,
-    is_utf8_file,
     resolve_symbol_ranges,
 )
 

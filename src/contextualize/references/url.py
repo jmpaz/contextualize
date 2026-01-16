@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
+from datetime import timedelta
 from urllib.parse import urlparse
 
 from ..render.text import process_text
@@ -33,8 +36,12 @@ class URLReference:
     depth: int = 5
     trace_collector: list = None
     filename_override: str | None = None
+    use_cache: bool = True
+    cache_ttl: timedelta | None = None
+    refresh_cache: bool = False
     _bypass_jina: bool = field(default=False, init=False, repr=False)
     _gist_filename: str | None = field(default=None, init=False, repr=False)
+    _content_type: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.url.startswith(RAW_PREFIX):
@@ -143,6 +150,47 @@ class URLReference:
         return "", False
 
     def _get_contents(self) -> str:
+        if self.use_cache and not self.refresh_cache:
+            from ..cache import get_cached
+
+            cached = get_cached(self.url, self.cache_ttl)
+            if cached is not None:
+                self.original_file_content = cached
+                self.file_content = cached
+                text = cached
+                if self.inject:
+                    from ..render.inject import inject_content_in_text
+
+                    text = inject_content_in_text(
+                        text, self.depth, self.trace_collector, self.url
+                    )
+                    self.file_content = text
+                return process_text(
+                    text,
+                    format=self.format,
+                    label=self.get_label(),
+                    label_suffix=self.label_suffix,
+                    token_target=self.token_target,
+                    include_token_count=self.include_token_count,
+                )
+
+        text = self._fetch_content()
+
+        if self.use_cache:
+            from ..cache import store_cached
+
+            store_cached(self.url, text, self._content_type)
+
+        return process_text(
+            text,
+            format=self.format,
+            label=self.get_label(),
+            label_suffix=self.label_suffix,
+            token_target=self.token_target,
+            include_token_count=self.include_token_count,
+        )
+
+    def _fetch_content(self) -> str:
         import json
 
         import requests
@@ -161,6 +209,7 @@ class URLReference:
         except Exception:
             head_content_type = ""
 
+        self._content_type = head_content_type
         use_jina = not self._bypass_jina and head_content_type in _JINA_HTML_TYPES
 
         if use_jina:
@@ -175,18 +224,12 @@ class URLReference:
                     text, self.depth, self.trace_collector, self.url
                 )
                 self.file_content = text
-            return process_text(
-                text,
-                format=self.format,
-                label=self.get_label(),
-                label_suffix=self.label_suffix,
-                token_target=self.token_target,
-                include_token_count=self.include_token_count,
-            )
+            return text
 
         r = requests.get(self.url, timeout=30, headers={"User-Agent": "contextualize"})
         r.raise_for_status()
         content_type = strip_content_type(r.headers.get("Content-Type", ""))
+        self._content_type = content_type
         suffix = infer_url_suffix(self.url, dict(r.headers))
         if (suffix and suffix in DISALLOWED_EXTENSIONS) or (
             content_type in DISALLOWED_CONTENT_TYPES
@@ -225,14 +268,7 @@ class URLReference:
                 text, self.depth, self.trace_collector, self.url
             )
         self.file_content = text
-        return process_text(
-            text,
-            format=self.format,
-            label=self.get_label(),
-            label_suffix=self.label_suffix,
-            token_target=self.token_target,
-            include_token_count=self.include_token_count,
-        )
+        return text
 
     def get_contents(self) -> str:
         return self.output
@@ -248,6 +284,9 @@ def create_url_reference(
     inject: bool = False,
     depth: int = 5,
     trace_collector=None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
 ) -> URLReference:
     return URLReference(
         url=url,
@@ -259,4 +298,7 @@ def create_url_reference(
         inject=inject,
         depth=depth,
         trace_collector=trace_collector,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
     )

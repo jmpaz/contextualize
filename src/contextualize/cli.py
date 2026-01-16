@@ -569,8 +569,36 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     multiple=True,
     help="Exclude named components or groups from the manifest output.",
 )
+@click.option(
+    "--cache/--no-cache",
+    "use_cache",
+    default=True,
+    help="Enable/disable URL caching (default: enabled)",
+)
+@click.option(
+    "--refresh",
+    "refresh_cache",
+    is_flag=True,
+    help="Force refresh all cached URLs",
+)
+@click.option(
+    "--cache-ttl",
+    type=str,
+    help="Cache TTL (e.g., 7d, 24h, 1w)",
+)
 @click.pass_context
-def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_components):
+def payload_cmd(
+    ctx,
+    manifest_path,
+    inject,
+    trace,
+    exclude,
+    map_mode,
+    map_components,
+    use_cache,
+    refresh_cache,
+    cache_ttl,
+):
     """
     Render a context payload from a manifest.
     If no path is given and stdin is piped, read the manifest from stdin.
@@ -581,6 +609,15 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
     """
     ctx.obj["format"] = "md"  # for segmentation
     token_target = ctx.obj.get("token_target", "cl100k_base")
+
+    parsed_cache_ttl = None
+    if cache_ttl is not None:
+        from .cache import parse_duration
+
+        try:
+            parsed_cache_ttl = parse_duration(cache_ttl)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
 
     def parse_keys(values):
         keys = []
@@ -623,6 +660,9 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
                 map_mode=map_mode,
                 map_keys=map_keys_list,
                 token_target=token_target,
+                use_cache=use_cache,
+                cache_ttl=parsed_cache_ttl,
+                refresh_cache=refresh_cache,
             )
         except (MarkItDownConversionError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -679,6 +719,9 @@ def payload_cmd(ctx, manifest_path, inject, trace, exclude, map_mode, map_compon
             map_mode=map_mode,
             map_keys=map_keys_list,
             token_target=token_target,
+            use_cache=use_cache,
+            cache_ttl=parsed_cache_ttl,
+            refresh_cache=refresh_cache,
         )
         payload_content = result.payload
         input_refs = result.input_refs
@@ -790,6 +833,23 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     is_flag=True,
     help="Copy files instead of symlinking (default: symlink)",
 )
+@click.option(
+    "--cache/--no-cache",
+    "use_cache",
+    default=None,
+    help="Enable/disable URL caching (default: enabled)",
+)
+@click.option(
+    "--refresh",
+    "refresh_cache",
+    is_flag=True,
+    help="Force refresh all cached URLs",
+)
+@click.option(
+    "--cache-ttl",
+    type=str,
+    help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
+)
 @click.pass_context
 def hydrate_cmd(
     ctx,
@@ -802,6 +862,9 @@ def hydrate_cmd(
     omit_meta,
     overwrite,
     copy_files,
+    use_cache,
+    refresh_cache,
+    cache_ttl,
 ):
     """
     Materialize a provided YAML manifest into a context folder.
@@ -830,6 +893,16 @@ def hydrate_cmd(
 
     access_value = access.lower() if access else None
     path_strategy_value = path_strategy.lower() if path_strategy else None
+
+    parsed_cache_ttl = None
+    if cache_ttl is not None:
+        from .cache import parse_duration
+
+        try:
+            parsed_cache_ttl = parse_duration(cache_ttl)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+
     overrides = HydrateOverrides(
         context_dir=context_dir,
         access=access_value,
@@ -838,6 +911,9 @@ def hydrate_cmd(
         agents_filenames=tuple(agents_filenames),
         omit_meta=omit_meta,
         copy=copy_files,
+        use_cache=use_cache,
+        cache_ttl=parsed_cache_ttl,
+        refresh_cache=refresh_cache,
     )
     cwd = os.getcwd()
     data = None
@@ -948,6 +1024,23 @@ def hydrate_cmd(
     default="all",
     help="Resolve links starting from only the first input ('first') or all inputs ('all').",
 )
+@click.option(
+    "--cache/--no-cache",
+    "use_cache",
+    default=True,
+    help="Enable/disable URL caching (default: enabled)",
+)
+@click.option(
+    "--refresh",
+    "refresh_cache",
+    is_flag=True,
+    help="Force refresh all cached URLs",
+)
+@click.option(
+    "--cache-ttl",
+    type=str,
+    help="Cache TTL (e.g., 7d, 24h, 1w)",
+)
 @click.pass_context
 def cat_cmd(
     ctx,
@@ -965,6 +1058,9 @@ def cat_cmd(
     link_skip,
     trace,
     rev,
+    use_cache,
+    refresh_cache,
+    cache_ttl,
 ):
     """
     Prepare and concatenate file references (raw).
@@ -978,6 +1074,15 @@ def cat_cmd(
         raise click.BadParameter("--max-tokens must be greater than 0")
     ctx.obj["max_tokens"] = max_tokens
 
+    parsed_cache_ttl = None
+    if cache_ttl is not None:
+        from .cache import parse_duration
+
+        try:
+            parsed_cache_ttl = parse_duration(cache_ttl)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+
     if not paths:
         click.echo(ctx.get_help())
         ctx.exit()
@@ -990,7 +1095,6 @@ def cat_cmd(
     from .render.trace import compute_input_token_details, format_trace_output
     from .references import (
         FileReference,
-        URLReference,
         concat_refs,
         create_file_references,
         split_path_and_symbols,
@@ -1016,6 +1120,9 @@ def cat_cmd(
                 inject=inject,
                 depth=5,
                 trace_collector=injection_trace_items,
+                use_cache=use_cache,
+                cache_ttl=parsed_cache_ttl,
+                refresh_cache=refresh_cache,
             )
         except (MarkItDownConversionError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -40,6 +41,9 @@ class HydrateOverrides:
     agents_filenames: tuple[str, ...] = ()
     omit_meta: bool = False
     copy: bool = False
+    use_cache: bool | None = None
+    cache_ttl: timedelta | None = None
+    refresh_cache: bool = False
 
 
 @dataclass(frozen=True)
@@ -354,6 +358,9 @@ def build_hydration_plan_data(
                     component_name=comp_name,
                     alias_hint=alias_hint,
                     gitignore=comp_gitignore,
+                    use_cache=context_cfg["use_cache"],
+                    cache_ttl=context_cfg["cache_ttl"],
+                    refresh_cache=context_cfg["refresh_cache"],
                 ):
                     ranges = range_spec[:] if range_spec else None
                     symbols = symbols_spec[:] if symbols_spec else None
@@ -547,6 +554,29 @@ def _resolve_context_config(
     if not isinstance(gitignore_value, bool):
         raise ValueError("gitignore must be a boolean")
 
+    if overrides.use_cache is not None:
+        use_cache = overrides.use_cache
+    else:
+        use_cache = True
+
+    if overrides.cache_ttl is not None:
+        cache_ttl = overrides.cache_ttl
+    else:
+        raw_ttl = context_cfg.get("cache-ttl")
+        if raw_ttl is not None:
+            from ..cache import parse_duration
+
+            if isinstance(raw_ttl, str):
+                cache_ttl = parse_duration(raw_ttl)
+            elif isinstance(raw_ttl, (int, float)):
+                cache_ttl = timedelta(days=raw_ttl)
+            else:
+                raise ValueError("cache-ttl must be a string or number")
+        else:
+            cache_ttl = None
+
+    refresh_cache = overrides.refresh_cache
+
     return {
         "dir": dir_path,
         "dir_value": dir_value,
@@ -557,6 +587,9 @@ def _resolve_context_config(
         "agents_files": agents_files,
         "gitignore": gitignore_value,
         "copy": overrides.copy,
+        "use_cache": use_cache,
+        "cache_ttl": cache_ttl,
+        "refresh_cache": refresh_cache,
     }
 
 
@@ -879,6 +912,9 @@ def _resolve_spec_items(
     component_name: str,
     alias_hint: Any | None,
     gitignore: bool = False,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
 
@@ -898,17 +934,46 @@ def _resolve_spec_items(
             gist_files = fetch_gist_files(gist_id)
             if gist_files:
                 if alias and len(gist_files) == 1:
-                    return [_resolve_gist_item(gist_files[0][1], alias)]
+                    return [
+                        _resolve_gist_item(
+                            gist_files[0][1],
+                            alias,
+                            use_cache=use_cache,
+                            cache_ttl=cache_ttl,
+                            refresh_cache=refresh_cache,
+                        )
+                    ]
                 elif alias:
                     return [
-                        _resolve_gist_item(raw_url, f"{alias}-{fname}")
+                        _resolve_gist_item(
+                            raw_url,
+                            f"{alias}-{fname}",
+                            use_cache=use_cache,
+                            cache_ttl=cache_ttl,
+                            refresh_cache=refresh_cache,
+                        )
                         for fname, raw_url in gist_files
                     ]
                 return [
-                    _resolve_gist_item(raw_url, fname) for fname, raw_url in gist_files
+                    _resolve_gist_item(
+                        raw_url,
+                        fname,
+                        use_cache=use_cache,
+                        cache_ttl=cache_ttl,
+                        refresh_cache=refresh_cache,
+                    )
+                    for fname, raw_url in gist_files
                 ]
 
-        return [_resolve_http_item(url, alias)]
+        return [
+            _resolve_http_item(
+                url,
+                alias,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+            )
+        ]
 
     tgt = parse_git_target(spec)
     if tgt:
@@ -991,8 +1056,21 @@ def _resolve_git_items(
     return resolved
 
 
-def _resolve_http_item(url: str, alias: Any | None) -> ResolvedItem:
-    url_ref = URLReference(url, format="raw")
+def _resolve_http_item(
+    url: str,
+    alias: Any | None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> ResolvedItem:
+    url_ref = URLReference(
+        url,
+        format="raw",
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
     origin, url_path = _split_url_path(url)
     context_path = _apply_filename_hint(url_path, alias)
     return ResolvedItem(
@@ -1007,8 +1085,21 @@ def _resolve_http_item(url: str, alias: Any | None) -> ResolvedItem:
     )
 
 
-def _resolve_gist_item(raw_url: str, filename: str) -> ResolvedItem:
-    url_ref = URLReference(raw_url, format="raw")
+def _resolve_gist_item(
+    raw_url: str,
+    filename: str,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> ResolvedItem:
+    url_ref = URLReference(
+        raw_url,
+        format="raw",
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
     origin, url_path = _split_url_path(raw_url)
     return ResolvedItem(
         source_type="http",
