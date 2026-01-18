@@ -19,6 +19,7 @@ from .helpers import (
     split_spec_symbols,
 )
 from .url import URLReference
+from .youtube import YouTubeReference, is_youtube_url
 
 
 def create_file_references(
@@ -110,6 +111,25 @@ def create_file_references(
         spec_opts = parse_target_spec(raw_path)
         target = spec_opts.get("target", raw_path)
         path, symbols = split_spec_symbols(target)
+
+        if is_youtube_url(target):
+            file_references.append(
+                YouTubeReference(
+                    target,
+                    format=format,
+                    label=label,
+                    label_suffix=label_suffix,
+                    include_token_count=include_token_count,
+                    token_target=token_target,
+                    inject=inject,
+                    depth=depth,
+                    trace_collector=trace_collector,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                )
+            )
+            continue
 
         if is_http_url(target):
             gist_id = parse_gist_url(target)
