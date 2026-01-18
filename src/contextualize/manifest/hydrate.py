@@ -281,6 +281,7 @@ def build_hydration_plan_data(
     for comp in components:
         comp_name = comp["name"]
         comp_files = comp.get("files")
+        comp_repos = comp.get("repos")
         comp_text = comp.get("text")
         comp_prefix = comp.get("prefix")
         comp_suffix = comp.get("suffix")
@@ -301,6 +302,7 @@ def build_hydration_plan_data(
 
         if (
             not comp_files
+            and not comp_repos
             and comp_text is None
             and comp_prefix is None
             and comp_suffix is None
@@ -327,7 +329,15 @@ def build_hydration_plan_data(
 
         if comp_files is not None and not isinstance(comp_files, list):
             raise ValueError(f"Component '{comp_name}' files must be a list")
+        if comp_repos is not None and not isinstance(comp_repos, list):
+            raise ValueError(f"Component '{comp_name}' repos must be a list")
+
+        all_specs: list[tuple[Any, bool]] = []
         if comp_files:
+            all_specs.extend((spec, False) for spec in comp_files)
+        if comp_repos:
+            all_specs.extend((spec, True) for spec in comp_repos)
+        if all_specs:
             resolved_items: list[
                 tuple[
                     ResolvedItem,
@@ -340,7 +350,7 @@ def build_hydration_plan_data(
                     dict[str, Any],
                 ]
             ] = []
-            for file_spec in comp_files:
+            for file_spec, force_git in all_specs:
                 raw_spec, file_opts = coerce_file_spec(file_spec)
                 spec_comment = _parse_comment(file_opts.pop("comment", None))
                 range_value = file_opts.pop("range", None)
@@ -361,6 +371,7 @@ def build_hydration_plan_data(
                     use_cache=context_cfg["use_cache"],
                     cache_ttl=context_cfg["cache_ttl"],
                     refresh_cache=context_cfg["refresh_cache"],
+                    force_git=force_git,
                 ):
                     ranges = range_spec[:] if range_spec else None
                     symbols = symbols_spec[:] if symbols_spec else None
@@ -723,10 +734,15 @@ def _find_global_subpath_prefix(
     all_subpaths: list[str] = []
     for comp in components:
         comp_name = comp["name"]
-        comp_files = comp.get("files")
-        if not comp_files or not isinstance(comp_files, list):
+        comp_files = comp.get("files") or []
+        comp_repos = comp.get("repos") or []
+        all_specs: list[tuple[Any, bool]] = [
+            *((s, False) for s in comp_files),
+            *((s, True) for s in comp_repos),
+        ]
+        if not all_specs:
             continue
-        for file_spec in comp_files:
+        for file_spec, force_git in all_specs:
             raw_spec, file_opts = coerce_file_spec(file_spec)
             raw_spec, _ = split_spec_symbols(raw_spec)
             try:
@@ -736,6 +752,7 @@ def _find_global_subpath_prefix(
                     base_dir,
                     component_name=comp_name,
                     alias_hint=alias_hint,
+                    force_git=force_git,
                 ):
                     all_subpaths.append(item.context_subpath)
             except (FileNotFoundError, ValueError):
@@ -776,13 +793,18 @@ def _component_external_root(comp: dict[str, Any]) -> str | None:
         return None
     if comp.get("suffix") is not None:
         return None
-    files = comp.get("files")
-    if not files or not isinstance(files, list):
+    files = comp.get("files") or []
+    repos = comp.get("repos") or []
+    all_specs: list[tuple[Any, bool]] = [
+        *((s, False) for s in files),
+        *((s, True) for s in repos),
+    ]
+    if not all_specs:
         return None
     root: str | None = None
-    for file_spec in files:
+    for file_spec, force_git in all_specs:
         raw_spec, _ = coerce_file_spec(file_spec)
-        key = _external_root_key(raw_spec)
+        key = _external_root_key(raw_spec, force_git=force_git)
         if key is None:
             return None
         if root is None:
@@ -792,15 +814,20 @@ def _component_external_root(comp: dict[str, Any]) -> str | None:
     return root
 
 
-def _external_root_key(raw_spec: str) -> str | None:
+def _external_root_key(raw_spec: str, *, force_git: bool = False) -> str | None:
     spec = os.path.expanduser(raw_spec)
     if is_http_url(spec):
         opts = parse_target_spec(spec)
         url = opts.get("target", spec)
-        tgt = parse_git_url_target(url)
+        if force_git:
+            tgt = parse_git_target(url)
+        else:
+            tgt = parse_git_url_target(url)
         if tgt:
             rev = tgt.rev or ""
             return f"git:{tgt.repo_url}@{rev}"
+        if force_git:
+            return None
         return f"http:{_url_origin(url)}"
     tgt = parse_git_target(spec)
     if tgt:
@@ -915,6 +942,7 @@ def _resolve_spec_items(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    force_git: bool = False,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
 
@@ -923,7 +951,10 @@ def _resolve_spec_items(
         url = opts.get("target", spec)
         alias = alias_hint or opts.get("filename")
 
-        tgt = parse_git_url_target(url)
+        if force_git:
+            tgt = parse_git_target(url)
+        else:
+            tgt = parse_git_url_target(url)
         if tgt:
             return _resolve_git_items(
                 tgt, component_name, alias=alias, gitignore=gitignore
