@@ -9,8 +9,9 @@ from typing import Any, Dict, List, Optional
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..render.links import add_markdown_link_refs
 from .manifest import coerce_file_spec, component_selectors
-from ..references import URLReference, create_file_references
+from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
+from ..references.youtube import is_youtube_url
 from ..utils import wrap_text
 
 
@@ -79,6 +80,35 @@ def _wrapped_url_reference(
     if label_suffix:
         label = f"{label} {label_suffix}"
     wrapped = wrap_text(url_ref.output, wrap or "md", label)
+    return _SimpleReference(wrapped)
+
+
+def _wrapped_youtube_reference(
+    url: str,
+    *,
+    filename: Optional[str],
+    wrap: Optional[str],
+    inject: bool,
+    depth: int,
+    label_suffix: str | None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> _SimpleReference:
+    yt_ref = YouTubeReference(
+        url,
+        format="raw",
+        label=filename or url,
+        inject=inject,
+        depth=depth,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+    label = filename or url
+    if label_suffix:
+        label = f"{label} {label_suffix}"
+    wrapped = wrap_text(yt_ref.output, wrap or "md", label)
     return _SimpleReference(wrapped)
 
 
@@ -223,6 +253,20 @@ def _resolve_spec_to_seed_refs(
                     refresh_cache=refresh_cache,
                 )["refs"]
                 seed_refs.extend(refs)
+        elif is_youtube_url(url):
+            seed_refs.append(
+                _wrapped_youtube_reference(
+                    url,
+                    filename=filename,
+                    wrap=wrap,
+                    inject=inject,
+                    depth=depth,
+                    label_suffix=label_suffix,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                )
+            )
         else:
             seed_refs.append(
                 _wrapped_url_reference(

@@ -19,7 +19,8 @@ from .manifest import (
     coerce_file_spec,
     normalize_components,
 )
-from ..references import URLReference, create_file_references
+from ..references import URLReference, YouTubeReference, create_file_references
+from ..references.youtube import extract_video_id, is_youtube_url
 from ..references.helpers import (
     fetch_gist_files,
     is_http_url,
@@ -1016,6 +1017,17 @@ def _resolve_spec_items(
                     for fname, raw_url in gist_files
                 ]
 
+        if is_youtube_url(url):
+            return [
+                _resolve_youtube_item(
+                    url,
+                    alias,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                )
+            ]
+
         return [
             _resolve_http_item(
                 url,
@@ -1136,6 +1148,37 @@ def _resolve_http_item(
         source_path=url_path,
         context_subpath=context_path,
         content=url_ref.file_content,
+        manifest_spec=url,
+        alias=alias if isinstance(alias, str) else None,
+    )
+
+
+def _resolve_youtube_item(
+    url: str,
+    alias: Any | None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> ResolvedItem:
+    video_id = extract_video_id(url)
+    yt_ref = YouTubeReference(
+        url,
+        format="raw",
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+    filename = f"youtube-{video_id}.md"
+    if alias and isinstance(alias, str):
+        filename = alias if alias.endswith(".md") else f"{alias}.md"
+    return ResolvedItem(
+        source_type="youtube",
+        source_ref="youtube.com",
+        source_rev=None,
+        source_path=video_id or url,
+        context_subpath=filename,
+        content=yt_ref.file_content,
         manifest_spec=url,
         alias=alias if isinstance(alias, str) else None,
     )
@@ -1320,8 +1363,8 @@ def _build_base_context_path(
             else (component_root or Path(component_name)) / subpath
         )
     else:
-        if item.source_type == "http":
-            ext_path = _build_http_external_path(item)
+        if item.source_type in ("http", "youtube"):
+            ext_path = Path(item.context_subpath)
             if use_external_root:
                 ext_path = Path("external") / ext_path
         else:
