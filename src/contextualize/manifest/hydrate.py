@@ -332,11 +332,12 @@ def build_hydration_plan_data(
         if comp_repos is not None and not isinstance(comp_repos, list):
             raise ValueError(f"Component '{comp_name}' repos must be a list")
 
-        all_specs: list[tuple[Any, bool]] = []
+        all_specs: list[tuple[Any, bool, str | None]] = []
         if comp_files:
-            all_specs.extend((spec, False) for spec in comp_files)
+            all_specs.extend((spec, False, None) for spec in comp_files)
         if comp_repos:
-            all_specs.extend((spec, True) for spec in comp_repos)
+            for spec, root in _expand_repo_specs(comp_repos):
+                all_specs.append((spec, True, root))
         if all_specs:
             resolved_items: list[
                 tuple[
@@ -348,9 +349,10 @@ def build_hydration_plan_data(
                     list[tuple[int, int]] | None,
                     str | None,
                     dict[str, Any],
+                    str | None,
                 ]
             ] = []
-            for file_spec, force_git in all_specs:
+            for file_spec, force_git, spec_root in all_specs:
                 raw_spec, file_opts = coerce_file_spec(file_spec)
                 spec_comment = _parse_comment(file_opts.pop("comment", None))
                 range_value = file_opts.pop("range", None)
@@ -405,6 +407,7 @@ def build_hydration_plan_data(
                             range_spec,
                             spec_comment,
                             file_opts,
+                            spec_root,
                         )
                     )
 
@@ -431,6 +434,7 @@ def build_hydration_plan_data(
                 range_spec,
                 spec_comment,
                 file_opts,
+                spec_root,
             ) in resolved_items:
                 rel_path, should_write = _resolve_context_path(
                     comp_name,
@@ -445,6 +449,7 @@ def build_hydration_plan_data(
                     use_external_root=use_external_root,
                     strip_prefix=effective_strip_prefix,
                     skip_external_root=skip_external_root,
+                    external_root_prefix=spec_root,
                 )
                 if should_write:
                     can_symlink = (
@@ -697,10 +702,25 @@ def _build_normalized_component(comp: dict[str, Any], name: str) -> dict[str, An
     normalized = {
         k: v
         for k, v in comp.items()
-        if k not in {"files", "name", GROUP_PATH_KEY, GROUP_BASE_KEY} and v is not None
+        if k not in {"files", "repos", "name", GROUP_PATH_KEY, GROUP_BASE_KEY}
+        and v is not None
     }
     normalized["name"] = name
     return normalized
+
+
+def _expand_repo_specs(
+    repos: list[Any],
+) -> list[tuple[Any, str | None]]:
+    result: list[tuple[Any, str | None]] = []
+    for repo_spec in repos:
+        if isinstance(repo_spec, dict) and "items" in repo_spec:
+            root = repo_spec.get("root")
+            for item in repo_spec["items"]:
+                result.append((item, root))
+        else:
+            result.append((repo_spec, None))
+    return result
 
 
 def _find_common_subpath_prefix(subpaths: list[str]) -> Path | None:
@@ -736,13 +756,13 @@ def _find_global_subpath_prefix(
         comp_name = comp["name"]
         comp_files = comp.get("files") or []
         comp_repos = comp.get("repos") or []
-        all_specs: list[tuple[Any, bool]] = [
-            *((s, False) for s in comp_files),
-            *((s, True) for s in comp_repos),
+        all_specs: list[tuple[Any, bool, str | None]] = [
+            *((s, False, None) for s in comp_files),
+            *((s, True, root) for s, root in _expand_repo_specs(comp_repos)),
         ]
         if not all_specs:
             continue
-        for file_spec, force_git in all_specs:
+        for file_spec, force_git, _root in all_specs:
             raw_spec, file_opts = coerce_file_spec(file_spec)
             raw_spec, _ = split_spec_symbols(raw_spec)
             try:
@@ -797,7 +817,7 @@ def _component_external_root(comp: dict[str, Any]) -> str | None:
     repos = comp.get("repos") or []
     all_specs: list[tuple[Any, bool]] = [
         *((s, False) for s in files),
-        *((s, True) for s in repos),
+        *((s, True) for s, _ in _expand_repo_specs(repos)),
     ]
     if not all_specs:
         return None
@@ -1242,6 +1262,7 @@ def _resolve_context_path(
     use_external_root: bool,
     strip_prefix: Path | None = None,
     skip_external_root: bool = False,
+    external_root_prefix: str | None = None,
 ) -> tuple[Path, bool]:
     rel_path = _build_base_context_path(
         component_name,
@@ -1252,6 +1273,7 @@ def _resolve_context_path(
         use_external_root,
         strip_prefix,
         skip_external_root,
+        external_root_prefix,
     )
     _ensure_relative(rel_path)
 
@@ -1286,6 +1308,7 @@ def _build_base_context_path(
     use_external_root: bool = True,
     strip_prefix: Path | None = None,
     skip_external_root: bool = False,
+    external_root_prefix: str | None = None,
 ) -> Path:
     if item.source_type == "local":
         subpath = _split_subpath(item.context_subpath)
@@ -1308,7 +1331,9 @@ def _build_base_context_path(
             if skip_external_root:
                 ext_path = subpath
             else:
-                ext_path = _build_external_path(item, subpath, use_external_root)
+                ext_path = _build_external_path(
+                    item, subpath, use_external_root, external_root_prefix
+                )
         rel_path = (
             ext_path
             if path_strategy == "on-disk"
@@ -1377,9 +1402,14 @@ def _ensure_relative(path: Path) -> None:
 
 
 def _build_external_path(
-    item: ResolvedItem, subpath: Path, use_external_root: bool
+    item: ResolvedItem,
+    subpath: Path,
+    use_external_root: bool,
+    external_root_prefix: str | None = None,
 ) -> Path:
     prefix = Path("external") if use_external_root else Path()
+    if external_root_prefix:
+        prefix = prefix / external_root_prefix
     if item.source_type == "git":
         return (
             prefix
