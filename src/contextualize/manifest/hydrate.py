@@ -20,6 +20,7 @@ from .manifest import (
     normalize_components,
 )
 from ..references import URLReference, YouTubeReference, create_file_references
+from ..references.arena import is_arena_url
 from ..references.youtube import extract_video_id, is_youtube_url
 from ..references.helpers import (
     fetch_gist_files,
@@ -1028,6 +1029,15 @@ def _resolve_spec_items(
                 )
             ]
 
+        if is_arena_url(url):
+            return _resolve_arena_items(
+                url,
+                alias,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+            )
+
         return [
             _resolve_http_item(
                 url,
@@ -1182,6 +1192,99 @@ def _resolve_youtube_item(
         manifest_spec=url,
         alias=alias if isinstance(alias, str) else None,
     )
+
+
+def _resolve_arena_items(
+    url: str,
+    alias: Any | None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> list[ResolvedItem]:
+    from ..references.arena import (
+        _fetch_all_channel_contents,
+        _fetch_block,
+        _render_block,
+        _render_single_block,
+        extract_block_id,
+        extract_channel_slug,
+    )
+
+    block_id = extract_block_id(url)
+    if block_id is not None:
+        block = _fetch_block(block_id)
+        text = _render_single_block(block)
+        filename = f"arena-block-{block_id}.md"
+        if alias and isinstance(alias, str):
+            filename = alias if alias.endswith(".md") else f"{alias}.md"
+        return [
+            ResolvedItem(
+                source_type="arena",
+                source_ref="are.na",
+                source_rev=None,
+                source_path=str(block_id),
+                context_subpath=filename,
+                content=text,
+                manifest_spec=url,
+                alias=alias if isinstance(alias, str) else None,
+            )
+        ]
+
+    slug = extract_channel_slug(url)
+    if not slug:
+        raise ValueError(f"Could not parse Are.na URL: {url}")
+
+    metadata, contents = _fetch_all_channel_contents(slug)
+    items: list[ResolvedItem] = []
+    dir_name = alias if isinstance(alias, str) else f"arena-{slug}"
+
+    def _sanitize(name: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip())
+        return safe.strip("-") or "block"
+
+    def _collect(contents_list: list[dict], subdir: str) -> None:
+        seen_names: set[str] = set()
+        for item in contents_list:
+            if item.get("base_type") == "Channel" or item.get("type") == "Channel":
+                nested_contents = item.get("_nested_contents", [])
+                nested_title = (
+                    item.get("_nested_metadata", {}).get("title")
+                    or item.get("title")
+                    or f"channel-{item.get('id', 'unknown')}"
+                )
+                nested_dir = f"{subdir}/{_sanitize(nested_title)}"
+                _collect(nested_contents, nested_dir)
+                continue
+
+            rendered = _render_block(item)
+            if rendered is None:
+                continue
+
+            title = item.get("title") or f"block-{item.get('id', 'unknown')}"
+            base_name = _sanitize(title)
+            name = base_name
+            counter = 2
+            while name in seen_names:
+                name = f"{base_name}-{counter}"
+                counter += 1
+            seen_names.add(name)
+
+            items.append(
+                ResolvedItem(
+                    source_type="arena",
+                    source_ref="are.na",
+                    source_rev=None,
+                    source_path=f"{slug}/{name}",
+                    context_subpath=f"{subdir}/{name}.md",
+                    content=rendered,
+                    manifest_spec=url,
+                    alias=alias if isinstance(alias, str) else None,
+                )
+            )
+
+    _collect(contents, dir_name)
+    return items
 
 
 def _resolve_gist_item(

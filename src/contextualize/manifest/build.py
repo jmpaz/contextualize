@@ -10,6 +10,7 @@ from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..render.links import add_markdown_link_refs
 from .manifest import coerce_file_spec, component_selectors
 from ..references import URLReference, YouTubeReference, create_file_references
+from ..references.arena import is_arena_url
 from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
 from ..references.youtube import is_youtube_url
 from ..utils import wrap_text
@@ -81,6 +82,66 @@ def _wrapped_url_reference(
         label = f"{label} {label_suffix}"
     wrapped = wrap_text(url_ref.output, wrap or "md", label)
     return _SimpleReference(wrapped)
+
+
+def _wrapped_arena_references(
+    url: str,
+    *,
+    filename: Optional[str],
+    wrap: Optional[str],
+    inject: bool,
+    depth: int,
+    label_suffix: str | None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> list[_SimpleReference]:
+    from ..references.arena import (
+        ArenaReference,
+        extract_channel_slug,
+        extract_block_id,
+        is_arena_channel_url,
+        resolve_channel,
+        _fetch_block,
+    )
+
+    refs = []
+    if is_arena_channel_url(url):
+        slug = extract_channel_slug(url)
+        if slug:
+            metadata, flat_blocks = resolve_channel(
+                slug,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+            )
+            for channel_path, block in flat_blocks:
+                arena_ref = ArenaReference(
+                    url,
+                    block=block,
+                    channel_path=channel_path,
+                    format="raw",
+                    inject=inject,
+                    depth=depth,
+                )
+                label = arena_ref.get_label()
+                if label_suffix:
+                    label = f"{label} {label_suffix}"
+                wrapped = wrap_text(arena_ref.output, wrap or "md", label)
+                refs.append(_SimpleReference(wrapped))
+    else:
+        block_id = extract_block_id(url)
+        if block_id is not None:
+            block = _fetch_block(block_id)
+            arena_ref = ArenaReference(
+                url, block=block, format="raw", inject=inject, depth=depth
+            )
+            label = filename or arena_ref.get_label()
+            if label_suffix:
+                label = f"{label} {label_suffix}"
+            wrapped = wrap_text(arena_ref.output, wrap or "md", label)
+            refs.append(_SimpleReference(wrapped))
+    return refs
 
 
 def _wrapped_youtube_reference(
@@ -256,6 +317,20 @@ def _resolve_spec_to_seed_refs(
         elif is_youtube_url(url):
             seed_refs.append(
                 _wrapped_youtube_reference(
+                    url,
+                    filename=filename,
+                    wrap=wrap,
+                    inject=inject,
+                    depth=depth,
+                    label_suffix=label_suffix,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                )
+            )
+        elif is_arena_url(url):
+            seed_refs.extend(
+                _wrapped_arena_references(
                     url,
                     filename=filename,
                     wrap=wrap,

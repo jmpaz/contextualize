@@ -19,6 +19,7 @@ from .helpers import (
     split_spec_symbols,
 )
 from .url import URLReference
+from .arena import ArenaReference, is_arena_channel_url, is_arena_block_url
 from .youtube import YouTubeReference, is_youtube_url
 
 
@@ -130,6 +131,57 @@ def create_file_references(
                 )
             )
             continue
+
+        if is_arena_channel_url(target):
+            from .arena import extract_channel_slug, resolve_channel, _fetch_block
+
+            slug = extract_channel_slug(target)
+            if slug:
+                metadata, flat_blocks = resolve_channel(
+                    slug,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                )
+                for channel_path, block in flat_blocks:
+                    file_references.append(
+                        ArenaReference(
+                            target,
+                            block=block,
+                            channel_path=channel_path,
+                            format=format,
+                            label=label,
+                            label_suffix=label_suffix,
+                            include_token_count=include_token_count,
+                            token_target=token_target,
+                            inject=inject,
+                            depth=depth,
+                            trace_collector=trace_collector,
+                        )
+                    )
+                continue
+
+        if is_arena_block_url(target):
+            from .arena import extract_block_id, _fetch_block
+
+            block_id = extract_block_id(target)
+            if block_id is not None:
+                block = _fetch_block(block_id)
+                file_references.append(
+                    ArenaReference(
+                        target,
+                        block=block,
+                        format=format,
+                        label=label,
+                        label_suffix=label_suffix,
+                        include_token_count=include_token_count,
+                        token_target=token_target,
+                        inject=inject,
+                        depth=depth,
+                        trace_collector=trace_collector,
+                    )
+                )
+                continue
 
         if is_http_url(target):
             gist_id = parse_gist_url(target)
