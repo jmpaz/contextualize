@@ -1324,6 +1324,7 @@ def _resolve_arena_items(
         _fetch_block,
         _flatten_channel_blocks,
         _render_block,
+        _render_channel_stub,
         _sort_blocks,
         build_arena_settings,
         extract_block_id,
@@ -1372,23 +1373,27 @@ def _resolve_arena_items(
 
     for channel_path, block in flat:
         block_type = block.get("type", "")
-        if block_type == "Channel" or block.get("base_type") == "Channel":
-            continue
+        is_channel = block_type == "Channel" or block.get("base_type") == "Channel"
 
-        rendered = _render_block(
-            block, include_descriptions=settings.include_descriptions
-        )
+        if is_channel:
+            rendered = _render_channel_stub(block)
+        else:
+            rendered = _render_block(
+                block, include_descriptions=settings.include_descriptions
+            )
         if rendered is None:
             continue
 
         bid = block.get("id", "unknown")
+        ch_slug = block.get("slug", "")
+        label = ch_slug or str(bid)
         items.append(
             ResolvedItem(
                 source_type="arena",
                 source_ref="are.na",
                 source_rev=None,
-                source_path=f"{slug}/{bid}",
-                context_subpath=f"{dir_name}/{bid}.md",
+                source_path=f"{slug}/{label}",
+                context_subpath=f"{dir_name}/{label}.md",
                 content=rendered,
                 manifest_spec=url,
                 alias=alias if isinstance(alias, str) else None,
