@@ -13,6 +13,7 @@ ARENA_CACHE_ROOT = Path(
         os.path.expanduser("~/.local/share/contextualize/cache/arena/v1"),
     )
 )
+BLOCK_CACHE_ROOT = ARENA_CACHE_ROOT / "blocks"
 DEFAULT_TTL = timedelta(days=7)
 CACHE_VERSION = 1
 
@@ -105,3 +106,26 @@ def store_channel(
 
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(asdict(metadata), f, indent=2)
+
+
+def _block_cache_key(block_id: int, updated_at: str) -> str:
+    raw = f"{block_id}:{updated_at}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def get_cached_block_render(block_id: int, updated_at: str) -> str | None:
+    key = _block_cache_key(block_id, updated_at)
+    path = BLOCK_CACHE_ROOT / f"{key}.txt"
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def store_block_render(block_id: int, updated_at: str, rendered: str) -> None:
+    BLOCK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    key = _block_cache_key(block_id, updated_at)
+    path = BLOCK_CACHE_ROOT / f"{key}.txt"
+    path.write_text(rendered, encoding="utf-8")

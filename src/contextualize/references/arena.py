@@ -284,10 +284,19 @@ def _render_block_binary(url: str, suffix: str) -> str:
 
 
 def _render_block(block: dict) -> str | None:
+    from ..cache.arena import get_cached_block_render, store_block_render
+
     block_type = block.get("class") or block.get("type", "")
     state = block.get("state")
     if state == "processing" or block_type == "PendingBlock":
         return None
+
+    block_id = block.get("id")
+    updated_at = block.get("updated_at") or ""
+    if block_id and updated_at and block_type in ("Image", "Attachment"):
+        cached = get_cached_block_render(block_id, updated_at)
+        if cached is not None:
+            return cached
 
     title = block.get("title") or ""
     if _get_include_descriptions():
@@ -334,7 +343,10 @@ def _render_block(block: dict) -> str | None:
                 if title:
                     parts.append(title)
                 parts.append(converted)
-                return "\n\n".join(parts)
+                result = "\n\n".join(parts)
+                if block_id and updated_at:
+                    store_block_render(block_id, updated_at, result)
+                return result
         fallback_url = image_urls[0] if image_urls else ""
         parts = [f"[Image: {title or block.get('id')}]"]
         if fallback_url:
@@ -374,7 +386,10 @@ def _render_block(block: dict) -> str | None:
                 if title and title != filename:
                     parts.append(title)
                 parts.append(converted)
-                return "\n\n".join(parts)
+                result = "\n\n".join(parts)
+                if block_id and updated_at:
+                    store_block_render(block_id, updated_at, result)
+                return result
         parts = [f"[Attachment: {filename or title or block.get('id')}]"]
         if content_type:
             parts.append(f"Type: {content_type}")
