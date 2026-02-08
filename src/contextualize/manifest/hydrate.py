@@ -1319,16 +1319,16 @@ def _resolve_arena_items(
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
 ) -> list[ResolvedItem]:
+    from ..cache.arena import get_cached_block_render
     from ..references.arena import (
-        _fetch_all_channel_contents,
         _fetch_block,
-        _flatten_channel_blocks,
+        _log as _arena_log,
         _render_block,
         _render_channel_stub,
-        _sort_blocks,
         build_arena_settings,
         extract_block_id,
         extract_channel_slug,
+        resolve_channel,
     )
 
     settings = build_arena_settings(arena_overrides)
@@ -1360,24 +1360,37 @@ def _resolve_arena_items(
     if not slug:
         raise ValueError(f"Could not parse Are.na URL: {url}")
 
-    metadata, contents = _fetch_all_channel_contents(
+    metadata, flat = resolve_channel(
         slug,
-        max_depth=settings.max_depth,
-        _recurse_users=settings.recurse_users,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+        settings=settings,
     )
-    flat = _flatten_channel_blocks(contents, slug)
-    flat = _sort_blocks(flat, settings.sort_order)
 
     items: list[ResolvedItem] = []
-    dir_name = alias if isinstance(alias, str) else f"arena-{slug}"
+    dir_name = alias if isinstance(alias, str) else slug
 
-    for channel_path, block in flat:
+    total = len(flat)
+    for idx, (channel_path, block) in enumerate(flat, 1):
         block_type = block.get("type", "")
         is_channel = block_type == "Channel" or block.get("base_type") == "Channel"
 
         if is_channel:
             rendered = _render_channel_stub(block)
         else:
+            if block_type in ("Image", "Attachment"):
+                block_id = block.get("id")
+                updated_at = block.get("updated_at") or ""
+                if not (
+                    block_id
+                    and updated_at
+                    and get_cached_block_render(block_id, updated_at) is not None
+                ):
+                    block_title = block.get("title") or f"block-{block_id}"
+                    _arena_log(
+                        f"  rendering {block_type.lower()} ({idx}/{total}): {block_title[:60]}"
+                    )
             rendered = _render_block(
                 block, include_descriptions=settings.include_descriptions
             )
@@ -1678,6 +1691,8 @@ def _build_external_path(
             / _build_git_external_root(item.source_ref, item.source_rev, item.alias)
             / subpath
         )
+    if item.source_type == "arena":
+        return prefix / subpath if prefix.parts else subpath
     return (
         prefix
         / _build_generic_external_root(item.source_type, item.source_ref)
