@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -67,6 +67,10 @@ class ResolvedItem:
     manifest_spec: str
     alias: str | None = None
     source_full_path: str | None = None
+    source_created: str | None = None
+    source_modified: str | None = None
+    dir_created: str | None = None
+    dir_modified: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,11 +82,14 @@ class HydratePlan:
     component_count: int
     include_meta: bool
     access: str
+    file_timestamps: dict[Path, tuple[float, float]] = field(default_factory=dict)
 
 
 def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
     _write_files(plan.files_to_write)
     _create_symlinks(plan.files_to_symlink)
+    if plan.file_timestamps:
+        _apply_timestamps(plan.file_timestamps)
     if plan.access == "read-only":
         _apply_read_only(plan.context_dir)
 
@@ -113,6 +120,7 @@ def build_inline_hydration_plan(
     used_paths: set[str] = set()
     files_to_write: list[tuple[Path, str]] = []
     files_to_symlink: list[tuple[Path, Path]] = []
+    file_timestamps: dict[Path, tuple[float, float]] = {}
 
     expanded: list[str] = []
     for t in targets:
@@ -145,6 +153,12 @@ def build_inline_hydration_plan(
                 )
             else:
                 files_to_write.append((context_dir / rel_path, item.content))
+            file_ts = _item_file_ts(item)
+            if file_ts:
+                file_timestamps[context_dir / rel_path] = file_ts
+            dir_ts = _item_dir_ts(item)
+            if dir_ts:
+                file_timestamps.setdefault((context_dir / rel_path).parent, dir_ts)
 
     return HydratePlan(
         context_dir=context_dir,
@@ -154,6 +168,7 @@ def build_inline_hydration_plan(
         component_count=0,
         include_meta=False,
         access=access,
+        file_timestamps=file_timestamps,
     )
 
 
@@ -327,6 +342,7 @@ def build_hydration_plan_data(
     identity_paths: dict[tuple[Any, ...], Path] = {}
     files_to_write: list[tuple[Path, str]] = []
     files_to_symlink: list[tuple[Path, Path]] = []
+    file_timestamps: dict[Path, tuple[float, float]] = {}
     index_components: dict[str, list[dict[str, Any]]] = {}
     normalized_components: list[dict[str, Any]] = []
 
@@ -530,6 +546,14 @@ def build_hydration_plan_data(
                         )
                     else:
                         files_to_write.append((context_dir / rel_path, content))
+                    file_ts = _item_file_ts(item)
+                    if file_ts:
+                        file_timestamps[context_dir / rel_path] = file_ts
+                    dir_ts = _item_dir_ts(item)
+                    if dir_ts:
+                        file_timestamps.setdefault(
+                            (context_dir / rel_path).parent, dir_ts
+                        )
                 index_components.setdefault(comp_name, []).append(
                     _build_index_entry(
                         rel_path,
@@ -574,6 +598,7 @@ def build_hydration_plan_data(
         component_count=len(components),
         include_meta=context_cfg["include_meta"],
         access=context_cfg["access"],
+        file_timestamps=file_timestamps,
     )
 
 
@@ -1353,6 +1378,8 @@ def _resolve_arena_items(
                 content=text,
                 manifest_spec=url,
                 alias=alias if isinstance(alias, str) else None,
+                source_created=block.get("connected_at") or block.get("created_at"),
+                source_modified=block.get("updated_at"),
             )
         ]
 
@@ -1370,6 +1397,8 @@ def _resolve_arena_items(
 
     items: list[ResolvedItem] = []
     dir_name = alias if isinstance(alias, str) else slug
+    ch_created = metadata.get("created_at")
+    ch_updated = metadata.get("updated_at")
 
     total = len(flat)
     for idx, (channel_path, block) in enumerate(flat, 1):
@@ -1410,6 +1439,10 @@ def _resolve_arena_items(
                 content=rendered,
                 manifest_spec=url,
                 alias=alias if isinstance(alias, str) else None,
+                source_created=block.get("connected_at") or block.get("created_at"),
+                source_modified=block.get("updated_at"),
+                dir_created=ch_created,
+                dir_modified=ch_updated,
             )
         )
 
@@ -1887,6 +1920,61 @@ def _dump_index(data: dict[str, Any]) -> str:
     import json
 
     return json.dumps(data, indent=2, sort_keys=True)
+
+
+def _parse_arena_timestamp(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(iso).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _item_file_ts(item: ResolvedItem) -> tuple[float, float] | None:
+    atime = _parse_arena_timestamp(item.source_created)
+    mtime = _parse_arena_timestamp(item.source_modified)
+    if atime is not None and mtime is not None:
+        return (atime, mtime)
+    if mtime is not None:
+        return (mtime, mtime)
+    if atime is not None:
+        return (atime, atime)
+    return None
+
+
+def _item_dir_ts(item: ResolvedItem) -> tuple[float, float] | None:
+    atime = _parse_arena_timestamp(item.dir_created)
+    mtime = _parse_arena_timestamp(item.dir_modified)
+    if atime is not None and mtime is not None:
+        return (atime, mtime)
+    if mtime is not None:
+        return (mtime, mtime)
+    if atime is not None:
+        return (atime, atime)
+    return None
+
+
+def _apply_timestamps(timestamps: dict[Path, tuple[float, float]]) -> None:
+    files = []
+    dirs = []
+    for path, times in timestamps.items():
+        if path.is_dir():
+            dirs.append((path, times))
+        else:
+            files.append((path, times))
+    for path, (atime, mtime) in files:
+        try:
+            os.utime(path, (atime, mtime))
+        except OSError:
+            pass
+    for path, (atime, mtime) in dirs:
+        try:
+            os.utime(path, (atime, mtime))
+        except OSError:
+            pass
 
 
 def _write_files(files: list[tuple[Path, str]]) -> None:
