@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -256,6 +257,8 @@ def _image_text_tools_available() -> bool:
 @lru_cache(maxsize=1)
 def _get_converter():
     from markitdown import MarkItDown
+
+    logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
     llm_client, llm_model = _build_llm_config()
     if llm_client is None or llm_model is None:
