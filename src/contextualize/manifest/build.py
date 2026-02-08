@@ -95,15 +95,19 @@ def _wrapped_arena_references(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    arena_overrides: dict | None = None,
 ) -> list[_SimpleReference]:
     from ..references.arena import (
         ArenaReference,
-        extract_channel_slug,
+        build_arena_settings,
         extract_block_id,
+        extract_channel_slug,
         is_arena_channel_url,
         resolve_channel,
         _fetch_block,
     )
+
+    settings = build_arena_settings(arena_overrides)
 
     refs = []
     if is_arena_channel_url(url):
@@ -114,6 +118,7 @@ def _wrapped_arena_references(
                 use_cache=use_cache,
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
+                settings=settings,
             )
             for channel_path, block in flat_blocks:
                 arena_ref = ArenaReference(
@@ -123,6 +128,7 @@ def _wrapped_arena_references(
                     format="raw",
                     inject=inject,
                     depth=depth,
+                    include_descriptions=settings.include_descriptions,
                 )
                 label = arena_ref.get_label()
                 if label_suffix:
@@ -134,7 +140,12 @@ def _wrapped_arena_references(
         if block_id is not None:
             block = _fetch_block(block_id)
             arena_ref = ArenaReference(
-                url, block=block, format="raw", inject=inject, depth=depth
+                url,
+                block=block,
+                format="raw",
+                inject=inject,
+                depth=depth,
+                include_descriptions=settings.include_descriptions,
             )
             label = filename or arena_ref.get_label()
             if label_suffix:
@@ -281,8 +292,8 @@ def _resolve_spec_to_seed_refs(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    arena_overrides: dict | None = None,
 ) -> List[Any]:
-    """Resolve a single file/url/git spec into a list of seed refs."""
     spec = os.path.expanduser(raw_spec)
     seed_refs: List[Any] = []
 
@@ -340,6 +351,7 @@ def _resolve_spec_to_seed_refs(
                     use_cache=use_cache,
                     cache_ttl=cache_ttl,
                     refresh_cache=refresh_cache,
+                    arena_overrides=arena_overrides,
                 )
             )
         else:
@@ -469,6 +481,7 @@ def build_payload_impl(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    arena_overrides: dict | None = None,
 ):
     parts: List[str] = []
     all_input_refs = []
@@ -591,6 +604,7 @@ def build_payload_impl(
                 use_cache=use_cache,
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
+                arena_overrides=arena_overrides,
             )
 
             input_refs_for_comp.extend([r for r in seed_refs if hasattr(r, "path")])

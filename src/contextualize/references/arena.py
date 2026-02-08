@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
@@ -157,6 +157,56 @@ def _get_recurse_users() -> set[str] | None:
     if raw.lower() == "all":
         return None
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
+
+
+VALID_SORT_ORDERS = frozenset(
+    {
+        "asc",
+        "desc",
+        "date-asc",
+        "date-desc",
+        "random",
+        "position-asc",
+        "position-desc",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ArenaSettings:
+    max_depth: int = 1
+    sort_order: str = "desc"
+    include_descriptions: bool = True
+    recurse_users: set[str] | None = field(default_factory=lambda: {"self"})
+
+
+def _arena_settings_from_env() -> ArenaSettings:
+    return ArenaSettings(
+        max_depth=_get_max_depth(),
+        sort_order=_get_sort_order(),
+        include_descriptions=_get_include_descriptions(),
+        recurse_users=_get_recurse_users(),
+    )
+
+
+def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
+    env = _arena_settings_from_env()
+    if not overrides:
+        return env
+
+    max_depth = overrides.get("max_depth", env.max_depth)
+    sort_order = overrides.get("sort_order", env.sort_order)
+    include_descriptions = overrides.get(
+        "include_descriptions", env.include_descriptions
+    )
+    recurse_users = overrides.get("recurse_users", env.recurse_users)
+
+    return ArenaSettings(
+        max_depth=max_depth,
+        sort_order=sort_order,
+        include_descriptions=include_descriptions,
+        recurse_users=recurse_users,
+    )
 
 
 def _owner_slug(obj: dict) -> str:
@@ -332,7 +382,9 @@ def _format_block_output(
     return "\n\n".join(parts)
 
 
-def _render_block(block: dict) -> str | None:
+def _render_block(
+    block: dict, *, include_descriptions: bool | None = None
+) -> str | None:
     from ..cache.arena import get_cached_block_render, store_block_render
 
     block_type = block.get("class") or block.get("type", "")
@@ -348,7 +400,9 @@ def _render_block(block: dict) -> str | None:
             return cached
 
     title = block.get("title") or ""
-    if _get_include_descriptions():
+    if include_descriptions is None:
+        include_descriptions = _get_include_descriptions()
+    if include_descriptions:
         raw_desc = block.get("description") or ""
         if isinstance(raw_desc, dict):
             description = raw_desc.get("markdown") or raw_desc.get("plain") or ""
@@ -530,10 +584,13 @@ def resolve_channel(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    settings: ArenaSettings | None = None,
 ) -> tuple[dict, list[tuple[str, dict]]]:
-    max_depth = _get_max_depth()
-    recurse_users = _get_recurse_users()
-    sort_order = _get_sort_order()
+    if settings is None:
+        settings = _arena_settings_from_env()
+    max_depth = settings.max_depth
+    recurse_users = settings.recurse_users
+    sort_order = settings.sort_order
     ru_key = ",".join(sorted(recurse_users)) if recurse_users else "all"
     cache_key = f"{slug}:d={max_depth}:u={ru_key}:s={sort_order}"
 
@@ -547,7 +604,11 @@ def resolve_channel(
             flat = [(path, block) for path, block in data["blocks"]]
             return metadata, flat
 
-    metadata, contents = _fetch_all_channel_contents(slug)
+    metadata, contents = _fetch_all_channel_contents(
+        slug,
+        max_depth=max_depth,
+        _recurse_users=recurse_users,
+    )
     flat = _flatten_channel_blocks(contents, slug)
     flat = _sort_blocks(flat, sort_order)
 
@@ -574,6 +635,7 @@ class ArenaReference:
     inject: bool = False
     depth: int = 5
     trace_collector: list = None
+    include_descriptions: bool | None = None
 
     def __post_init__(self) -> None:
         self.file_content = ""
@@ -621,7 +683,12 @@ class ArenaReference:
             if block_type in ("Image", "Attachment"):
                 block_title = self.block.get("title") or f"block-{self.block.get('id')}"
                 _log(f"  resolving {block_type.lower()}: {block_title[:60]}")
-            text = _render_block(self.block) or ""
+            text = (
+                _render_block(
+                    self.block, include_descriptions=self.include_descriptions
+                )
+                or ""
+            )
 
         self.original_file_content = text
         self.file_content = text

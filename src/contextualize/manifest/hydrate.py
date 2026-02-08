@@ -311,6 +311,8 @@ def build_hydration_plan_data(
         raise ValueError("'components' must be a list")
     components = normalize_components(components)
 
+    arena_overrides = _resolve_arena_config(cfg)
+
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
     context_dir = context_cfg["dir"]
@@ -436,6 +438,7 @@ def build_hydration_plan_data(
                     cache_ttl=context_cfg["cache_ttl"],
                     refresh_cache=context_cfg["refresh_cache"],
                     force_git=force_git,
+                    arena_overrides=arena_overrides,
                 ):
                     ranges = range_spec[:] if range_spec else None
                     symbols = symbols_spec[:] if symbols_spec else None
@@ -694,6 +697,57 @@ def _resolve_agents(
     if not files:
         files = ["AGENTS.md"]
     return text, files
+
+
+def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
+    raw = cfg.get("arena")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("config.arena must be a mapping")
+
+    from ..references.arena import VALID_SORT_ORDERS
+
+    result: dict[str, Any] = {}
+
+    if "max-depth" in raw:
+        val = raw["max-depth"]
+        if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+            raise ValueError("config.arena.max-depth must be a non-negative integer")
+        result["max_depth"] = val
+
+    if "sort" in raw:
+        val = raw["sort"]
+        if not isinstance(val, str) or val.lower().strip() not in VALID_SORT_ORDERS:
+            raise ValueError(
+                f"config.arena.sort must be one of: {', '.join(sorted(VALID_SORT_ORDERS))}"
+            )
+        result["sort_order"] = val.lower().strip()
+
+    if "include-descriptions" in raw:
+        val = raw["include-descriptions"]
+        if not isinstance(val, bool):
+            raise ValueError("config.arena.include-descriptions must be a boolean")
+        result["include_descriptions"] = val
+
+    if "recurse-users" in raw:
+        val = raw["recurse-users"]
+        if isinstance(val, str):
+            val_lower = val.lower().strip()
+            if val_lower == "all":
+                result["recurse_users"] = None
+            elif val_lower in ("self", "author", "owner"):
+                result["recurse_users"] = {val_lower}
+            else:
+                result["recurse_users"] = {val_lower}
+        elif isinstance(val, list):
+            result["recurse_users"] = {str(v).strip().lower() for v in val if v}
+        else:
+            raise ValueError(
+                "config.arena.recurse-users must be a string or list of strings"
+            )
+
+    return result if result else None
 
 
 def _queue_agent_files(
@@ -1025,6 +1079,7 @@ def _resolve_spec_items(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     force_git: bool = False,
+    arena_overrides: dict | None = None,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
 
@@ -1096,6 +1151,7 @@ def _resolve_spec_items(
                 use_cache=use_cache,
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
+                arena_overrides=arena_overrides,
             )
 
         return [
@@ -1261,19 +1317,28 @@ def _resolve_arena_items(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    arena_overrides: dict | None = None,
 ) -> list[ResolvedItem]:
     from ..references.arena import (
         _fetch_all_channel_contents,
         _fetch_block,
+        _flatten_channel_blocks,
         _render_block,
+        _sort_blocks,
+        build_arena_settings,
         extract_block_id,
         extract_channel_slug,
     )
 
+    settings = build_arena_settings(arena_overrides)
+
     block_id = extract_block_id(url)
     if block_id is not None:
         block = _fetch_block(block_id)
-        text = _render_block(block) or ""
+        text = (
+            _render_block(block, include_descriptions=settings.include_descriptions)
+            or ""
+        )
         filename = f"arena-block-{block_id}.md"
         if alias and isinstance(alias, str):
             filename = alias if alias.endswith(".md") else f"{alias}.md"
@@ -1294,38 +1359,42 @@ def _resolve_arena_items(
     if not slug:
         raise ValueError(f"Could not parse Are.na URL: {url}")
 
-    metadata, contents = _fetch_all_channel_contents(slug)
+    metadata, contents = _fetch_all_channel_contents(
+        slug,
+        max_depth=settings.max_depth,
+        _recurse_users=settings.recurse_users,
+    )
+    flat = _flatten_channel_blocks(contents, slug)
+    flat = _sort_blocks(flat, settings.sort_order)
+
     items: list[ResolvedItem] = []
     dir_name = alias if isinstance(alias, str) else f"arena-{slug}"
 
-    def _collect(contents_list: list[dict], subdir: str) -> None:
-        for item in contents_list:
-            if item.get("base_type") == "Channel" or item.get("type") == "Channel":
-                nested_contents = item.get("_nested_contents", [])
-                nested_id = item.get("id") or "unknown"
-                nested_dir = f"{subdir}/{nested_id}"
-                _collect(nested_contents, nested_dir)
-                continue
+    for channel_path, block in flat:
+        block_type = block.get("type", "")
+        if block_type == "Channel" or block.get("base_type") == "Channel":
+            continue
 
-            rendered = _render_block(item)
-            if rendered is None:
-                continue
+        rendered = _render_block(
+            block, include_descriptions=settings.include_descriptions
+        )
+        if rendered is None:
+            continue
 
-            block_id = item.get("id", "unknown")
-            items.append(
-                ResolvedItem(
-                    source_type="arena",
-                    source_ref="are.na",
-                    source_rev=None,
-                    source_path=f"{slug}/{block_id}",
-                    context_subpath=f"{subdir}/{block_id}.md",
-                    content=rendered,
-                    manifest_spec=url,
-                    alias=alias if isinstance(alias, str) else None,
-                )
+        bid = block.get("id", "unknown")
+        items.append(
+            ResolvedItem(
+                source_type="arena",
+                source_ref="are.na",
+                source_rev=None,
+                source_path=f"{slug}/{bid}",
+                context_subpath=f"{dir_name}/{bid}.md",
+                content=rendered,
+                manifest_spec=url,
+                alias=alias if isinstance(alias, str) else None,
             )
+        )
 
-    _collect(contents, dir_name)
     return items
 
 

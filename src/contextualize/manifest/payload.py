@@ -39,6 +39,7 @@ def build_payload(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    arena_overrides: dict | None = None,
 ) -> PayloadResult:
     payload, input_refs, trace_items, base, skipped, impact = build_payload_impl(
         components,
@@ -55,13 +56,16 @@ def build_payload(
         use_cache=use_cache,
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
+        arena_overrides=arena_overrides,
     )
     return PayloadResult(payload, input_refs, trace_items, base, skipped, impact)
 
 
 def _prepare_manifest_payload(
     data: dict[str, Any], base_dir: str
-) -> tuple[list[dict[str, Any]], str, int, str, list[str], timedelta | None]:
+) -> tuple[
+    list[dict[str, Any]], str, int, str, list[str], timedelta | None, dict | None
+]:
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a mapping with 'config' and 'components'")
 
@@ -93,6 +97,10 @@ def _prepare_manifest_payload(
         elif isinstance(raw_ttl, (int, float)):
             manifest_cache_ttl = timedelta(days=raw_ttl)
 
+    from .hydrate import _resolve_arena_config
+
+    arena_overrides = _resolve_arena_config(cfg)
+
     return (
         comps,
         base_dir,
@@ -100,6 +108,7 @@ def _prepare_manifest_payload(
         link_scope_default,
         link_skip_default,
         manifest_cache_ttl,
+        arena_overrides,
     )
 
 
@@ -136,6 +145,7 @@ def render_manifest(
         link_scope_default,
         link_skip_default,
         manifest_cache_ttl,
+        arena_overrides,
     ) = _prepare_manifest_payload(data, base_dir_default)
 
     effective_ttl = cache_ttl if cache_ttl is not None else manifest_cache_ttl
@@ -155,6 +165,7 @@ def render_manifest(
         use_cache=use_cache,
         cache_ttl=effective_ttl,
         refresh_cache=refresh_cache,
+        arena_overrides=arena_overrides,
     )
 
 
@@ -182,6 +193,7 @@ def render_manifest_data(
         link_scope_default,
         link_skip_default,
         manifest_cache_ttl,
+        arena_overrides,
     ) = _prepare_manifest_payload(data, manifest_cwd)
 
     effective_ttl = cache_ttl if cache_ttl is not None else manifest_cache_ttl
@@ -201,4 +213,5 @@ def render_manifest_data(
         use_cache=use_cache,
         cache_ttl=effective_ttl,
         refresh_cache=refresh_cache,
+        arena_overrides=arena_overrides,
     )
