@@ -296,12 +296,28 @@ def _desc_separator(description: str) -> str:
     return "*" * (max_stars + 2) if max_stars >= 3 else "***"
 
 
-def _format_block_output(title: str, description: str, content: str) -> str | None:
-    if not title and not description and not content:
+def _format_date_line(block: dict) -> str:
+    connected = block.get("connected_at") or ""
+    created = block.get("created_at") or ""
+    c_date = connected[:10] if len(connected) >= 10 else ""
+    r_date = created[:10] if len(created) >= 10 else ""
+    if c_date and r_date and c_date != r_date:
+        return f"connected {c_date} (created {r_date})"
+    return c_date or r_date
+
+
+def _format_block_output(
+    title: str, description: str, content: str, date: str = ""
+) -> str | None:
+    if not title and not description and not content and not date:
         return None
 
     parts: list[str] = []
-    if title:
+    if title and date:
+        parts.append(f"{title}\n{date}\n---")
+    elif date:
+        parts.append(f"{date}\n---")
+    elif title:
         parts.append(f"{title}\n---")
 
     if description and content:
@@ -341,6 +357,8 @@ def _render_block(block: dict) -> str | None:
     else:
         description = ""
 
+    date = _format_date_line(block)
+
     if block_type == "Text":
         raw_content = block.get("content") or ""
         if isinstance(raw_content, dict):
@@ -349,7 +367,7 @@ def _render_block(block: dict) -> str | None:
             content = raw_content
         if description == content:
             description = ""
-        return _format_block_output(title, description, content)
+        return _format_block_output(title, description, content, date=date)
 
     if block_type == "Image":
         image = block.get("image") or {}
@@ -367,7 +385,7 @@ def _render_block(block: dict) -> str | None:
             suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
             converted = _render_block_binary(image_url, suffix)
             if converted:
-                result = _format_block_output(title, description, converted)
+                result = _format_block_output(title, description, converted, date=date)
                 if result and block_id and updated_at:
                     store_block_render(block_id, updated_at, result)
                 return result
@@ -390,7 +408,9 @@ def _render_block(block: dict) -> str | None:
             link_parts.append(source_url)
         if content:
             link_parts.append(content)
-        return _format_block_output(title, description, "\n\n".join(link_parts))
+        return _format_block_output(
+            title, description, "\n\n".join(link_parts), date=date
+        )
 
     if block_type == "Attachment":
         attachment = block.get("attachment") or {}
@@ -403,7 +423,9 @@ def _render_block(block: dict) -> str | None:
             converted = _render_block_binary(att_url, suffix)
             if converted:
                 att_title = title if title != filename else ""
-                result = _format_block_output(att_title, description, converted)
+                result = _format_block_output(
+                    att_title, description, converted, date=date
+                )
                 if result and block_id and updated_at:
                     store_block_render(block_id, updated_at, result)
                 return result
@@ -423,9 +445,11 @@ def _render_block(block: dict) -> str | None:
             embed_parts.append(embed_url)
         if embed_type:
             embed_parts.append(f"Type: {embed_type}")
-        return _format_block_output(title, description, "\n\n".join(embed_parts))
+        return _format_block_output(
+            title, description, "\n\n".join(embed_parts), date=date
+        )
 
-    return _format_block_output(title, description, "")
+    return _format_block_output(title, description, "", date=date)
 
 
 def _render_channel_stub(item: dict) -> str:
