@@ -97,6 +97,66 @@ def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
     )
 
 
+def build_inline_hydration_plan(
+    targets: list[str],
+    *,
+    context_dir: Path,
+    access: str = "writable",
+    copy: bool = False,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> HydratePlan:
+    from ..utils import brace_expand
+
+    cwd = os.getcwd()
+    used_paths: set[str] = set()
+    files_to_write: list[tuple[Path, str]] = []
+    files_to_symlink: list[tuple[Path, Path]] = []
+
+    expanded: list[str] = []
+    for t in targets:
+        if "{" in t and "}" in t:
+            expanded.extend(brace_expand(t))
+        else:
+            expanded.append(t)
+
+    for target in expanded:
+        items = _resolve_spec_items(
+            target,
+            cwd,
+            component_name="inline",
+            alias_hint=None,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        )
+        for item in items:
+            subpath = _split_subpath(item.context_subpath)
+            rel_path = _dedupe_path(subpath, used_paths)
+            _ensure_relative(rel_path)
+
+            can_symlink = (
+                not copy and item.source_type == "local" and item.source_full_path
+            )
+            if can_symlink:
+                files_to_symlink.append(
+                    (context_dir / rel_path, Path(item.source_full_path))
+                )
+            else:
+                files_to_write.append((context_dir / rel_path, item.content))
+
+    return HydratePlan(
+        context_dir=context_dir,
+        files_to_write=files_to_write,
+        files_to_symlink=files_to_symlink,
+        used_paths=used_paths,
+        component_count=0,
+        include_meta=False,
+        access=access,
+    )
+
+
 def plan_matches_existing(plan: HydratePlan) -> bool:
     context_dir = plan.context_dir
     if not context_dir.exists() or not context_dir.is_dir():
@@ -1206,7 +1266,6 @@ def _resolve_arena_items(
         _fetch_all_channel_contents,
         _fetch_block,
         _render_block,
-        _render_single_block,
         extract_block_id,
         extract_channel_slug,
     )
@@ -1214,7 +1273,7 @@ def _resolve_arena_items(
     block_id = extract_block_id(url)
     if block_id is not None:
         block = _fetch_block(block_id)
-        text = _render_single_block(block)
+        text = _render_block(block) or ""
         filename = f"arena-block-{block_id}.md"
         if alias and isinstance(alias, str):
             filename = alias if alias.endswith(".md") else f"{alias}.md"
@@ -1239,21 +1298,12 @@ def _resolve_arena_items(
     items: list[ResolvedItem] = []
     dir_name = alias if isinstance(alias, str) else f"arena-{slug}"
 
-    def _sanitize(name: str) -> str:
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip())
-        return safe.strip("-") or "block"
-
     def _collect(contents_list: list[dict], subdir: str) -> None:
-        seen_names: set[str] = set()
         for item in contents_list:
             if item.get("base_type") == "Channel" or item.get("type") == "Channel":
                 nested_contents = item.get("_nested_contents", [])
-                nested_title = (
-                    item.get("_nested_metadata", {}).get("title")
-                    or item.get("title")
-                    or f"channel-{item.get('id', 'unknown')}"
-                )
-                nested_dir = f"{subdir}/{_sanitize(nested_title)}"
+                nested_id = item.get("id") or "unknown"
+                nested_dir = f"{subdir}/{nested_id}"
                 _collect(nested_contents, nested_dir)
                 continue
 
@@ -1261,22 +1311,14 @@ def _resolve_arena_items(
             if rendered is None:
                 continue
 
-            title = item.get("title") or f"block-{item.get('id', 'unknown')}"
-            base_name = _sanitize(title)
-            name = base_name
-            counter = 2
-            while name in seen_names:
-                name = f"{base_name}-{counter}"
-                counter += 1
-            seen_names.add(name)
-
+            block_id = item.get("id", "unknown")
             items.append(
                 ResolvedItem(
                     source_type="arena",
                     source_ref="are.na",
                     source_rev=None,
-                    source_path=f"{slug}/{name}",
-                    context_subpath=f"{subdir}/{name}.md",
+                    source_path=f"{slug}/{block_id}",
+                    context_subpath=f"{subdir}/{block_id}.md",
                     content=rendered,
                     manifest_spec=url,
                     alias=alias if isinstance(alias, str) else None,

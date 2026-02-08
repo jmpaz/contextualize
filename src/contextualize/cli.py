@@ -784,11 +784,7 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
 
 
 @cli.command("hydrate")
-@click.argument(
-    "manifest_path",
-    required=False,
-    type=click.Path(exists=True, dir_okay=False),
-)
+@click.argument("paths", nargs=-1, type=str)
 @click.option(
     "--dir",
     "context_dir",
@@ -853,7 +849,7 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
 @click.pass_context
 def hydrate_cmd(
     ctx,
-    manifest_path,
+    paths,
     context_dir,
     access,
     path_strategy,
@@ -867,32 +863,21 @@ def hydrate_cmd(
     cache_ttl,
 ):
     """
-    Materialize a provided YAML manifest into a context folder.
+    Materialize targets or a YAML manifest into a context folder.
+
+    Accepts file paths, directories, URLs, Are.na channels, YouTube URLs,
+    or a single YAML manifest file.
     """
     used_options = _collect_used_global_option_labels(ctx)
     if used_options:
         click.echo(f"ignoring global options [{', '.join(used_options)}]", err=True)
-    try:
-        import yaml
 
-        from .manifest.hydrate import (
-            HydrateOverrides,
-            apply_hydration_plan,
-            build_hydration_plan,
-            build_hydration_plan_data,
-            clear_context_dir,
-            find_untracked_files,
-            plan_matches_existing,
-        )
-    except ImportError:
-        raise click.ClickException("pyyaml is required")
-
-    prompt_value = agents_prompt
-    if prompt_value is not None and not prompt_value.strip():
-        raise click.BadParameter("--agents-prompt cannot be empty")
-
-    access_value = access.lower() if access else None
-    path_strategy_value = path_strategy.lower() if path_strategy else None
+    from .manifest.hydrate import (
+        apply_hydration_plan,
+        clear_context_dir,
+        find_untracked_files,
+        plan_matches_existing,
+    )
 
     parsed_cache_ttl = None
     if cache_ttl is not None:
@@ -903,54 +888,136 @@ def hydrate_cmd(
         except ValueError as exc:
             raise click.BadParameter(str(exc)) from exc
 
-    overrides = HydrateOverrides(
-        context_dir=context_dir,
-        access=access_value,
-        path_strategy=path_strategy_value,
-        agents_prompt=prompt_value,
-        agents_filenames=tuple(agents_filenames),
-        omit_meta=omit_meta,
-        copy=copy_files,
-        use_cache=use_cache,
-        cache_ttl=parsed_cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-    cwd = os.getcwd()
-    data = None
-    if not manifest_path:
-        stdin_data = ctx.obj.get("stdin_data", "")
-        if not stdin_data:
-            click.echo(ctx.get_help())
-            ctx.exit(1)
+    manifest_path = None
+    inline_targets: list[str] = []
 
-        ctx.obj["stdin_data"] = ""
+    if (
+        len(paths) == 1
+        and paths[0].endswith((".yaml", ".yml"))
+        and os.path.isfile(paths[0])
+    ):
+        manifest_path = paths[0]
+    elif paths:
+        inline_targets = list(paths)
+
+    if inline_targets:
+        from pathlib import Path
+
+        from .manifest.hydrate import build_inline_hydration_plan
+
+        resolved_dir = Path(context_dir or ".context").resolve()
         try:
-            data = yaml.safe_load(stdin_data)
-        except Exception as exc:
-            raise click.ClickException(f"Invalid YAML on stdin: {exc}")
-        if not isinstance(data, dict):
-            raise click.ClickException(
-                "Manifest must be a mapping with 'config' and 'components'"
+            plan = build_inline_hydration_plan(
+                inline_targets,
+                context_dir=resolved_dir,
+                access=(access or "writable").lower(),
+                copy=copy_files,
+                use_cache=use_cache if use_cache is not None else True,
+                cache_ttl=parsed_cache_ttl,
+                refresh_cache=refresh_cache,
             )
+        except (ValueError, FileNotFoundError) as exc:
+            raise click.ClickException(str(exc)) from exc
+    else:
+        try:
+            import yaml
+        except ImportError:
+            raise click.ClickException("pyyaml is required")
 
-    try:
-        if manifest_path:
-            plan = build_hydration_plan(
-                manifest_path,
-                overrides=overrides,
-                cwd=cwd,
-            )
-        else:
-            plan = build_hydration_plan_data(
-                data,
-                manifest_cwd=cwd,
-                overrides=overrides,
-                cwd=cwd,
-            )
-    except (ValueError, FileNotFoundError) as exc:
-        raise click.ClickException(str(exc)) from exc
+        from .manifest.hydrate import (
+            HydrateOverrides,
+            build_hydration_plan,
+            build_hydration_plan_data,
+        )
 
-    if plan.context_dir.exists():
+        prompt_value = agents_prompt
+        if prompt_value is not None and not prompt_value.strip():
+            raise click.BadParameter("--agents-prompt cannot be empty")
+
+        access_value = access.lower() if access else None
+        path_strategy_value = path_strategy.lower() if path_strategy else None
+
+        overrides = HydrateOverrides(
+            context_dir=context_dir,
+            access=access_value,
+            path_strategy=path_strategy_value,
+            agents_prompt=prompt_value,
+            agents_filenames=tuple(agents_filenames),
+            omit_meta=omit_meta,
+            copy=copy_files,
+            use_cache=use_cache,
+            cache_ttl=parsed_cache_ttl,
+            refresh_cache=refresh_cache,
+        )
+        cwd = os.getcwd()
+        data = None
+        if not manifest_path:
+            stdin_data = ctx.obj.get("stdin_data", "")
+            if not stdin_data:
+                click.echo(ctx.get_help())
+                ctx.exit(1)
+
+            ctx.obj["stdin_data"] = ""
+            try:
+                data = yaml.safe_load(stdin_data)
+            except Exception as exc:
+                raise click.ClickException(f"Invalid YAML on stdin: {exc}")
+            if not isinstance(data, dict):
+                raise click.ClickException(
+                    "Manifest must be a mapping with 'config' and 'components'"
+                )
+
+        try:
+            if manifest_path:
+                plan = build_hydration_plan(
+                    manifest_path,
+                    overrides=overrides,
+                    cwd=cwd,
+                )
+            else:
+                plan = build_hydration_plan_data(
+                    data,
+                    manifest_cwd=cwd,
+                    overrides=overrides,
+                    cwd=cwd,
+                )
+        except (ValueError, FileNotFoundError) as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    if inline_targets and plan.context_dir.exists():
+        import shutil
+
+        subdirs_to_clear: set[str] = set()
+        files_to_clear: list[Path] = []
+        all_dests = [(d, c) for d, c in plan.files_to_write] + [
+            (d, t) for d, t in plan.files_to_symlink
+        ]
+        for dest, _ in all_dests:
+            rel = dest.relative_to(plan.context_dir)
+            if len(rel.parts) > 1:
+                subdirs_to_clear.add(rel.parts[0])
+            else:
+                files_to_clear.append(dest)
+
+        existing_subdirs = [
+            s for s in subdirs_to_clear if (plan.context_dir / s).exists()
+        ]
+        existing_files = [f for f in files_to_clear if f.exists() or f.is_symlink()]
+
+        if (existing_subdirs or existing_files) and not overwrite:
+            parts = [str(plan.context_dir / s) for s in sorted(existing_subdirs)]
+            parts += [str(f) for f in existing_files]
+            click.echo("The following will be replaced:", err=True)
+            for p in parts:
+                click.echo(f"  {p}", err=True)
+            if not click.confirm("Continue?"):
+                ctx.exit(1)
+
+        for subdir in existing_subdirs:
+            shutil.rmtree(plan.context_dir / subdir)
+        for f in existing_files:
+            f.unlink()
+    elif plan.context_dir.exists():
         if plan_matches_existing(plan):
             click.echo(f"{plan.context_dir} is already up to date.")
             return None

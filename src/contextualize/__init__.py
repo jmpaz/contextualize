@@ -140,6 +140,25 @@ def hydrate(
     return Path(result.context_dir)
 
 
+def inline_hydrate(
+    targets: list[str],
+    *,
+    dir: str | Path = ".context",
+    access: str = "writable",
+    copy: bool = False,
+) -> Path:
+    from .manifest.hydrate import apply_hydration_plan, build_inline_hydration_plan
+
+    plan = build_inline_hydration_plan(
+        targets,
+        context_dir=Path(dir).resolve(),
+        access=access,
+        copy=copy,
+    )
+    result = apply_hydration_plan(plan)
+    return Path(result.context_dir)
+
+
 __all__ = [
     "cat",
     "map_paths",
@@ -147,4 +166,5 @@ __all__ = [
     "paste",
     "payload",
     "hydrate",
+    "inline_hydrate",
 ]
