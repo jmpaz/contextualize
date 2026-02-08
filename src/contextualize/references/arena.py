@@ -436,21 +436,9 @@ def _render_channel_stub(item: dict) -> str:
 
 
 def _block_label(block: dict, channel_slug: str, channel_path: str = "") -> str:
-    block_type = block.get("type", "")
-    title = block.get("title") or ""
     block_id = block.get("id", "unknown")
-
-    if block_type == "Attachment":
-        attachment = block.get("attachment") or {}
-        name = attachment.get("filename") or title or f"block-{block_id}"
-    elif title:
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", title.strip())[:80].strip("-")
-        name = safe or f"block-{block_id}"
-    else:
-        name = f"block-{block_id}"
-
     prefix = channel_path or channel_slug
-    return f"{prefix}/{name}"
+    return f"{prefix}/{block_id}"
 
 
 def _flatten_channel_blocks(
