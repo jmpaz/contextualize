@@ -283,6 +283,35 @@ def _render_block_binary(url: str, suffix: str) -> str:
         tmp.unlink(missing_ok=True)
 
 
+def _desc_separator(description: str) -> str:
+    max_stars = 0
+    for line in description.splitlines():
+        stripped = line.strip()
+        if re.fullmatch(r"\*{3,}", stripped):
+            max_stars = max(max_stars, len(stripped))
+    return "*" * (max_stars + 2) if max_stars >= 3 else "***"
+
+
+def _format_block_output(title: str, description: str, content: str) -> str | None:
+    if not title and not description and not content:
+        return None
+
+    parts: list[str] = []
+    if title:
+        parts.append(f"{title}\n---")
+
+    if description and content:
+        sep = _desc_separator(description)
+        parts.append(f"{description}\n\n{sep}")
+        parts.append(content)
+    elif description:
+        parts.append(description)
+    elif content:
+        parts.append(content)
+
+    return "\n\n".join(parts)
+
+
 def _render_block(block: dict) -> str | None:
     from ..cache.arena import get_cached_block_render, store_block_render
 
@@ -314,14 +343,9 @@ def _render_block(block: dict) -> str | None:
             content = raw_content.get("markdown") or raw_content.get("plain") or ""
         else:
             content = raw_content
-        parts = []
-        if title:
-            parts.append(title)
-        if content:
-            parts.append(content)
-        if description and description != content:
-            parts.append(description)
-        return "\n\n".join(parts) if parts else None
+        if description == content:
+            description = ""
+        return _format_block_output(title, description, content)
 
     if block_type == "Image":
         image = block.get("image") or {}
@@ -339,38 +363,30 @@ def _render_block(block: dict) -> str | None:
             suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
             converted = _render_block_binary(image_url, suffix)
             if converted:
-                parts = []
-                if title:
-                    parts.append(title)
-                parts.append(converted)
-                result = "\n\n".join(parts)
-                if block_id and updated_at:
+                result = _format_block_output(title, description, converted)
+                if result and block_id and updated_at:
                     store_block_render(block_id, updated_at, result)
                 return result
         fallback_url = image_urls[0] if image_urls else ""
-        parts = [f"[Image: {title or block.get('id')}]"]
+        fallback = f"[Image: {title or block.get('id')}]"
         if fallback_url:
-            parts.append(f"URL: {fallback_url}")
-        return "\n".join(parts)
+            fallback += f"\nURL: {fallback_url}"
+        return fallback
 
     if block_type == "Link":
         source = block.get("source") or {}
         source_url = source.get("url") or ""
-        parts = []
-        if title:
-            parts.append(title)
-        if source_url:
-            parts.append(source_url)
         raw_content = block.get("content") or ""
         if isinstance(raw_content, dict):
             content = raw_content.get("markdown") or raw_content.get("plain") or ""
         else:
             content = raw_content
+        link_parts = []
+        if source_url:
+            link_parts.append(source_url)
         if content:
-            parts.append(content)
-        elif description:
-            parts.append(description)
-        return "\n\n".join(parts) if parts else None
+            link_parts.append(content)
+        return _format_block_output(title, description, "\n\n".join(link_parts))
 
     if block_type == "Attachment":
         attachment = block.get("attachment") or {}
@@ -382,42 +398,30 @@ def _render_block(block: dict) -> str | None:
             suffix = f".{extension}" if extension else Path(filename).suffix or ""
             converted = _render_block_binary(att_url, suffix)
             if converted:
-                parts = []
-                if title and title != filename:
-                    parts.append(title)
-                parts.append(converted)
-                result = "\n\n".join(parts)
-                if block_id and updated_at:
+                att_title = title if title != filename else ""
+                result = _format_block_output(att_title, description, converted)
+                if result and block_id and updated_at:
                     store_block_render(block_id, updated_at, result)
                 return result
-        parts = [f"[Attachment: {filename or title or block.get('id')}]"]
+        fallback = f"[Attachment: {filename or title or block.get('id')}]"
         if content_type:
-            parts.append(f"Type: {content_type}")
+            fallback += f"\nType: {content_type}"
         if att_url:
-            parts.append(f"URL: {att_url}")
-        return "\n".join(parts)
+            fallback += f"\nURL: {att_url}"
+        return fallback
 
     if block_type == "Embed":
         embed = block.get("embed") or {}
         embed_url = embed.get("url") or ""
         embed_type = embed.get("type") or ""
-        parts = []
-        if title:
-            parts.append(title)
+        embed_parts = []
         if embed_url:
-            parts.append(embed_url)
+            embed_parts.append(embed_url)
         if embed_type:
-            parts.append(f"Type: {embed_type}")
-        if description:
-            parts.append(description)
-        return "\n\n".join(parts) if parts else None
+            embed_parts.append(f"Type: {embed_type}")
+        return _format_block_output(title, description, "\n\n".join(embed_parts))
 
-    parts = []
-    if title:
-        parts.append(title)
-    if description:
-        parts.append(description)
-    return "\n\n".join(parts) if parts else None
+    return _format_block_output(title, description, "")
 
 
 def _render_channel_stub(item: dict) -> str:
