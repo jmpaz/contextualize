@@ -445,7 +445,7 @@ def _render_channel_stub(item: dict) -> str:
 
 def _block_label(block: dict, channel_slug: str, channel_path: str = "") -> str:
     block_id = block.get("id", "unknown")
-    prefix = channel_path or channel_slug
+    prefix = channel_path or channel_slug or "are.na/block"
     return f"{prefix}/{block_id}"
 
 
