@@ -146,6 +146,10 @@ def _get_include_descriptions() -> bool:
     return raw not in ("0", "false", "no")
 
 
+def _get_sort_order() -> str:
+    return os.environ.get("ARENA_SORT", "desc").lower().strip()
+
+
 def _get_recurse_users() -> set[str] | None:
     raw = os.environ.get("ARENA_RECURSE_USERS", "").strip()
     if not raw:
@@ -477,6 +481,25 @@ def _flatten_channel_blocks(
     return result
 
 
+def _sort_blocks(flat: list[tuple[str, dict]], order: str) -> list[tuple[str, dict]]:
+    if order == "position-asc" or order == "asc":
+        return flat
+    if order == "position-desc" or order == "desc":
+        return list(reversed(flat))
+    if order == "random":
+        import random
+
+        shuffled = list(flat)
+        random.shuffle(shuffled)
+        return shuffled
+    use_reverse = order == "date-desc"
+    return sorted(
+        flat,
+        key=lambda pair: pair[1].get("connected_at") or pair[1].get("created_at") or "",
+        reverse=use_reverse,
+    )
+
+
 def resolve_channel(
     slug: str,
     *,
@@ -486,8 +509,9 @@ def resolve_channel(
 ) -> tuple[dict, list[tuple[str, dict]]]:
     max_depth = _get_max_depth()
     recurse_users = _get_recurse_users()
+    sort_order = _get_sort_order()
     ru_key = ",".join(sorted(recurse_users)) if recurse_users else "all"
-    cache_key = f"{slug}:d={max_depth}:u={ru_key}"
+    cache_key = f"{slug}:d={max_depth}:u={ru_key}:s={sort_order}"
 
     if use_cache and not refresh_cache:
         from ..cache.arena import get_cached_channel
@@ -501,6 +525,7 @@ def resolve_channel(
 
     metadata, contents = _fetch_all_channel_contents(slug)
     flat = _flatten_channel_blocks(contents, slug)
+    flat = _sort_blocks(flat, sort_order)
 
     if use_cache:
         from ..cache.arena import store_channel
