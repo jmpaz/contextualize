@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlparse
@@ -72,6 +73,25 @@ def _markitdown_version() -> str | None:
 
 _DESCRIPTION_HEADING_RE = re.compile(r"(?m)^# Description:?\s*$")
 _HAS_LLM_DESCRIPTION_RE = re.compile(r"(?m)^# Description")
+_IMAGE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".avif", ".tif", ".tiff"}
+)
+_IMAGE_CONVERT_SUFFIXES = frozenset(
+    {".webp", ".heic", ".heif", ".avif", ".tif", ".tiff"}
+)
+_VIDEO_CONVERT_SUFFIXES = frozenset({".mov", ".avi", ".mkv", ".webm", ".m4v"})
+_CONTENT_TYPE_SUFFIXES: dict[str, str] = {
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "image/webp": ".webp",
+    "image/avif": ".avif",
+    "image/tiff": ".tiff",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/x-msvideo": ".avi",
+    "video/x-matroska": ".mkv",
+    "video/mp4": ".mp4",
+}
 
 
 def _postprocess_image_markdown(markdown: str) -> str:
@@ -90,6 +110,92 @@ def _cache_key(payload: dict[str, Any]) -> str:
 
 def _cache_entry_path(key: str) -> Path:
     return _cache_entries_dir() / key[:2] / f"{key}.json"
+
+
+def _ffmpeg_path() -> str | None:
+    configured = (os.getenv("FFMPEG_PATH") or "").strip()
+    if configured:
+        return configured
+    return shutil.which("ffmpeg")
+
+
+def _mktemp_output(suffix: str) -> Path:
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    return Path(path)
+
+
+def _transcode_image_to_jpg(source: Path) -> Path:
+    output = _mktemp_output(".jpg")
+    try:
+        from PIL import Image
+    except Exception as exc:
+        output.unlink(missing_ok=True)
+        raise MarkItDownConversionError(
+            f"Auto-conversion to JPG requires Pillow for {source}: {exc}"
+        ) from exc
+
+    try:
+        with Image.open(source) as image:
+            image.convert("RGB").save(output, format="JPEG", quality=95)
+    except Exception as exc:
+        output.unlink(missing_ok=True)
+        raise MarkItDownConversionError(
+            f"Failed to auto-convert {source} to JPG: {exc}"
+        ) from exc
+    return output
+
+
+def _transcode_video_to_mp4(source: Path) -> Path:
+    ffmpeg = _ffmpeg_path()
+    if ffmpeg is None:
+        raise MarkItDownConversionError(
+            f"Auto-conversion to MP4 requires ffmpeg for {source}"
+        )
+    output = _mktemp_output(".mp4")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source),
+        "-movflags",
+        "+faststart",
+        "-pix_fmt",
+        "yuv420p",
+        str(output),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        output.unlink(missing_ok=True)
+        raise MarkItDownConversionError(
+            f"Failed to invoke ffmpeg for {source}: {exc}"
+        ) from exc
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or "unknown ffmpeg error"
+        output.unlink(missing_ok=True)
+        raise MarkItDownConversionError(
+            f"Failed to auto-convert {source} to MP4: {stderr}"
+        )
+    return output
+
+
+def _maybe_normalize_media_path(source: Path) -> Path | None:
+    suffix = source.suffix.lower()
+    if suffix in _IMAGE_CONVERT_SUFFIXES:
+        return _transcode_image_to_jpg(source)
+    if suffix in _VIDEO_CONVERT_SUFFIXES:
+        return _transcode_video_to_mp4(source)
+    return None
+
+
+def _suffix_from_content_type(content_type: str) -> str | None:
+    return _CONTENT_TYPE_SUFFIXES.get(content_type.lower())
 
 
 def _read_cache_entry(key: str) -> dict[str, Any] | None:
@@ -234,6 +340,11 @@ def _image_cache_lookup(
         cached_markdown = cached.get("markdown")
         cached_title = cached.get("title")
         if isinstance(cached_markdown, str):
+            requires_llm_description = bool(payload.get("llm_enabled"))
+            if requires_llm_description and not _HAS_LLM_DESCRIPTION_RE.search(
+                cached_markdown
+            ):
+                return key, None
             title = cached_title if isinstance(cached_title, str) else None
             return (
                 key,
@@ -264,6 +375,26 @@ def _convert_markitdown(
     if title is not None and not isinstance(title, str):
         title = str(title)
     return markdown, title
+
+
+def _convert_markitdown_with_normalization(path: Path) -> tuple[str, str | None]:
+    try:
+        return _convert_markitdown(path, error_label=str(path))
+    except MarkItDownConversionError as original_exc:
+        normalized_path = _maybe_normalize_media_path(path)
+        if normalized_path is None:
+            raise
+        try:
+            return _convert_markitdown(
+                normalized_path,
+                error_label=f"{path} (normalized to {normalized_path.suffix})",
+            )
+        except MarkItDownConversionError as normalized_exc:
+            raise MarkItDownConversionError(
+                f"{original_exc}; auto-normalization also failed: {normalized_exc}"
+            ) from normalized_exc
+        finally:
+            normalized_path.unlink(missing_ok=True)
 
 
 @lru_cache(maxsize=1)
@@ -318,7 +449,7 @@ def convert_path_to_markdown(
     path: str | Path, *, refresh_images: bool = False
 ) -> MarkItDownResult:
     path_obj = Path(path)
-    is_image = path_obj.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    is_image = path_obj.suffix.lower() in _IMAGE_SUFFIXES
     media_md5: str | None = None
     cache_key_payload: dict[str, Any] | None = None
     cache_key = ""
@@ -346,7 +477,7 @@ def convert_path_to_markdown(
                 "OPENAI_API_KEY/OPENROUTER_API_KEY."
             )
 
-    markdown, title = _convert_markitdown(path_obj, error_label=str(path_obj))
+    markdown, title = _convert_markitdown_with_normalization(path_obj)
 
     if is_image and llm_enabled and not _HAS_LLM_DESCRIPTION_RE.search(markdown):
         raise MarkItDownConversionError(
@@ -368,10 +499,8 @@ def convert_response_to_markdown(
     content_type = (
         str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip()
     )
-    url_suffix = Path(str(response.url)).suffix.lower()
-    is_image = url_suffix in {".jpg", ".jpeg", ".png"} or content_type.startswith(
-        "image/"
-    )
+    url_suffix = Path(urlparse(str(response.url)).path).suffix.lower()
+    is_image = url_suffix in _IMAGE_SUFFIXES or content_type.startswith("image/")
 
     media_md5: str | None = None
     cache_key_payload: dict[str, Any] | None = None
@@ -400,7 +529,16 @@ def convert_response_to_markdown(
                 "OPENAI_API_KEY/OPENROUTER_API_KEY."
             )
 
-    markdown, title = _convert_markitdown(response, error_label=str(response.url))
+    try:
+        markdown, title = _convert_markitdown(response, error_label=str(response.url))
+    except MarkItDownConversionError:
+        temp_suffix = url_suffix or _suffix_from_content_type(content_type) or ".bin"
+        temp_path = _mktemp_output(temp_suffix)
+        try:
+            temp_path.write_bytes(response.content)
+            markdown, title = _convert_markitdown_with_normalization(temp_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     if is_image and llm_enabled and not _HAS_LLM_DESCRIPTION_RE.search(markdown):
         raise MarkItDownConversionError(
