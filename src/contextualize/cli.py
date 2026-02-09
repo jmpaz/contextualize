@@ -582,6 +582,16 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     help="Force refresh all cached URLs",
 )
 @click.option(
+    "--refresh-images",
+    is_flag=True,
+    help="Force refresh cached image conversions",
+)
+@click.option(
+    "--refresh-all",
+    is_flag=True,
+    help="Force refresh URL and image caches",
+)
+@click.option(
     "--cache-ttl",
     type=str,
     help="Cache TTL (e.g., 7d, 24h, 1w)",
@@ -597,6 +607,8 @@ def payload_cmd(
     map_components,
     use_cache,
     refresh_cache,
+    refresh_images,
+    refresh_all,
     cache_ttl,
 ):
     """
@@ -619,6 +631,12 @@ def payload_cmd(
         except ValueError as exc:
             raise click.BadParameter(str(exc)) from exc
 
+    refresh_cache = refresh_cache or refresh_all
+    refresh_images = refresh_images or refresh_all
+    from .runtime import set_refresh_images
+
+    set_refresh_images(refresh_images)
+
     def parse_keys(values):
         keys = []
         for value in values:
@@ -637,8 +655,6 @@ def payload_cmd(
             f"--exclude cannot be combined with --map for: {names}"
         )
     try:
-        import os
-
         import yaml
 
         from .render.trace import format_trace_output
@@ -693,8 +709,6 @@ def payload_cmd(
         click.echo(ctx.get_help())
         ctx.exit(1)
 
-    # preserve stdin for trace output
-    original_stdin = stdin_data
     ctx.obj["stdin_data"] = ""
 
     raw = stdin_data
@@ -842,6 +856,16 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     help="Force refresh all cached URLs",
 )
 @click.option(
+    "--refresh-images",
+    is_flag=True,
+    help="Force refresh cached image conversions",
+)
+@click.option(
+    "--refresh-all",
+    is_flag=True,
+    help="Force refresh URL and image caches",
+)
+@click.option(
     "--cache-ttl",
     type=str,
     help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
@@ -860,6 +884,8 @@ def hydrate_cmd(
     copy_files,
     use_cache,
     refresh_cache,
+    refresh_images,
+    refresh_all,
     cache_ttl,
 ):
     """
@@ -887,6 +913,12 @@ def hydrate_cmd(
             parsed_cache_ttl = parse_duration(cache_ttl)
         except ValueError as exc:
             raise click.BadParameter(str(exc)) from exc
+
+    refresh_cache = refresh_cache or refresh_all
+    refresh_images = refresh_images or refresh_all
+    from .runtime import set_refresh_images
+
+    set_refresh_images(refresh_images)
 
     manifest_path = None
     inline_targets: list[str] = []
@@ -1104,6 +1136,16 @@ def hydrate_cmd(
     help="Force refresh all cached URLs",
 )
 @click.option(
+    "--refresh-images",
+    is_flag=True,
+    help="Force refresh cached image conversions",
+)
+@click.option(
+    "--refresh-all",
+    is_flag=True,
+    help="Force refresh URL and image caches",
+)
+@click.option(
     "--cache-ttl",
     type=str,
     help="Cache TTL (e.g., 7d, 24h, 1w)",
@@ -1127,6 +1169,8 @@ def cat_cmd(
     rev,
     use_cache,
     refresh_cache,
+    refresh_images,
+    refresh_all,
     cache_ttl,
 ):
     """
@@ -1149,6 +1193,12 @@ def cat_cmd(
             parsed_cache_ttl = parse_duration(cache_ttl)
         except ValueError as exc:
             raise click.BadParameter(str(exc)) from exc
+
+    refresh_cache = refresh_cache or refresh_all
+    refresh_images = refresh_images or refresh_all
+    from .runtime import set_refresh_images
+
+    set_refresh_images(refresh_images)
 
     if not paths:
         click.echo(ctx.get_help())
@@ -1206,7 +1256,12 @@ def cat_cmd(
     if use_rev:
         from pathspec import PathSpec
 
-        from .git.rev import GitRevFileReference, discover_repo_root, list_files_at_rev
+        from .git.rev import (
+            GitRevFileReference,
+            discover_repo_root,
+            list_files_at_rev,
+            read_file_at_rev,
+        )
 
         try:
             repo_root = discover_repo_root(paths, cwd=os.getcwd())

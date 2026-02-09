@@ -336,9 +336,13 @@ def _render_block_binary(url: str, suffix: str) -> str:
     if tmp is None:
         return ""
     try:
-        result = convert_path_to_markdown(str(tmp))
+        from ..runtime import get_refresh_images
+
+        refresh_images = get_refresh_images()
+        result = convert_path_to_markdown(str(tmp), refresh_images=refresh_images)
         return result.markdown
-    except MarkItDownConversionError:
+    except MarkItDownConversionError as exc:
+        _log(f"  image conversion failed for {url}: {exc}")
         return ""
     finally:
         tmp.unlink(missing_ok=True)
@@ -401,7 +405,16 @@ def _render_block(
 
     block_id = block.get("id")
     updated_at = block.get("updated_at") or ""
-    if block_id and updated_at and block_type in ("Image", "Attachment"):
+    from ..runtime import get_refresh_images
+
+    refresh_images = get_refresh_images()
+
+    if (
+        block_id
+        and updated_at
+        and block_type in ("Image", "Attachment")
+        and not refresh_images
+    ):
         cached = get_cached_block_render(block_id, updated_at)
         if cached is not None:
             return cached

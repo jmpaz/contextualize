@@ -11,6 +11,7 @@ import re
 import shutil
 import tempfile
 from typing import Any, Mapping, Protocol
+from urllib.parse import urlparse
 
 
 class MarkItDownConversionError(RuntimeError):
@@ -139,6 +140,41 @@ def _file_md5(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_openrouter_base_url(base_url: str) -> bool:
+    host = (urlparse(base_url).hostname or "").lower()
+    return host in {"openrouter.ai", "www.openrouter.ai"}
+
+
+def _openrouter_extra_body(extra_body: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = (
+        dict(extra_body) if isinstance(extra_body, Mapping) else {}
+    )
+    provider = payload.get("provider")
+    provider_payload = dict(provider) if isinstance(provider, Mapping) else {}
+    provider_payload["data_collection"] = "deny"
+    payload["provider"] = provider_payload
+    return payload
+
+
+class _OpenRouterCompletionsProxy:
+    def __init__(self, completions: Any):
+        self._completions = completions
+
+    def create(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs["extra_body"] = _openrouter_extra_body(kwargs.get("extra_body"))
+        return self._completions.create(*args, **kwargs)
+
+
+class _OpenRouterChatProxy:
+    def __init__(self, chat: Any):
+        self.completions = _OpenRouterCompletionsProxy(chat.completions)
+
+
+class _OpenRouterClientProxy:
+    def __init__(self, client: Any):
+        self.chat = _OpenRouterChatProxy(client.chat)
+
+
 def _image_context() -> tuple[bool, str, str, str, str | None]:
     _load_dotenv_once()
     llm_enabled = bool(
@@ -148,7 +184,7 @@ def _image_context() -> tuple[bool, str, str, str, str | None]:
     base_url = (
         os.getenv("OPENAI_BASE_URL") or ""
     ).strip() or "https://openrouter.ai/api/v1"
-    model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-2.5-flash"
+    model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-3-flash-preview"
     prompt = (
         os.getenv("OPENAI_PROMPT") or ""
     ).strip() or "Write a detailed caption for this image."
@@ -156,6 +192,14 @@ def _image_context() -> tuple[bool, str, str, str, str | None]:
         "exiftool"
     )
     return llm_enabled, base_url, model, prompt, exiftool_path
+
+
+def _refresh_images_enabled(explicit: bool) -> bool:
+    if explicit:
+        return True
+    from ..runtime import get_refresh_images
+
+    return get_refresh_images()
 
 
 def _image_cache_payload(
@@ -234,11 +278,13 @@ def _build_llm_config() -> tuple[object | None, str | None]:
     base_url = (
         os.getenv("OPENAI_BASE_URL") or ""
     ).strip() or "https://openrouter.ai/api/v1"
-    model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-2.5-flash"
+    model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-3-flash-preview"
 
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client: object = OpenAI(api_key=api_key, base_url=base_url)
+    if _is_openrouter_base_url(base_url):
+        client = _OpenRouterClientProxy(client)
     return client, model
 
 
@@ -268,7 +314,9 @@ def _get_converter():
     return MarkItDown(llm_client=llm_client, llm_model=llm_model, llm_prompt=llm_prompt)
 
 
-def convert_path_to_markdown(path: str | Path) -> MarkItDownResult:
+def convert_path_to_markdown(
+    path: str | Path, *, refresh_images: bool = False
+) -> MarkItDownResult:
     path_obj = Path(path)
     is_image = path_obj.suffix.lower() in {".jpg", ".jpeg", ".png"}
     media_md5: str | None = None
@@ -287,9 +335,10 @@ def convert_path_to_markdown(path: str | Path) -> MarkItDownResult:
             prompt=prompt,
             exiftool_path=exiftool_path,
         )
-        cache_key, cached = _image_cache_lookup(cache_key_payload)
-        if cached:
-            return cached
+        if not _refresh_images_enabled(refresh_images):
+            cache_key, cached = _image_cache_lookup(cache_key_payload)
+            if cached:
+                return cached
 
         if not _image_text_tools_available():
             raise MarkItDownConversionError(
@@ -313,7 +362,9 @@ def convert_path_to_markdown(path: str | Path) -> MarkItDownResult:
     return out
 
 
-def convert_response_to_markdown(response: ResponseLike) -> MarkItDownResult:
+def convert_response_to_markdown(
+    response: ResponseLike, *, refresh_images: bool = False
+) -> MarkItDownResult:
     content_type = (
         str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip()
     )
@@ -338,9 +389,10 @@ def convert_response_to_markdown(response: ResponseLike) -> MarkItDownResult:
             prompt=prompt,
             exiftool_path=exiftool_path,
         )
-        cache_key, cached = _image_cache_lookup(cache_key_payload)
-        if cached:
-            return cached
+        if not _refresh_images_enabled(refresh_images):
+            cache_key, cached = _image_cache_lookup(cache_key_payload)
+            if cached:
+                return cached
 
         if not _image_text_tools_available():
             raise MarkItDownConversionError(
