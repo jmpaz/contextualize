@@ -72,8 +72,11 @@ def _markitdown_version() -> str | None:
         return None
 
 
-_DESCRIPTION_HEADING_RE = re.compile(r"(?m)^# Description:?\s*$")
+_DESCRIPTION_HEADING_RE = re.compile(
+    r"(?m)^# Description(?: \(auto-generated\))?:?\s*$"
+)
 _HAS_LLM_DESCRIPTION_RE = re.compile(r"(?m)^# Description")
+_AUTO_DESCRIPTION_HEADING = "# Description (auto-generated):"
 _IMAGE_SUFFIXES = frozenset(
     {
         ".jpg",
@@ -142,9 +145,11 @@ _AUDIO_FORMAT_BY_SUFFIX: dict[str, str] = {
 
 
 def _postprocess_image_markdown(markdown: str) -> str:
-    return _DESCRIPTION_HEADING_RE.sub(
-        "# Description (auto-generated)", markdown, count=1
-    )
+    return _DESCRIPTION_HEADING_RE.sub(_AUTO_DESCRIPTION_HEADING, markdown, count=1)
+
+
+def _format_auto_generated_description(text: str) -> str:
+    return f"{_AUTO_DESCRIPTION_HEADING}\n{text}\n"
 
 
 def _cache_entries_dir() -> Path:
@@ -433,7 +438,7 @@ def _llm_video_markdown(data: bytes, *, suffix: str, prompt: str) -> str:
     text = _extract_llm_text(response)
     if not text:
         raise MarkItDownConversionError("No text returned from video LLM response")
-    return f"# Description:\n{text}\n"
+    return _format_auto_generated_description(text)
 
 
 def _llm_audio_markdown(data: bytes, *, suffix: str, prompt: str) -> str:
@@ -461,7 +466,7 @@ def _llm_audio_markdown(data: bytes, *, suffix: str, prompt: str) -> str:
     text = _extract_llm_text(response)
     if not text:
         raise MarkItDownConversionError("No text returned from audio LLM response")
-    return text
+    return _format_auto_generated_description(text)
 
 
 def _is_video_media(*, suffix: str, content_type: str = "") -> bool:
