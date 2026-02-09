@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import base64
 import hashlib
 import json
 import logging
@@ -91,6 +92,12 @@ _IMAGE_CONVERT_SUFFIXES = frozenset(
     {".gif", ".webp", ".heic", ".heif", ".avif", ".tif", ".tiff"}
 )
 _VIDEO_CONVERT_SUFFIXES = frozenset({".mov", ".avi", ".mkv", ".webm", ".m4v", ".mp4"})
+_VIDEO_SUFFIXES = frozenset(
+    {".mp4", ".mov", ".mpeg", ".mpg", ".webm", ".avi", ".mkv", ".m4v", ".gif"}
+)
+_AUDIO_SUFFIXES = frozenset(
+    {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".aiff", ".pcm", ".pcm16"}
+)
 _CONTENT_TYPE_SUFFIXES: dict[str, str] = {
     "image/heic": ".heic",
     "image/heif": ".heif",
@@ -102,6 +109,35 @@ _CONTENT_TYPE_SUFFIXES: dict[str, str] = {
     "video/x-msvideo": ".avi",
     "video/x-matroska": ".mkv",
     "video/mp4": ".mp4",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/aac": ".aac",
+    "audio/ogg": ".ogg",
+    "audio/flac": ".flac",
+    "audio/aiff": ".aiff",
+}
+_VIDEO_MIME_BY_SUFFIX: dict[str, str] = {
+    ".mp4": "video/mp4",
+    ".mov": "video/mov",
+    ".mpeg": "video/mpeg",
+    ".mpg": "video/mpeg",
+    ".webm": "video/webm",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
+    ".m4v": "video/mp4",
+}
+_AUDIO_FORMAT_BY_SUFFIX: dict[str, str] = {
+    ".wav": "wav",
+    ".mp3": "mp3",
+    ".aiff": "aiff",
+    ".aac": "aac",
+    ".ogg": "ogg",
+    ".flac": "flac",
+    ".m4a": "m4a",
+    ".pcm": "pcm16",
+    ".pcm16": "pcm16",
 }
 
 
@@ -128,6 +164,13 @@ def _ffmpeg_path() -> str | None:
     if configured:
         return configured
     return shutil.which("ffmpeg")
+
+
+def _ffprobe_path() -> str | None:
+    configured = (os.getenv("FFPROBE_PATH") or "").strip()
+    if configured:
+        return configured
+    return shutil.which("ffprobe")
 
 
 def _mktemp_output(suffix: str) -> Path:
@@ -264,6 +307,177 @@ def _suffix_from_content_type(content_type: str) -> str | None:
     return _CONTENT_TYPE_SUFFIXES.get(content_type.lower())
 
 
+def _extract_llm_text(response: Any) -> str | None:
+    choices = getattr(response, "choices", None)
+    if not isinstance(choices, list) or not choices:
+        return None
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return None
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content.strip() or None
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+                continue
+            text = getattr(item, "text", None)
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        if parts:
+            return "\n\n".join(parts)
+    return None
+
+
+def _llm_max_attempts() -> int:
+    raw = (os.getenv("OPENAI_MAX_ATTEMPTS") or "").strip()
+    if not raw:
+        return 4
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 4
+
+
+def _llm_retry_delay_seconds(attempt: int) -> float:
+    import random
+
+    base = min(20.0, 1.0 * (2 ** max(0, attempt - 1)))
+    return base + random.uniform(0.0, 0.25)
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and status_code in {
+        408,
+        409,
+        425,
+        429,
+        500,
+        502,
+        503,
+        504,
+    }:
+        return True
+    name = type(exc).__name__
+    transient_names = {
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+    }
+    if name in transient_names:
+        return True
+    msg = str(exc).lower()
+    return (
+        "temporarily unavailable" in msg
+        or "cloudflare" in msg
+        or "timeout" in msg
+        or "connection" in msg
+    )
+
+
+def _llm_chat_completion(
+    client: Any, *, model: str, messages: list[dict[str, Any]]
+) -> Any:
+    import time
+
+    max_attempts = _llm_max_attempts()
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if not _is_transient_llm_error(exc) or attempt >= max_attempts:
+                break
+            wait = _llm_retry_delay_seconds(attempt)
+            logging.getLogger(__name__).warning(
+                "Transient LLM error (%s). Retrying in %.1fs (%d/%d).",
+                type(exc).__name__,
+                wait,
+                attempt,
+                max_attempts,
+            )
+            time.sleep(wait)
+    raise MarkItDownConversionError(f"LLM request failed: {last_exc}")
+
+
+def _llm_video_markdown(data: bytes, *, suffix: str, prompt: str) -> str:
+    llm_client, llm_model = _build_llm_config()
+    if llm_client is None or llm_model is None:
+        raise MarkItDownConversionError("LLM client not configured for video analysis")
+    mime = _VIDEO_MIME_BY_SUFFIX.get(suffix, "video/mp4")
+    encoded = base64.b64encode(data).decode("ascii")
+    data_url = f"data:{mime};base64,{encoded}"
+    response = _llm_chat_completion(
+        llm_client,
+        model=llm_model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "video_url", "video_url": {"url": data_url}},
+                ],
+            }
+        ],
+    )
+    text = _extract_llm_text(response)
+    if not text:
+        raise MarkItDownConversionError("No text returned from video LLM response")
+    return f"# Description:\n{text}\n"
+
+
+def _llm_audio_markdown(data: bytes, *, suffix: str, prompt: str) -> str:
+    llm_client, llm_model = _build_llm_config()
+    if llm_client is None or llm_model is None:
+        raise MarkItDownConversionError("LLM client not configured for audio analysis")
+    audio_format = _AUDIO_FORMAT_BY_SUFFIX.get(suffix, "wav")
+    encoded = base64.b64encode(data).decode("ascii")
+    response = _llm_chat_completion(
+        llm_client,
+        model=llm_model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": encoded, "format": audio_format},
+                    },
+                ],
+            }
+        ],
+    )
+    text = _extract_llm_text(response)
+    if not text:
+        raise MarkItDownConversionError("No text returned from audio LLM response")
+    return text
+
+
+def _is_video_media(*, suffix: str, content_type: str = "") -> bool:
+    return suffix in _VIDEO_SUFFIXES or content_type.lower().startswith("video/")
+
+
+def _is_audio_media(*, suffix: str, content_type: str = "") -> bool:
+    return suffix in _AUDIO_SUFFIXES or content_type.lower().startswith("audio/")
+
+
+def _maybe_convert_gif_to_mp4(path: Path) -> Path:
+    if path.suffix.lower() != ".gif":
+        return path
+    return _transcode_video_to_mp4(path)
+
+
 def _read_cache_entry(key: str) -> dict[str, Any] | None:
     path = _cache_entry_path(key)
     try:
@@ -357,21 +571,173 @@ def _image_context() -> tuple[bool, str, str, str, str | None]:
         os.getenv("OPENAI_BASE_URL") or ""
     ).strip() or "https://openrouter.ai/api/v1"
     model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-3-flash-preview"
-    prompt = (
-        os.getenv("OPENAI_PROMPT") or ""
-    ).strip() or "Write a detailed caption for this image."
+    prompt = _image_prompt()
     exiftool_path = (os.getenv("EXIFTOOL_PATH") or "").strip() or shutil.which(
         "exiftool"
     )
     return llm_enabled, base_url, model, prompt, exiftool_path
 
 
+def _image_prompt() -> str:
+    return _compose_alt_text_prompt(modality="image")
+
+
+def _audio_prompt() -> str:
+    return _compose_alt_text_prompt(modality="audio", include_transcript_hint=True)
+
+
+def _video_has_audio_stream(path: Path) -> bool:
+    ffprobe = _ffprobe_path()
+    if ffprobe is None:
+        return True
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "csv=p=0",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return True
+    return completed.returncode == 0 and bool(completed.stdout.strip())
+
+
+def _video_duration_seconds(path: Path) -> float | None:
+    ffprobe = _ffprobe_path()
+    if ffprobe is None:
+        return None
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    raw = (completed.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
+
+
+def _video_max_volume_db(path: Path, *, start_seconds: float = 0.0) -> float | None:
+    ffmpeg = _ffmpeg_path()
+    if ffmpeg is None:
+        return None
+    cmd = [
+        ffmpeg,
+        "-v",
+        "info",
+        "-ss",
+        f"{max(0.0, start_seconds):.3f}",
+        "-i",
+        str(path),
+        "-map",
+        "0:a:0",
+        "-t",
+        "8",
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    stderr = completed.stderr or ""
+    match = re.search(r"max_volume:\s*([-\w.]+)\s*dB", stderr)
+    if not match:
+        return None
+    max_volume = match.group(1).strip().lower()
+    if max_volume == "-inf":
+        return float("-inf")
+    try:
+        return float(max_volume)
+    except ValueError:
+        return None
+
+
+def _video_audio_is_silent(path: Path) -> bool:
+    first_max = _video_max_volume_db(path, start_seconds=0.0)
+    if first_max is None:
+        return False
+    if first_max != float("-inf"):
+        return False
+    duration = _video_duration_seconds(path)
+    if duration is None or duration <= 8.0:
+        return True
+    tail_start = max(0.0, duration - 8.0)
+    last_max = _video_max_volume_db(path, start_seconds=tail_start)
+    if last_max is None:
+        return False
+    return last_max == float("-inf")
+
+
+def _video_prompt(path: Path) -> str:
+    _load_dotenv_once()
+    custom = (os.getenv("OPENAI_VIDEO_PROMPT") or "").strip()
+    if custom:
+        return custom
+    shared = (os.getenv("OPENAI_PROMPT") or "").strip()
+    if shared:
+        return shared
+    if not _video_has_audio_stream(path):
+        return _compose_alt_text_prompt(modality="video")
+    if _video_audio_is_silent(path):
+        return _compose_alt_text_prompt(modality="video")
+    return _compose_alt_text_prompt(modality="video", include_transcript_hint=True)
+
+
+def _compose_alt_text_prompt(
+    *, modality: str, include_transcript_hint: bool = False
+) -> str:
+    base = f"Write detailed alt text for this {modality}"
+    if include_transcript_hint:
+        return f"{base}, including a transcript, if any speech is present."
+    return f"{base}."
+
+
 def _refresh_images_enabled(explicit: bool) -> bool:
     if explicit:
         return True
-    from ..runtime import get_refresh_images
+    from ..runtime import get_refresh_images, get_refresh_media
 
-    return get_refresh_images()
+    return get_refresh_images() or get_refresh_media()
 
 
 def _image_cache_payload(
@@ -513,7 +879,7 @@ def _get_converter():
     llm_client, llm_model = _build_llm_config()
     if llm_client is None or llm_model is None:
         return MarkItDown()
-    llm_prompt = (os.getenv("OPENAI_PROMPT") or "").strip() or None
+    llm_prompt = _image_prompt()
     return MarkItDown(llm_client=llm_client, llm_model=llm_model, llm_prompt=llm_prompt)
 
 
@@ -522,6 +888,8 @@ def convert_path_to_markdown(
 ) -> MarkItDownResult:
     path_obj = Path(path)
     is_image = path_obj.suffix.lower() in _IMAGE_SUFFIXES
+    is_video = _is_video_media(suffix=path_obj.suffix.lower())
+    is_audio = _is_audio_media(suffix=path_obj.suffix.lower())
     media_md5: str | None = None
     cache_key_payload: dict[str, Any] | None = None
     cache_key = ""
@@ -549,6 +917,35 @@ def convert_path_to_markdown(
                 "OPENAI_API_KEY/OPENROUTER_API_KEY."
             )
 
+    if is_video:
+        video_path = path_obj
+        cleanup_video = False
+        try:
+            video_path = _maybe_convert_gif_to_mp4(path_obj)
+            cleanup_video = video_path is not path_obj
+            markdown = _llm_video_markdown(
+                video_path.read_bytes(),
+                suffix=video_path.suffix.lower(),
+                prompt=_video_prompt(video_path),
+            )
+            return MarkItDownResult(markdown=markdown, title=None)
+        except MarkItDownConversionError:
+            pass
+        finally:
+            if cleanup_video:
+                video_path.unlink(missing_ok=True)
+
+    if is_audio:
+        try:
+            markdown = _llm_audio_markdown(
+                path_obj.read_bytes(),
+                suffix=path_obj.suffix.lower(),
+                prompt=_audio_prompt(),
+            )
+            return MarkItDownResult(markdown=markdown, title=None)
+        except MarkItDownConversionError:
+            pass
+
     markdown, title = _convert_markitdown_with_normalization(path_obj)
 
     if is_image and llm_enabled and not _HAS_LLM_DESCRIPTION_RE.search(markdown):
@@ -573,6 +970,8 @@ def convert_response_to_markdown(
     )
     url_suffix = Path(urlparse(str(response.url)).path).suffix.lower()
     is_image = url_suffix in _IMAGE_SUFFIXES or content_type.startswith("image/")
+    is_video = _is_video_media(suffix=url_suffix, content_type=content_type)
+    is_audio = _is_audio_media(suffix=url_suffix, content_type=content_type)
 
     media_md5: str | None = None
     cache_key_payload: dict[str, Any] | None = None
@@ -600,6 +999,40 @@ def convert_response_to_markdown(
                 "Image conversion requires either `exiftool` (or EXIFTOOL_PATH) or "
                 "OPENAI_API_KEY/OPENROUTER_API_KEY."
             )
+
+    if is_video:
+        temp_suffix = url_suffix or _suffix_from_content_type(content_type) or ".mp4"
+        temp_path = _mktemp_output(temp_suffix)
+        try:
+            temp_path.write_bytes(response.content)
+            video_path = _maybe_convert_gif_to_mp4(temp_path)
+            cleanup_video = video_path is not temp_path
+            try:
+                markdown = _llm_video_markdown(
+                    video_path.read_bytes(),
+                    suffix=video_path.suffix.lower(),
+                    prompt=_video_prompt(video_path),
+                )
+                return MarkItDownResult(markdown=markdown, title=None)
+            finally:
+                if cleanup_video:
+                    video_path.unlink(missing_ok=True)
+        except MarkItDownConversionError:
+            pass
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    if is_audio:
+        try:
+            suffix = url_suffix or _suffix_from_content_type(content_type) or ".wav"
+            markdown = _llm_audio_markdown(
+                response.content,
+                suffix=suffix.lower(),
+                prompt=_audio_prompt(),
+            )
+            return MarkItDownResult(markdown=markdown, title=None)
+        except MarkItDownConversionError:
+            pass
 
     try:
         markdown, title = _convert_markitdown(response, error_label=str(response.url))

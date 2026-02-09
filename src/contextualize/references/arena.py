@@ -105,24 +105,111 @@ def _get_auth_headers() -> dict[str, str]:
     return {}
 
 
+def _api_timeout_seconds() -> float:
+    raw = (os.environ.get("ARENA_API_TIMEOUT") or "").strip()
+    if not raw:
+        return 30.0
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 30.0
+
+
+def _api_max_attempts() -> int:
+    raw = (os.environ.get("ARENA_API_MAX_ATTEMPTS") or "").strip()
+    if not raw:
+        return 6
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 6
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    import random
+
+    base = min(30.0, 1.0 * (2 ** max(0, attempt - 1)))
+    return base + random.uniform(0.0, 0.25)
+
+
+def _server_error_retry_delay_seconds(attempt: int) -> float:
+    import random
+
+    base = min(30.0, 5.0 * (2 ** max(0, attempt - 1)))
+    return base + random.uniform(0.0, 0.25)
+
+
+def _retry_after_seconds(resp: object) -> float | None:
+    import time
+
+    headers = getattr(resp, "headers", None) or {}
+    retry_after = headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            pass
+    reset = headers.get("X-RateLimit-Reset")
+    if reset:
+        try:
+            value = float(reset)
+            if value > 10_000_000:
+                return max(0.0, value - time.time())
+            return max(0.0, value)
+        except ValueError:
+            pass
+    return None
+
+
 def _api_get(path: str, params: dict | None = None) -> dict:
     import requests
+    import time
 
     url = f"{_API_BASE}{path}"
     headers = {**_get_auth_headers(), "Accept": "application/json"}
-    resp = requests.get(url, headers=headers, params=params, timeout=30)
-    if resp.status_code == 429:
-        import time
+    timeout = _api_timeout_seconds()
+    max_attempts = _api_max_attempts()
+    transient_statuses = {429, 500, 502, 503, 504}
 
-        reset = resp.headers.get("X-RateLimit-Reset")
-        wait = int(reset) if reset else 5
-        print(f"Are.na rate limited, waiting {wait}s...", file=sys.stderr)
-        time.sleep(wait)
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
-    if resp.status_code == 404:
-        raise ValueError(f"Are.na resource not found: {path}")
-    resp.raise_for_status()
-    return resp.json()
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+            if attempt >= max_attempts:
+                raise
+            wait = _retry_delay_seconds(attempt)
+            _log(
+                f"  Are.na request failed ({type(exc).__name__}); retrying in {wait:.1f}s "
+                f"(attempt {attempt}/{max_attempts})"
+            )
+            time.sleep(wait)
+            continue
+
+        if resp.status_code == 404:
+            raise ValueError(f"Are.na resource not found: {path}")
+
+        if resp.status_code in transient_statuses and attempt < max_attempts:
+            if resp.status_code == 429:
+                wait = _retry_after_seconds(resp)
+                if wait is None:
+                    wait = _retry_delay_seconds(attempt)
+            else:
+                wait = _server_error_retry_delay_seconds(attempt)
+            _log(
+                f"  Are.na API returned {resp.status_code}; retrying in {wait:.1f}s "
+                f"(attempt {attempt}/{max_attempts})"
+            )
+            time.sleep(wait)
+            continue
+
+        resp.raise_for_status()
+        return resp.json()
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Are.na request failed unexpectedly for {path}")
 
 
 def _fetch_channel(slug: str) -> dict:
@@ -311,8 +398,22 @@ _DOWNLOAD_HEADERS = {
 }
 
 
-def _download_to_temp(url: str, suffix: str = "") -> Path | None:
+def _download_to_temp(
+    url: str, suffix: str = "", *, media_cache_identity: str | None = None
+) -> Path | None:
     import requests
+    from ..cache.arena import get_cached_media_bytes, store_media_bytes
+    from ..runtime import get_refresh_cache
+
+    cache_identity = media_cache_identity or url
+    cached = None if get_refresh_cache() else get_cached_media_bytes(cache_identity)
+    if cached:
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        try:
+            os.write(fd, cached)
+        finally:
+            os.close(fd)
+        return Path(path)
 
     try:
         resp = requests.get(url, headers=_DOWNLOAD_HEADERS, timeout=30)
@@ -321,6 +422,7 @@ def _download_to_temp(url: str, suffix: str = "") -> Path | None:
         return None
     if not resp.content:
         return None
+    store_media_bytes(cache_identity, resp.content)
     fd, path = tempfile.mkstemp(suffix=suffix)
     try:
         os.write(fd, resp.content)
@@ -329,10 +431,14 @@ def _download_to_temp(url: str, suffix: str = "") -> Path | None:
     return Path(path)
 
 
-def _render_block_binary(url: str, suffix: str) -> str:
+def _render_block_binary(
+    url: str, suffix: str, *, media_cache_identity: str | None = None
+) -> str:
     from ..render.markitdown import MarkItDownConversionError, convert_path_to_markdown
 
-    tmp = _download_to_temp(url, suffix=suffix)
+    tmp = _download_to_temp(
+        url, suffix=suffix, media_cache_identity=media_cache_identity
+    )
     if tmp is None:
         return ""
     try:
@@ -365,6 +471,56 @@ def _format_date_line(block: dict) -> str:
     if c_date and r_date and c_date != r_date:
         return f"connected {c_date} (created {r_date})"
     return c_date or r_date
+
+
+def _attachment_media_kind(
+    *, filename: str, extension: str, content_type: str
+) -> str | None:
+    ctype = content_type.lower().strip()
+    if ctype.startswith("image/"):
+        return "image"
+    if ctype.startswith("video/"):
+        return "video"
+    if ctype.startswith("audio/"):
+        return "audio"
+
+    suffix = (
+        f".{extension.lstrip('.').lower()}"
+        if extension
+        else Path(filename).suffix.lower()
+    )
+    if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".avif"}:
+        return "image"
+    if suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".mpg", ".m4v"}:
+        return "video"
+    if suffix in {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".aiff"}:
+        return "audio"
+    return None
+
+
+def _should_refresh_attachment_media(
+    *, filename: str, extension: str, content_type: str
+) -> bool:
+    from ..runtime import (
+        get_refresh_audio,
+        get_refresh_images,
+        get_refresh_media,
+        get_refresh_videos,
+    )
+
+    if get_refresh_media():
+        return True
+
+    media_kind = _attachment_media_kind(
+        filename=filename, extension=extension, content_type=content_type
+    )
+    if media_kind == "image":
+        return get_refresh_images()
+    if media_kind == "video":
+        return get_refresh_videos()
+    if media_kind == "audio":
+        return get_refresh_audio()
+    return False
 
 
 def _format_block_output(
@@ -405,19 +561,7 @@ def _render_block(
 
     block_id = block.get("id")
     updated_at = block.get("updated_at") or ""
-    from ..runtime import get_refresh_images
-
-    refresh_images = get_refresh_images()
-
-    if (
-        block_id
-        and updated_at
-        and block_type in ("Image", "Attachment")
-        and not refresh_images
-    ):
-        cached = get_cached_block_render(block_id, updated_at)
-        if cached is not None:
-            return cached
+    from ..runtime import get_refresh_images, get_refresh_media
 
     title = block.get("title") or ""
     if include_descriptions is None:
@@ -444,6 +588,11 @@ def _render_block(
         return _format_block_output(title, description, content, date=date)
 
     if block_type == "Image":
+        refresh_image = get_refresh_images() or get_refresh_media()
+        if block_id and updated_at and not refresh_image:
+            cached = get_cached_block_render(block_id, updated_at)
+            if cached is not None:
+                return cached
         image = block.get("image") or {}
         image_urls = list(
             dict.fromkeys(
@@ -461,7 +610,14 @@ def _render_block(
         )
         for image_url in image_urls:
             suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
-            converted = _render_block_binary(image_url, suffix)
+            media_cache_identity = (
+                f"arena:block:{block_id}:{updated_at}:image:{image_url}"
+                if block_id and updated_at
+                else image_url
+            )
+            converted = _render_block_binary(
+                image_url, suffix, media_cache_identity=media_cache_identity
+            )
             if converted:
                 result = _format_block_output(title, description, converted, date=date)
                 if result and block_id and updated_at:
@@ -496,9 +652,25 @@ def _render_block(
         filename = attachment.get("filename") or ""
         content_type = attachment.get("content_type") or ""
         extension = attachment.get("file_extension") or ""
+        refresh_attachment = _should_refresh_attachment_media(
+            filename=filename,
+            extension=extension,
+            content_type=content_type,
+        )
+        if block_id and updated_at and not refresh_attachment:
+            cached = get_cached_block_render(block_id, updated_at)
+            if cached is not None:
+                return cached
         if att_url:
             suffix = f".{extension}" if extension else Path(filename).suffix or ""
-            converted = _render_block_binary(att_url, suffix)
+            media_cache_identity = (
+                f"arena:block:{block_id}:{updated_at}:attachment:{att_url}"
+                if block_id and updated_at
+                else att_url
+            )
+            converted = _render_block_binary(
+                att_url, suffix, media_cache_identity=media_cache_identity
+            )
             if converted:
                 att_title = title if title != filename else ""
                 result = _format_block_output(
@@ -626,6 +798,8 @@ def resolve_channel(
             data = json.loads(cached)
             metadata = data["metadata"]
             flat = [(path, block) for path, block in data["blocks"]]
+            channel_title = metadata.get("title") or slug
+            _log(f"  using cached channel: {channel_title} ({len(flat)} items)")
             return metadata, flat
 
     metadata, contents = _fetch_all_channel_contents(

@@ -582,14 +582,29 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     help="Force refresh all cached URLs",
 )
 @click.option(
+    "--refresh-media",
+    is_flag=True,
+    help="Force refresh cached media conversions",
+)
+@click.option(
     "--refresh-images",
     is_flag=True,
     help="Force refresh cached image conversions",
 )
 @click.option(
+    "--refresh-videos",
+    is_flag=True,
+    help="Force refresh cached video conversions",
+)
+@click.option(
+    "--refresh-audio",
+    is_flag=True,
+    help="Force refresh cached audio conversions",
+)
+@click.option(
     "--refresh-all",
     is_flag=True,
-    help="Force refresh URL and image caches",
+    help="Force refresh URL and media caches",
 )
 @click.option(
     "--cache-ttl",
@@ -607,7 +622,10 @@ def payload_cmd(
     map_components,
     use_cache,
     refresh_cache,
+    refresh_media,
     refresh_images,
+    refresh_videos,
+    refresh_audio,
     refresh_all,
     cache_ttl,
 ):
@@ -632,10 +650,21 @@ def payload_cmd(
             raise click.BadParameter(str(exc)) from exc
 
     refresh_cache = refresh_cache or refresh_all
-    refresh_images = refresh_images or refresh_all
-    from .runtime import set_refresh_images
+    refresh_media = refresh_media or refresh_all
+    refresh_images = refresh_images or refresh_media
+    refresh_videos = refresh_videos or refresh_media
+    refresh_audio = refresh_audio or refresh_media
+    from .runtime import (
+        set_refresh_audio,
+        set_refresh_cache,
+        set_refresh_images,
+        set_refresh_videos,
+    )
 
+    set_refresh_cache(refresh_cache)
     set_refresh_images(refresh_images)
+    set_refresh_videos(refresh_videos)
+    set_refresh_audio(refresh_audio)
 
     def parse_keys(values):
         keys = []
@@ -856,14 +885,29 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     help="Force refresh all cached URLs",
 )
 @click.option(
+    "--refresh-media",
+    is_flag=True,
+    help="Force refresh cached media conversions",
+)
+@click.option(
     "--refresh-images",
     is_flag=True,
     help="Force refresh cached image conversions",
 )
 @click.option(
+    "--refresh-videos",
+    is_flag=True,
+    help="Force refresh cached video conversions",
+)
+@click.option(
+    "--refresh-audio",
+    is_flag=True,
+    help="Force refresh cached audio conversions",
+)
+@click.option(
     "--refresh-all",
     is_flag=True,
-    help="Force refresh URL and image caches",
+    help="Force refresh URL and media caches",
 )
 @click.option(
     "--cache-ttl",
@@ -884,7 +928,10 @@ def hydrate_cmd(
     copy_files,
     use_cache,
     refresh_cache,
+    refresh_media,
     refresh_images,
+    refresh_videos,
+    refresh_audio,
     refresh_all,
     cache_ttl,
 ):
@@ -915,10 +962,21 @@ def hydrate_cmd(
             raise click.BadParameter(str(exc)) from exc
 
     refresh_cache = refresh_cache or refresh_all
-    refresh_images = refresh_images or refresh_all
-    from .runtime import set_refresh_images
+    refresh_media = refresh_media or refresh_all
+    refresh_images = refresh_images or refresh_media
+    refresh_videos = refresh_videos or refresh_media
+    refresh_audio = refresh_audio or refresh_media
+    from .runtime import (
+        set_refresh_audio,
+        set_refresh_cache,
+        set_refresh_images,
+        set_refresh_videos,
+    )
 
+    set_refresh_cache(refresh_cache)
     set_refresh_images(refresh_images)
+    set_refresh_videos(refresh_videos)
+    set_refresh_audio(refresh_audio)
 
     manifest_path = None
     inline_targets: list[str] = []
@@ -1136,14 +1194,29 @@ def hydrate_cmd(
     help="Force refresh all cached URLs",
 )
 @click.option(
+    "--refresh-media",
+    is_flag=True,
+    help="Force refresh cached media conversions",
+)
+@click.option(
     "--refresh-images",
     is_flag=True,
     help="Force refresh cached image conversions",
 )
 @click.option(
+    "--refresh-videos",
+    is_flag=True,
+    help="Force refresh cached video conversions",
+)
+@click.option(
+    "--refresh-audio",
+    is_flag=True,
+    help="Force refresh cached audio conversions",
+)
+@click.option(
     "--refresh-all",
     is_flag=True,
-    help="Force refresh URL and image caches",
+    help="Force refresh URL and media caches",
 )
 @click.option(
     "--cache-ttl",
@@ -1169,7 +1242,10 @@ def cat_cmd(
     rev,
     use_cache,
     refresh_cache,
+    refresh_media,
     refresh_images,
+    refresh_videos,
+    refresh_audio,
     refresh_all,
     cache_ttl,
 ):
@@ -1195,10 +1271,21 @@ def cat_cmd(
             raise click.BadParameter(str(exc)) from exc
 
     refresh_cache = refresh_cache or refresh_all
-    refresh_images = refresh_images or refresh_all
-    from .runtime import set_refresh_images
+    refresh_media = refresh_media or refresh_all
+    refresh_images = refresh_images or refresh_media
+    refresh_videos = refresh_videos or refresh_media
+    refresh_audio = refresh_audio or refresh_media
+    from .runtime import (
+        set_refresh_audio,
+        set_refresh_cache,
+        set_refresh_images,
+        set_refresh_videos,
+    )
 
+    set_refresh_cache(refresh_cache)
     set_refresh_images(refresh_images)
+    set_refresh_videos(refresh_videos)
+    set_refresh_audio(refresh_audio)
 
     if not paths:
         click.echo(ctx.get_help())

@@ -1346,6 +1346,7 @@ def _resolve_arena_items(
 ) -> list[ResolvedItem]:
     from ..cache.arena import get_cached_block_render
     from ..references.arena import (
+        _attachment_media_kind,
         _fetch_block,
         _log as _arena_log,
         _render_block,
@@ -1409,12 +1410,41 @@ def _resolve_arena_items(
             rendered = _render_channel_stub(block)
         else:
             if block_type in ("Image", "Attachment"):
+                from ..runtime import (
+                    get_refresh_audio,
+                    get_refresh_images,
+                    get_refresh_media,
+                    get_refresh_videos,
+                )
+
                 block_id = block.get("id")
                 updated_at = block.get("updated_at") or ""
+                refresh_for_block = False
+                if block_type == "Image":
+                    refresh_for_block = get_refresh_images() or get_refresh_media()
+                elif block_type == "Attachment":
+                    attachment = block.get("attachment") or {}
+                    filename = attachment.get("filename") or ""
+                    content_type = attachment.get("content_type") or ""
+                    extension = attachment.get("file_extension") or ""
+                    media_kind = _attachment_media_kind(
+                        filename=filename,
+                        extension=extension,
+                        content_type=content_type,
+                    )
+                    refresh_for_block = get_refresh_media() or (
+                        media_kind == "image"
+                        and get_refresh_images()
+                        or media_kind == "video"
+                        and get_refresh_videos()
+                        or media_kind == "audio"
+                        and get_refresh_audio()
+                    )
                 if not (
                     block_id
                     and updated_at
                     and get_cached_block_render(block_id, updated_at) is not None
+                    and not refresh_for_block
                 ):
                     block_title = block.get("title") or f"block-{block_id}"
                     _arena_log(

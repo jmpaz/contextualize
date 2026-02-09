@@ -14,6 +14,7 @@ ARENA_CACHE_ROOT = Path(
     )
 )
 BLOCK_CACHE_ROOT = ARENA_CACHE_ROOT / "blocks"
+MEDIA_CACHE_ROOT = ARENA_CACHE_ROOT / "media"
 DEFAULT_TTL = timedelta(days=7)
 CACHE_VERSION = 1
 
@@ -129,3 +130,27 @@ def store_block_render(block_id: int, updated_at: str, rendered: str) -> None:
     key = _block_cache_key(block_id, updated_at)
     path = BLOCK_CACHE_ROOT / f"{key}.txt"
     path.write_text(rendered, encoding="utf-8")
+
+
+def _media_cache_key(identity: str) -> str:
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def get_cached_media_bytes(identity: str) -> bytes | None:
+    key = _media_cache_key(identity)
+    path = MEDIA_CACHE_ROOT / f"{key}.bin"
+    if not path.exists():
+        return None
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def store_media_bytes(identity: str, content: bytes) -> None:
+    if not content:
+        return
+    MEDIA_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    key = _media_cache_key(identity)
+    path = MEDIA_CACHE_ROOT / f"{key}.bin"
+    path.write_bytes(content)
