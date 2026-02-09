@@ -1,27 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import timedelta
-from pathlib import Path
-from typing import Any
-from urllib.parse import unquote, urlparse
 import hashlib
 import os
 import re
 import shutil
 import stat
+from dataclasses import dataclass, field
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlparse
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
-from .manifest import (
-    GROUP_BASE_KEY,
-    GROUP_PATH_KEY,
-    coerce_file_spec,
-    normalize_components,
-)
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_url
-from ..references.youtube import extract_video_id, is_youtube_url
 from ..references.helpers import (
     fetch_gist_files,
     is_http_url,
@@ -31,7 +24,14 @@ from ..references.helpers import (
     resolve_symbol_ranges,
     split_spec_symbols,
 )
+from ..references.youtube import extract_video_id, is_youtube_url
 from ..utils import extract_ranges
+from .manifest import (
+    GROUP_BASE_KEY,
+    GROUP_PATH_KEY,
+    coerce_file_spec,
+    normalize_components,
+)
 
 
 @dataclass(frozen=True)
@@ -345,6 +345,9 @@ def build_hydration_plan_data(
     file_timestamps: dict[Path, tuple[float, float]] = {}
     index_components: dict[str, list[dict[str, Any]]] = {}
     normalized_components: list[dict[str, Any]] = []
+    resolved_spec_cache: dict[
+        tuple[str, bool, bool, str | None], list[ResolvedItem]
+    ] = {}
 
     global_strip_prefix: Path | None = None
     if context_cfg["path_strategy"] == "by-component":
@@ -444,18 +447,30 @@ def build_hydration_plan_data(
                     symbols_spec = _merge_symbols(symbols_spec, path_symbols)
 
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
-                for item in _resolve_spec_items(
+                cache_alias = alias_hint if isinstance(alias_hint, str) else None
+                spec_cache_key = (
                     raw_spec,
-                    base_dir,
-                    component_name=comp_name,
-                    alias_hint=alias_hint,
-                    gitignore=comp_gitignore,
-                    use_cache=context_cfg["use_cache"],
-                    cache_ttl=context_cfg["cache_ttl"],
-                    refresh_cache=context_cfg["refresh_cache"],
-                    force_git=force_git,
-                    arena_overrides=arena_overrides,
-                ):
+                    force_git,
+                    comp_gitignore,
+                    cache_alias,
+                )
+                cached_items = resolved_spec_cache.get(spec_cache_key)
+                if cached_items is None:
+                    cached_items = _resolve_spec_items(
+                        raw_spec,
+                        base_dir,
+                        component_name=comp_name,
+                        alias_hint=alias_hint,
+                        gitignore=comp_gitignore,
+                        use_cache=context_cfg["use_cache"],
+                        cache_ttl=context_cfg["cache_ttl"],
+                        refresh_cache=context_cfg["refresh_cache"],
+                        force_git=force_git,
+                        arena_overrides=arena_overrides,
+                    )
+                    resolved_spec_cache[spec_cache_key] = cached_items
+
+                for item in cached_items:
                     ranges = range_spec[:] if range_spec else None
                     symbols = symbols_spec[:] if symbols_spec else None
 
@@ -906,6 +921,8 @@ def _find_global_subpath_prefix(
         for file_spec, force_git, _root in all_specs:
             raw_spec, file_opts = coerce_file_spec(file_spec)
             raw_spec, _ = split_spec_symbols(raw_spec)
+            if is_http_url(raw_spec):
+                continue
             try:
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
                 for item in _resolve_spec_items(
@@ -1348,13 +1365,15 @@ def _resolve_arena_items(
     from ..references.arena import (
         _attachment_media_kind,
         _fetch_block,
-        _log as _arena_log,
         _render_block,
         _render_channel_stub,
         build_arena_settings,
         extract_block_id,
         extract_channel_slug,
         resolve_channel,
+    )
+    from ..references.arena import (
+        _log as _arena_log,
     )
 
     settings = build_arena_settings(arena_overrides)
@@ -1459,6 +1478,9 @@ def _resolve_arena_items(
         bid = block.get("id", "unknown")
         ch_slug = block.get("slug", "")
         label = ch_slug or str(bid)
+        manifest_spec = url
+        if isinstance(bid, int) or (isinstance(bid, str) and bid.isdigit()):
+            manifest_spec = f"https://www.are.na/block/{bid}"
         items.append(
             ResolvedItem(
                 source_type="arena",
@@ -1467,7 +1489,7 @@ def _resolve_arena_items(
                 source_path=f"{slug}/{label}",
                 context_subpath=f"{dir_name}/{label}.md",
                 content=rendered,
-                manifest_spec=url,
+                manifest_spec=manifest_spec,
                 alias=alias if isinstance(alias, str) else None,
                 source_created=block.get("connected_at") or block.get("created_at"),
                 source_modified=block.get("updated_at"),

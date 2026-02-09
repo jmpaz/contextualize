@@ -432,7 +432,11 @@ def _download_to_temp(
 
 
 def _render_block_binary(
-    url: str, suffix: str, *, media_cache_identity: str | None = None
+    url: str,
+    suffix: str,
+    *,
+    media_cache_identity: str | None = None,
+    send_label: str | None = None,
 ) -> str:
     from ..render.markitdown import MarkItDownConversionError, convert_path_to_markdown
 
@@ -444,6 +448,8 @@ def _render_block_binary(
     try:
         from ..runtime import get_refresh_images
 
+        label = send_label or "arena-media"
+        _log(f"  sending to model: {label} ({url})")
         refresh_images = get_refresh_images()
         result = convert_path_to_markdown(str(tmp), refresh_images=refresh_images)
         return result.markdown
@@ -561,7 +567,7 @@ def _render_block(
 
     block_id = block.get("id")
     updated_at = block.get("updated_at") or ""
-    from ..runtime import get_refresh_images, get_refresh_media
+    from ..runtime import get_refresh_images, get_refresh_media, get_refresh_videos
 
     title = block.get("title") or ""
     if include_descriptions is None:
@@ -615,8 +621,12 @@ def _render_block(
                 if block_id and updated_at
                 else image_url
             )
+            send_label = f"image:{block_id or 'unknown'}:{(title or 'untitled')[:80]}"
             converted = _render_block_binary(
-                image_url, suffix, media_cache_identity=media_cache_identity
+                image_url,
+                suffix,
+                media_cache_identity=media_cache_identity,
+                send_label=send_label,
             )
             if converted:
                 result = _format_block_output(title, description, converted, date=date)
@@ -627,6 +637,8 @@ def _render_block(
         fallback = f"[Image: {title or block.get('id')}]"
         if fallback_url:
             fallback += f"\nURL: {fallback_url}"
+        if block_id and updated_at:
+            store_block_render(block_id, updated_at, fallback)
         return fallback
 
     if block_type == "Link":
@@ -668,8 +680,12 @@ def _render_block(
                 if block_id and updated_at
                 else att_url
             )
+            send_label = f"attachment:{block_id or 'unknown'}:{(filename or title or 'untitled')[:80]}"
             converted = _render_block_binary(
-                att_url, suffix, media_cache_identity=media_cache_identity
+                att_url,
+                suffix,
+                media_cache_identity=media_cache_identity,
+                send_label=send_label,
             )
             if converted:
                 att_title = title if title != filename else ""
@@ -684,20 +700,68 @@ def _render_block(
             fallback += f"\nType: {content_type}"
         if att_url:
             fallback += f"\nURL: {att_url}"
+        if block_id and updated_at:
+            store_block_render(block_id, updated_at, fallback)
         return fallback
 
     if block_type == "Embed":
+        refresh_embed = (
+            get_refresh_images() or get_refresh_media() or get_refresh_videos()
+        )
+        if block_id and updated_at and not refresh_embed:
+            cached = get_cached_block_render(block_id, updated_at)
+            if cached is not None:
+                return cached
+
         embed = block.get("embed") or {}
         embed_url = embed.get("url") or ""
         embed_type = embed.get("type") or ""
         embed_parts = []
+        if embed_type == "video":
+            image = block.get("image") or {}
+            image_urls = list(
+                dict.fromkeys(
+                    [
+                        u
+                        for u in (
+                            image.get("src"),
+                            (image.get("large") or {}).get("src"),
+                            (image.get("original") or {}).get("url"),
+                            image.get("url"),
+                        )
+                        if u
+                    ]
+                )
+            )
+            for image_url in image_urls:
+                suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
+                media_cache_identity = (
+                    f"arena:block:{block_id}:{updated_at}:embed-image:{image_url}"
+                    if block_id and updated_at
+                    else image_url
+                )
+                send_label = (
+                    f"embed-image:{block_id or 'unknown'}:{(title or 'untitled')[:80]}"
+                )
+                converted = _render_block_binary(
+                    image_url,
+                    suffix,
+                    media_cache_identity=media_cache_identity,
+                    send_label=send_label,
+                )
+                if converted:
+                    embed_parts.append(converted)
+                    break
         if embed_url:
             embed_parts.append(embed_url)
         if embed_type:
             embed_parts.append(f"Type: {embed_type}")
-        return _format_block_output(
+        result = _format_block_output(
             title, description, "\n\n".join(embed_parts), date=date
         )
+        if result and block_id and updated_at:
+            store_block_render(block_id, updated_at, result)
+        return result
 
     return _format_block_output(title, description, "", date=date)
 
@@ -755,6 +819,29 @@ def _flatten_channel_blocks(
     return result
 
 
+def _block_identity(block: dict) -> str | None:
+    block_id = block.get("id")
+    if block_id is not None:
+        return f"id:{block_id}"
+    slug = block.get("slug")
+    if slug:
+        return f"slug:{slug}"
+    return None
+
+
+def _dedupe_flat_blocks(flat: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
+    deduped: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for path, block in flat:
+        identity = _block_identity(block)
+        if identity is not None:
+            if identity in seen:
+                continue
+            seen.add(identity)
+        deduped.append((path, block))
+    return deduped
+
+
 def _sort_blocks(flat: list[tuple[str, dict]], order: str) -> list[tuple[str, dict]]:
     if order == "position-asc" or order == "asc":
         return flat
@@ -808,6 +895,7 @@ def resolve_channel(
         _recurse_users=recurse_users,
     )
     flat = _flatten_channel_blocks(contents, slug)
+    flat = _dedupe_flat_blocks(flat)
     flat = _sort_blocks(flat, sort_order)
 
     if use_cache:
