@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -331,9 +332,8 @@ def build_hydration_plan_data(
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
     context_dir = context_cfg["dir"]
-    use_external_root = context_cfg[
-        "path_strategy"
-    ] == "on-disk" and _manifest_has_local_sources(components)
+    has_local_sources = _manifest_has_local_sources(components)
+    use_external_root = context_cfg["path_strategy"] == "on-disk" and has_local_sources
     flatten_groups: set[tuple[str, ...]] = set()
     if context_cfg["path_strategy"] == "by-component":
         flatten_groups = _find_flatten_groups(components)
@@ -589,12 +589,17 @@ def build_hydration_plan_data(
                 )
 
         if normalized_files:
-            normalized_comp["files"] = normalized_files
+            normalized_comp["files"] = _dedupe_manifest_entries(normalized_files)
         normalized_components.append(normalized_comp)
 
     if context_cfg["include_meta"]:
         normalized_manifest = {
-            "config": _build_normalized_config(cfg, context_cfg, base_dir),
+            "config": _build_normalized_config(
+                cfg,
+                context_cfg,
+                base_dir,
+                include_root=has_local_sources,
+            ),
             "components": normalized_components,
         }
         manifest_text = _dump_manifest(normalized_manifest)
@@ -1478,9 +1483,6 @@ def _resolve_arena_items(
         bid = block.get("id", "unknown")
         ch_slug = block.get("slug", "")
         label = ch_slug or str(bid)
-        manifest_spec = url
-        if isinstance(bid, int) or (isinstance(bid, str) and bid.isdigit()):
-            manifest_spec = f"https://www.are.na/block/{bid}"
         items.append(
             ResolvedItem(
                 source_type="arena",
@@ -1489,7 +1491,7 @@ def _resolve_arena_items(
                 source_path=f"{slug}/{label}",
                 context_subpath=f"{dir_name}/{label}.md",
                 content=rendered,
-                manifest_spec=manifest_spec,
+                manifest_spec=url,
                 alias=alias if isinstance(alias, str) else None,
                 source_created=block.get("connected_at") or block.get("created_at"),
                 source_modified=block.get("updated_at"),
@@ -1914,6 +1916,21 @@ def _build_manifest_file_entry(
     return entry
 
 
+def _dedupe_manifest_entries(files: list[Any]) -> list[Any]:
+    deduped: list[Any] = []
+    seen: set[str] = set()
+    for item in files:
+        if isinstance(item, dict):
+            key = "d:" + json.dumps(item, sort_keys=True, separators=(",", ":"))
+        else:
+            key = "s:" + str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def _format_ranges(ranges: list[tuple[int, int]]) -> str | list[str]:
     formatted = [f"{start}-{end}" for start, end in ranges]
     if len(formatted) == 1:
@@ -1922,10 +1939,17 @@ def _format_ranges(ranges: list[tuple[int, int]]) -> str | list[str]:
 
 
 def _build_normalized_config(
-    cfg: dict[str, Any], context_cfg: dict[str, Any], base_dir: str
+    cfg: dict[str, Any],
+    context_cfg: dict[str, Any],
+    base_dir: str,
+    *,
+    include_root: bool,
 ) -> dict[str, Any]:
     normalized = dict(cfg)
-    normalized["root"] = base_dir
+    if include_root:
+        normalized["root"] = base_dir
+    else:
+        normalized.pop("root", None)
     context = dict(cfg.get("context") or {})
     context.pop("dir", None)
     context.pop("access", None)
