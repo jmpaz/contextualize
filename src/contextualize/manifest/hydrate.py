@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlparse
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
 from ..references import URLReference, YouTubeReference, create_file_references
-from ..references.arena import is_arena_url
+from ..references.arena import is_arena_channel_url, is_arena_url
 from ..references.helpers import (
     fetch_gist_files,
     is_http_url,
@@ -333,6 +333,7 @@ def build_hydration_plan_data(
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
     context_dir = context_cfg["dir"]
     has_local_sources = _manifest_has_local_sources(components)
+    has_arena_channels = _manifest_has_arena_channels(components)
     use_external_root = context_cfg["path_strategy"] == "on-disk" and has_local_sources
     flatten_groups: set[tuple[str, ...]] = set()
     if context_cfg["path_strategy"] == "by-component":
@@ -394,6 +395,7 @@ def build_hydration_plan_data(
 
         normalized_comp = _build_normalized_component(comp, comp_name)
         normalized_files: list[Any] = []
+        arena_first_paths: dict[str, Path] = {}
 
         for note_name, note_value in (
             ("text-001.md", comp_text),
@@ -547,6 +549,16 @@ def build_hydration_plan_data(
                     skip_external_root=skip_external_root,
                     external_root_prefix=spec_root,
                 )
+                arena_identity = _arena_block_identity(item)
+                if arena_identity:
+                    first_rel = arena_first_paths.get(arena_identity)
+                    if first_rel is None:
+                        arena_first_paths[arena_identity] = rel_path
+                    elif first_rel != rel_path:
+                        should_write = False
+                        files_to_symlink.append(
+                            (context_dir / rel_path, context_dir / first_rel)
+                        )
                 if should_write:
                     can_symlink = (
                         not context_cfg["copy"]
@@ -599,6 +611,8 @@ def build_hydration_plan_data(
                 context_cfg,
                 base_dir,
                 include_root=has_local_sources,
+                include_arena_max_depth=has_arena_channels,
+                arena_overrides=arena_overrides,
             ),
             "components": normalized_components,
         }
@@ -1036,6 +1050,23 @@ def _manifest_has_local_sources(components: list[dict[str, Any]]) -> bool:
         for file_spec in files:
             raw_spec, _ = coerce_file_spec(file_spec)
             if not _is_external_spec(raw_spec):
+                return True
+    return False
+
+
+def _manifest_has_arena_channels(components: list[dict[str, Any]]) -> bool:
+    for comp in components:
+        files = comp.get("files")
+        if not files or not isinstance(files, list):
+            continue
+        for file_spec in files:
+            raw_spec, _ = coerce_file_spec(file_spec)
+            spec = os.path.expanduser(raw_spec)
+            if not is_http_url(spec):
+                continue
+            opts = parse_target_spec(spec)
+            target = opts.get("target", spec)
+            if is_arena_channel_url(target):
                 return True
     return False
 
@@ -1483,13 +1514,22 @@ def _resolve_arena_items(
         bid = block.get("id", "unknown")
         ch_slug = block.get("slug", "")
         label = ch_slug or str(bid)
+        channel_parts = [part for part in channel_path.split("/") if part]
+        if channel_parts and channel_parts[0] == slug:
+            channel_parts = channel_parts[1:]
+        channel_subdir = "/".join(channel_parts)
+        context_subpath = (
+            f"{dir_name}/{channel_subdir}/{label}.md"
+            if channel_subdir
+            else f"{dir_name}/{label}.md"
+        )
         items.append(
             ResolvedItem(
                 source_type="arena",
                 source_ref="are.na",
                 source_rev=None,
                 source_path=f"{slug}/{label}",
-                context_subpath=f"{dir_name}/{label}.md",
+                context_subpath=context_subpath,
                 content=rendered,
                 manifest_spec=url,
                 alias=alias if isinstance(alias, str) else None,
@@ -1916,6 +1956,15 @@ def _build_manifest_file_entry(
     return entry
 
 
+def _arena_block_identity(item: ResolvedItem) -> str | None:
+    if item.source_type != "arena":
+        return None
+    leaf = item.source_path.rsplit("/", 1)[-1]
+    if not leaf.isdigit():
+        return None
+    return f"{item.source_ref}:{leaf}"
+
+
 def _dedupe_manifest_entries(files: list[Any]) -> list[Any]:
     deduped: list[Any] = []
     seen: set[str] = set()
@@ -1944,6 +1993,8 @@ def _build_normalized_config(
     base_dir: str,
     *,
     include_root: bool,
+    include_arena_max_depth: bool,
+    arena_overrides: dict[str, Any] | None,
 ) -> dict[str, Any]:
     normalized = dict(cfg)
     if include_root:
@@ -1968,6 +2019,13 @@ def _build_normalized_config(
         normalized["context"] = context
     else:
         normalized.pop("context", None)
+    if include_arena_max_depth:
+        from ..references.arena import build_arena_settings
+
+        arena_settings = build_arena_settings(arena_overrides)
+        arena = dict(cfg.get("arena") or {})
+        arena["max-depth"] = arena_settings.max_depth
+        normalized["arena"] = arena
     return normalized
 
 

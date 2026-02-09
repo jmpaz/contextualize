@@ -895,7 +895,6 @@ def resolve_channel(
         _recurse_users=recurse_users,
     )
     flat = _flatten_channel_blocks(contents, slug)
-    flat = _dedupe_flat_blocks(flat)
     flat = _sort_blocks(flat, sort_order)
 
     if use_cache:
