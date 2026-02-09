@@ -70,6 +70,7 @@ def _markitdown_version() -> str | None:
 
 
 _DESCRIPTION_HEADING_RE = re.compile(r"(?m)^# Description:?\s*$")
+_HAS_LLM_DESCRIPTION_RE = re.compile(r"(?m)^# Description")
 
 
 def _postprocess_image_markdown(markdown: str) -> str:
@@ -297,6 +298,12 @@ def convert_path_to_markdown(path: str | Path) -> MarkItDownResult:
             )
 
     markdown, title = _convert_markitdown(path_obj, error_label=str(path_obj))
+
+    if is_image and llm_enabled and not _HAS_LLM_DESCRIPTION_RE.search(markdown):
+        raise MarkItDownConversionError(
+            f"LLM description missing from image conversion of {path_obj}"
+        )
+
     out_markdown = _postprocess_image_markdown(markdown) if is_image else markdown
     out = MarkItDownResult(markdown=out_markdown, title=title)
     if is_image and media_md5 is not None:
@@ -342,6 +349,12 @@ def convert_response_to_markdown(response: ResponseLike) -> MarkItDownResult:
             )
 
     markdown, title = _convert_markitdown(response, error_label=str(response.url))
+
+    if is_image and llm_enabled and not _HAS_LLM_DESCRIPTION_RE.search(markdown):
+        raise MarkItDownConversionError(
+            f"LLM description missing from image conversion of {response.url}"
+        )
+
     out_markdown = _postprocess_image_markdown(markdown) if is_image else markdown
     out = MarkItDownResult(markdown=out_markdown, title=title)
     if is_image and media_md5 is not None:

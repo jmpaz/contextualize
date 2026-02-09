@@ -304,11 +304,18 @@ def _fetch_block(block_id: int) -> dict:
     return _api_get(f"/blocks/{block_id}")
 
 
+_DOWNLOAD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; contextualize/1.0)",
+    "Accept": "image/*,application/*;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.are.na/",
+}
+
+
 def _download_to_temp(url: str, suffix: str = "") -> Path | None:
     import requests
 
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(url, headers=_DOWNLOAD_HEADERS, timeout=30)
         resp.raise_for_status()
     except requests.exceptions.RequestException:
         return None
