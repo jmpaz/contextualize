@@ -445,16 +445,20 @@ def _render_block(
 
     if block_type == "Image":
         image = block.get("image") or {}
-        image_urls = [
-            u
-            for u in (
-                image.get("src"),
-                (image.get("large") or {}).get("src"),
-                (image.get("original") or {}).get("url"),
-                image.get("url"),
+        image_urls = list(
+            dict.fromkeys(
+                [
+                    u
+                    for u in (
+                        image.get("src"),
+                        (image.get("large") or {}).get("src"),
+                        (image.get("original") or {}).get("url"),
+                        image.get("url"),
+                    )
+                    if u
+                ]
             )
-            if u
-        ]
+        )
         for image_url in image_urls:
             suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
             converted = _render_block_binary(image_url, suffix)

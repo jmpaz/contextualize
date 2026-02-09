@@ -74,12 +74,23 @@ def _markitdown_version() -> str | None:
 _DESCRIPTION_HEADING_RE = re.compile(r"(?m)^# Description:?\s*$")
 _HAS_LLM_DESCRIPTION_RE = re.compile(r"(?m)^# Description")
 _IMAGE_SUFFIXES = frozenset(
-    {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".avif", ".tif", ".tiff"}
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".webp",
+        ".heic",
+        ".heif",
+        ".avif",
+        ".tif",
+        ".tiff",
+    }
 )
 _IMAGE_CONVERT_SUFFIXES = frozenset(
-    {".webp", ".heic", ".heif", ".avif", ".tif", ".tiff"}
+    {".gif", ".webp", ".heic", ".heif", ".avif", ".tif", ".tiff"}
 )
-_VIDEO_CONVERT_SUFFIXES = frozenset({".mov", ".avi", ".mkv", ".webm", ".m4v"})
+_VIDEO_CONVERT_SUFFIXES = frozenset({".mov", ".avi", ".mkv", ".webm", ".m4v", ".mp4"})
 _CONTENT_TYPE_SUFFIXES: dict[str, str] = {
     "image/heic": ".heic",
     "image/heif": ".heif",
@@ -185,13 +196,68 @@ def _transcode_video_to_mp4(source: Path) -> Path:
     return output
 
 
-def _maybe_normalize_media_path(source: Path) -> Path | None:
+def _extract_video_frame_to_jpg(source: Path) -> Path:
+    ffmpeg = _ffmpeg_path()
+    if ffmpeg is None:
+        raise MarkItDownConversionError(
+            f"Extracting a JPG frame requires ffmpeg for {source}"
+        )
+    output = _mktemp_output(".jpg")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        str(output),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        output.unlink(missing_ok=True)
+        raise MarkItDownConversionError(
+            f"Failed to invoke ffmpeg for {source}: {exc}"
+        ) from exc
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or "unknown ffmpeg error"
+        output.unlink(missing_ok=True)
+        raise MarkItDownConversionError(
+            f"Failed to extract JPG frame from {source}: {stderr}"
+        )
+    return output
+
+
+def _normalization_candidates(source: Path) -> list[Path]:
     suffix = source.suffix.lower()
     if suffix in _IMAGE_CONVERT_SUFFIXES:
-        return _transcode_image_to_jpg(source)
+        if suffix == ".gif":
+            candidates: list[Path] = []
+            try:
+                mp4 = _transcode_video_to_mp4(source)
+                candidates.append(mp4)
+                try:
+                    frame = _extract_video_frame_to_jpg(mp4)
+                except MarkItDownConversionError:
+                    frame = _extract_video_frame_to_jpg(source)
+                candidates.append(frame)
+            except MarkItDownConversionError:
+                candidates.append(_extract_video_frame_to_jpg(source))
+            return candidates
+        return [_transcode_image_to_jpg(source)]
     if suffix in _VIDEO_CONVERT_SUFFIXES:
-        return _transcode_video_to_mp4(source)
-    return None
+        if suffix == ".mp4":
+            return [_extract_video_frame_to_jpg(source)]
+        mp4 = _transcode_video_to_mp4(source)
+        return [mp4, _extract_video_frame_to_jpg(mp4)]
+    return []
 
 
 def _suffix_from_content_type(content_type: str) -> str | None:
@@ -381,20 +447,26 @@ def _convert_markitdown_with_normalization(path: Path) -> tuple[str, str | None]
     try:
         return _convert_markitdown(path, error_label=str(path))
     except MarkItDownConversionError as original_exc:
-        normalized_path = _maybe_normalize_media_path(path)
-        if normalized_path is None:
-            raise
         try:
-            return _convert_markitdown(
-                normalized_path,
-                error_label=f"{path} (normalized to {normalized_path.suffix})",
-            )
-        except MarkItDownConversionError as normalized_exc:
+            normalized_paths = _normalization_candidates(path)
+        except MarkItDownConversionError as normalization_exc:
             raise MarkItDownConversionError(
-                f"{original_exc}; auto-normalization also failed: {normalized_exc}"
-            ) from normalized_exc
-        finally:
-            normalized_path.unlink(missing_ok=True)
+                f"{original_exc}; auto-normalization preparation failed: {normalization_exc}"
+            ) from normalization_exc
+        if not normalized_paths:
+            raise
+        errors: list[str] = [str(original_exc)]
+        for normalized_path in normalized_paths:
+            try:
+                return _convert_markitdown(
+                    normalized_path,
+                    error_label=f"{path} (normalized to {normalized_path.suffix})",
+                )
+            except MarkItDownConversionError as normalized_exc:
+                errors.append(str(normalized_exc))
+            finally:
+                normalized_path.unlink(missing_ok=True)
+        raise MarkItDownConversionError(" | ".join(errors))
 
 
 @lru_cache(maxsize=1)
