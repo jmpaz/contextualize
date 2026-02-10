@@ -931,6 +931,16 @@ class ArenaReference:
     def path(self) -> str:
         return self.url
 
+    @property
+    def trace_path(self) -> str:
+        block_type = self.block.get("type", "")
+        is_channel = block_type == "Channel" or self.block.get("base_type") == "Channel"
+        if is_channel:
+            prefix = self.channel_path or self.block.get("slug") or "are.na/channel"
+            block_id = self.block.get("id", "unknown")
+            return f"{prefix}/{block_id}"
+        return _block_label(self.block, "are.na/block", self.channel_path)
+
     def read(self) -> str:
         return self.original_file_content
 

@@ -11,6 +11,15 @@ from ..references import FileReference
 from ..utils import count_tokens
 
 
+def _trace_path_for_ref(ref) -> str:
+    return (
+        getattr(ref, "trace_path", None)
+        or getattr(ref, "path", None)
+        or getattr(ref, "url", None)
+        or ""
+    )
+
+
 def _parse_frontmatter_title(text: str) -> str | None:
     """Extract `title` from YAML frontmatter if present."""
     if not text:
@@ -103,7 +112,9 @@ def format_trace_output(
     if not input_refs and not trace_items and not stdin_data and not injection_traces:
         return ""
 
-    all_paths = [r.path for r in input_refs] + [item[0] for item in trace_items]
+    all_paths = [_trace_path_for_ref(r) for r in input_refs] + [
+        item[0] for item in trace_items
+    ]
     if skipped_paths:
         all_paths.extend(skipped_paths)
     if ignored_files:
@@ -123,7 +134,7 @@ def format_trace_output(
 
     seen_files = set()
     for ref in input_refs:
-        path = getattr(ref, "path", None) or getattr(ref, "url", None) or ""
+        path = _trace_path_for_ref(ref)
         seen_files.add(os.path.abspath(path))
 
     def get_rel_path(path):
@@ -134,7 +145,7 @@ def format_trace_output(
         )
 
     for ref in input_refs:
-        path = getattr(ref, "path", None) or getattr(ref, "url", None) or ""
+        path = _trace_path_for_ref(ref)
         rel_path = get_rel_path(path)
         if getattr(ref, "is_map", False):
             rel_path = f"[map] {rel_path}"

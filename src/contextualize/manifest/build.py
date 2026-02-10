@@ -17,8 +17,21 @@ from ..utils import wrap_text
 
 
 class _SimpleReference:
-    def __init__(self, output: str):
+    def __init__(
+        self,
+        output: str,
+        *,
+        path: str | None = None,
+        trace_path: str | None = None,
+        content: str | None = None,
+    ):
         self.output = output
+        self.path = path or ""
+        if trace_path:
+            self.trace_path = trace_path
+        if content is not None:
+            self.file_content = content
+            self.original_file_content = content
 
 
 class _MapReference:
@@ -81,7 +94,11 @@ def _wrapped_url_reference(
     if label_suffix:
         label = f"{label} {label_suffix}"
     wrapped = wrap_text(url_ref.output, wrap or "md", label)
-    return _SimpleReference(wrapped)
+    return _SimpleReference(
+        wrapped,
+        path=url_ref.path,
+        content=url_ref.file_content,
+    )
 
 
 def _wrapped_arena_references(
@@ -134,7 +151,14 @@ def _wrapped_arena_references(
                 if label_suffix:
                     label = f"{label} {label_suffix}"
                 wrapped = wrap_text(arena_ref.output, wrap or "md", label)
-                refs.append(_SimpleReference(wrapped))
+                refs.append(
+                    _SimpleReference(
+                        wrapped,
+                        path=arena_ref.path,
+                        trace_path=arena_ref.trace_path,
+                        content=arena_ref.file_content,
+                    )
+                )
     else:
         block_id = extract_block_id(url)
         if block_id is not None:
@@ -151,7 +175,14 @@ def _wrapped_arena_references(
             if label_suffix:
                 label = f"{label} {label_suffix}"
             wrapped = wrap_text(arena_ref.output, wrap or "md", label)
-            refs.append(_SimpleReference(wrapped))
+            refs.append(
+                _SimpleReference(
+                    wrapped,
+                    path=arena_ref.path,
+                    trace_path=arena_ref.trace_path,
+                    content=arena_ref.file_content,
+                )
+            )
     return refs
 
 
@@ -181,7 +212,11 @@ def _wrapped_youtube_reference(
     if label_suffix:
         label = f"{label} {label_suffix}"
     wrapped = wrap_text(yt_ref.output, wrap or "md", label)
-    return _SimpleReference(wrapped)
+    return _SimpleReference(
+        wrapped,
+        path=yt_ref.path,
+        content=yt_ref.file_content,
+    )
 
 
 def _resolve_spec_to_paths(

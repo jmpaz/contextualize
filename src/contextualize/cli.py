@@ -1,5 +1,6 @@
 import os
 import sys
+from dataclasses import dataclass
 from collections.abc import Sequence
 
 import click
@@ -46,6 +47,41 @@ GLOBAL_OPTION_DEFAULTS = {
     "append_flag": False,
     "prepend_flag": False,
 }
+
+
+@dataclass
+class _TraceRef:
+    path: str
+    file_content: str
+    original_file_content: str
+
+
+def _hydrate_trace_refs(plan, read_from_dest: bool) -> list[_TraceRef]:
+    refs: list[_TraceRef] = []
+    for dest, content in plan.files_to_write:
+        refs.append(
+            _TraceRef(
+                path=str(dest),
+                file_content=content,
+                original_file_content=content,
+            )
+        )
+    for dest, source in plan.files_to_symlink:
+        target = dest if read_from_dest else source
+        text = ""
+        try:
+            with open(target, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            pass
+        refs.append(
+            _TraceRef(
+                path=str(dest),
+                file_content=text,
+                original_file_content=text,
+            )
+        )
+    return refs
 
 
 def _write_bold_section(
@@ -914,6 +950,11 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     type=str,
     help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
 )
+@click.option(
+    "--trace",
+    is_flag=True,
+    help="Output an itemized list of files prepared for hydration.",
+)
 @click.pass_context
 def hydrate_cmd(
     ctx,
@@ -934,6 +975,7 @@ def hydrate_cmd(
     refresh_audio,
     refresh_all,
     cache_ttl,
+    trace,
 ):
     """
     Materialize targets or a YAML manifest into a context folder.
@@ -953,6 +995,7 @@ def hydrate_cmd(
     )
 
     parsed_cache_ttl = None
+    token_target = ctx.obj.get("token_target", "cl100k_base")
     if cache_ttl is not None:
         from .cache import parse_duration
 
@@ -1109,6 +1152,28 @@ def hydrate_cmd(
             f.unlink()
     elif plan.context_dir.exists():
         if plan_matches_existing(plan):
+            if trace:
+                from .render.trace import (
+                    compute_input_token_details,
+                    format_trace_output,
+                )
+
+                trace_refs = _hydrate_trace_refs(plan, read_from_dest=False)
+
+                _, token_details = compute_input_token_details(
+                    trace_refs, token_target=token_target
+                )
+                trace_output = format_trace_output(
+                    trace_refs,
+                    [],
+                    common_prefix=str(plan.context_dir),
+                    token_target=token_target,
+                    input_token_details=token_details,
+                    sort_inputs_by_tokens=True,
+                )
+                if trace_output:
+                    click.echo(trace_output)
+                    click.echo("\n-----\n")
             click.echo(f"{plan.context_dir} is already up to date.")
             return None
         untracked = find_untracked_files(plan.context_dir)
@@ -1122,6 +1187,25 @@ def hydrate_cmd(
             raise click.ClickException(str(exc)) from exc
 
     result = apply_hydration_plan(plan)
+    if trace:
+        from .render.trace import compute_input_token_details, format_trace_output
+
+        trace_refs = _hydrate_trace_refs(plan, read_from_dest=True)
+
+        _, token_details = compute_input_token_details(
+            trace_refs, token_target=token_target
+        )
+        trace_output = format_trace_output(
+            trace_refs,
+            [],
+            common_prefix=str(plan.context_dir),
+            token_target=token_target,
+            input_token_details=token_details,
+            sort_inputs_by_tokens=True,
+        )
+        if trace_output:
+            click.echo(trace_output)
+            click.echo("\n-----\n")
     click.echo(f"Hydrated {result.file_count} files into {result.context_dir}")
     return None
 
@@ -1298,7 +1382,6 @@ def cat_cmd(
     from .render.links import add_markdown_link_refs
     from .render.trace import compute_input_token_details, format_trace_output
     from .references import (
-        FileReference,
         concat_refs,
         create_file_references,
         split_path_and_symbols,
@@ -1454,7 +1537,15 @@ def cat_cmd(
     trace_items = []
     skip_impact = {}
 
-    input_refs = [r for r in refs if isinstance(r, FileReference)]
+    input_refs = [
+        r
+        for r in refs
+        if (getattr(r, "path", None) or getattr(r, "url", None))
+        and (
+            getattr(r, "file_content", None) is not None
+            or getattr(r, "original_file_content", None) is not None
+        )
+    ]
 
     if link_depth > 0 and not use_rev:
         from .render.markitdown import MarkItDownConversionError
@@ -1538,7 +1629,7 @@ def cat_cmd(
             ignored_folders=ignored_folders,
             token_target=token_target,
             input_token_details=token_details,
-            sort_inputs_by_tokens=bool(token_details),
+            sort_inputs_by_tokens=bool(max_tokens_budget),
         )
         ctx.obj["trace_output"] = trace_output
 
