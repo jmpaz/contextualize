@@ -347,7 +347,7 @@ def build_hydration_plan_data(
     index_components: dict[str, list[dict[str, Any]]] = {}
     normalized_components: list[dict[str, Any]] = []
     resolved_spec_cache: dict[
-        tuple[str, bool, bool, str | None], list[ResolvedItem]
+        tuple[str, bool, bool, str | None, tuple[Any, ...] | None], list[ResolvedItem]
     ] = {}
 
     global_strip_prefix: Path | None = None
@@ -382,6 +382,9 @@ def build_hydration_plan_data(
             comp.get(GROUP_BASE_KEY),
             context_cfg["path_strategy"],
             flatten_groups=flatten_groups,
+        )
+        component_arena_overrides = _parse_arena_config_mapping(
+            comp.get("arena"), prefix=f"component '{comp_name}'.arena"
         )
 
         if (
@@ -437,7 +440,9 @@ def build_hydration_plan_data(
                     str | None,
                 ]
             ] = []
-            for file_spec, force_git, spec_root in all_specs:
+            for spec_index, (file_spec, force_git, spec_root) in enumerate(
+                all_specs, 1
+            ):
                 raw_spec, file_opts = coerce_file_spec(file_spec)
                 spec_comment = _parse_comment(file_opts.pop("comment", None))
                 range_value = file_opts.pop("range", None)
@@ -447,6 +452,18 @@ def build_hydration_plan_data(
                 raw_spec, path_symbols = split_spec_symbols(raw_spec)
                 if path_symbols:
                     symbols_spec = _merge_symbols(symbols_spec, path_symbols)
+                file_arena_overrides = _parse_arena_config_mapping(
+                    file_opts.get("arena"),
+                    prefix=f"component '{comp_name}' file[{spec_index}].arena",
+                )
+                effective_arena_overrides = _merge_arena_overrides(
+                    arena_overrides,
+                    component_arena_overrides,
+                    file_arena_overrides,
+                )
+                arena_overrides_key = _arena_overrides_cache_key(
+                    effective_arena_overrides
+                )
 
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
                 cache_alias = alias_hint if isinstance(alias_hint, str) else None
@@ -455,6 +472,7 @@ def build_hydration_plan_data(
                     force_git,
                     comp_gitignore,
                     cache_alias,
+                    arena_overrides_key,
                 )
                 cached_items = resolved_spec_cache.get(spec_cache_key)
                 if cached_items is None:
@@ -468,7 +486,7 @@ def build_hydration_plan_data(
                         cache_ttl=context_cfg["cache_ttl"],
                         refresh_cache=context_cfg["refresh_cache"],
                         force_git=force_git,
-                        arena_overrides=arena_overrides,
+                        arena_overrides=effective_arena_overrides,
                     )
                     resolved_spec_cache[spec_cache_key] = cached_items
 
@@ -758,12 +776,11 @@ def _resolve_agents(
     return text, files
 
 
-def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
-    raw = cfg.get("arena")
+def _parse_arena_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise ValueError("config.arena must be a mapping")
+        raise ValueError(f"{prefix} must be a mapping")
 
     from ..references.arena import VALID_SORT_ORDERS
 
@@ -774,7 +791,7 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
     if recurse_depth is not None and max_depth_alias is not None:
         if recurse_depth != max_depth_alias:
             raise ValueError(
-                "config.arena.recurse-depth and config.arena.max-depth cannot differ"
+                f"{prefix}.recurse-depth and {prefix}.max-depth cannot differ"
             )
     if recurse_depth is None:
         recurse_depth = max_depth_alias
@@ -785,7 +802,7 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
             or recurse_depth < 0
         ):
             raise ValueError(
-                "config.arena.recurse-depth (alias: max-depth) must be a non-negative integer"
+                f"{prefix}.recurse-depth (alias: max-depth) must be a non-negative integer"
             )
         result["max_depth"] = recurse_depth
 
@@ -795,9 +812,7 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
         left = str(block_sort).lower().strip()
         right = str(sort_alias).lower().strip()
         if left != right:
-            raise ValueError(
-                "config.arena.block-sort and config.arena.sort cannot differ"
-            )
+            raise ValueError(f"{prefix}.block-sort and {prefix}.sort cannot differ")
     if block_sort is None:
         block_sort = sort_alias
     if block_sort is not None:
@@ -806,7 +821,7 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
             or block_sort.lower().strip() not in VALID_SORT_ORDERS
         ):
             raise ValueError(
-                "config.arena.block-sort (alias: sort) must be one of: "
+                f"{prefix}.block-sort (alias: sort) must be one of: "
                 + ", ".join(sorted(VALID_SORT_ORDERS))
             )
         result["sort_order"] = block_sort.lower().strip()
@@ -814,25 +829,25 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
     if "include-descriptions" in raw:
         val = raw["include-descriptions"]
         if not isinstance(val, bool):
-            raise ValueError("config.arena.include-descriptions must be a boolean")
+            raise ValueError(f"{prefix}.include-descriptions must be a boolean")
         result["include_descriptions"] = val
 
     if "include-comments" in raw:
         val = raw["include-comments"]
         if not isinstance(val, bool):
-            raise ValueError("config.arena.include-comments must be a boolean")
+            raise ValueError(f"{prefix}.include-comments must be a boolean")
         result["include_comments"] = val
 
     if "include-link-images" in raw:
         val = raw["include-link-images"]
         if not isinstance(val, bool):
-            raise ValueError("config.arena.include-link-images must be a boolean")
+            raise ValueError(f"{prefix}.include-link-images must be a boolean")
         result["include_link_image_descriptions"] = val
 
     if "include-pdf-content" in raw:
         val = raw["include-pdf-content"]
         if not isinstance(val, bool):
-            raise ValueError("config.arena.include-pdf-content must be a boolean")
+            raise ValueError(f"{prefix}.include-pdf-content must be a boolean")
         result["include_pdf_content"] = val
 
     if "recurse-users" in raw:
@@ -849,10 +864,37 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
             result["recurse_users"] = {str(v).strip().lower() for v in val if v}
         else:
             raise ValueError(
-                "config.arena.recurse-users must be a string or list of strings"
+                f"{prefix}.recurse-users must be a string or list of strings"
             )
 
     return result if result else None
+
+
+def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
+    return _parse_arena_config_mapping(cfg.get("arena"), prefix="config.arena")
+
+
+def _merge_arena_overrides(*overrides: dict[str, Any] | None) -> dict[str, Any] | None:
+    merged: dict[str, Any] = {}
+    for item in overrides:
+        if item:
+            merged.update(item)
+    return merged or None
+
+
+def _arena_overrides_cache_key(
+    overrides: dict[str, Any] | None,
+) -> tuple[Any, ...] | None:
+    if not overrides:
+        return None
+
+    normalized: list[tuple[str, Any]] = []
+    for key, value in sorted(overrides.items()):
+        if isinstance(value, set):
+            normalized.append((key, tuple(sorted(value))))
+        else:
+            normalized.append((key, value))
+    return tuple(normalized)
 
 
 def _queue_agent_files(

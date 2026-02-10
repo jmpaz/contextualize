@@ -15,6 +15,7 @@ _DEFAULT_KEYS = {
     "link-skip",
     "strip-paths",
     "gitignore",
+    "arena",
 }
 _GROUP_KEYS = {"group", "components", *_DEFAULT_KEYS}
 

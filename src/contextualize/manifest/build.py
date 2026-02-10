@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..render.links import add_markdown_link_refs
+from .hydrate import _merge_arena_overrides, _parse_arena_config_mapping
 from .manifest import coerce_file_spec, component_selectors
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_url
@@ -574,6 +575,9 @@ def build_payload_impl(
 
         comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
         comp_link_scope = (comp.get("link-scope", link_scope_default) or "all").lower()
+        component_arena_overrides = _parse_arena_config_mapping(
+            comp.get("arena"), prefix=f"component '{name}'.arena"
+        )
 
         comp_link_skip = comp.get("link-skip", link_skip_default)
         if comp_link_skip is None:
@@ -591,10 +595,19 @@ def build_payload_impl(
         refs_for_attachment = []
         input_refs_for_comp = []
 
-        for spec in files:
+        for spec_index, spec in enumerate(files, 1):
             spec, file_opts = coerce_file_spec(spec)
             raw_spec = spec
             item_comment = _format_comment(file_opts.get("comment"))
+            file_arena_overrides = _parse_arena_config_mapping(
+                file_opts.get("arena"),
+                prefix=f"component '{name}' file[{spec_index}].arena",
+            )
+            effective_arena_overrides = _merge_arena_overrides(
+                arena_overrides,
+                component_arena_overrides,
+                file_arena_overrides,
+            )
 
             if map_component:
                 map_paths = _resolve_spec_to_paths(
@@ -645,7 +658,7 @@ def build_payload_impl(
                 use_cache=use_cache,
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
-                arena_overrides=arena_overrides,
+                arena_overrides=effective_arena_overrides,
             )
 
             input_refs_for_comp.extend([r for r in seed_refs if hasattr(r, "path")])
