@@ -789,6 +789,18 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
             raise ValueError("config.arena.include-descriptions must be a boolean")
         result["include_descriptions"] = val
 
+    if "include-comments" in raw:
+        val = raw["include-comments"]
+        if not isinstance(val, bool):
+            raise ValueError("config.arena.include-comments must be a boolean")
+        result["include_comments"] = val
+
+    if "include-link-images" in raw:
+        val = raw["include-link-images"]
+        if not isinstance(val, bool):
+            raise ValueError("config.arena.include-link-images must be a boolean")
+        result["include_link_image_descriptions"] = val
+
     if "recurse-users" in raw:
         val = raw["recurse-users"]
         if isinstance(val, str):
@@ -1418,7 +1430,12 @@ def _resolve_arena_items(
     if block_id is not None:
         block = _fetch_block(block_id)
         text = (
-            _render_block(block, include_descriptions=settings.include_descriptions)
+            _render_block(
+                block,
+                include_descriptions=settings.include_descriptions,
+                include_comments=settings.include_comments,
+                include_link_image_descriptions=settings.include_link_image_descriptions,
+            )
             or ""
         )
         filename = f"arena-block-{block_id}.md"
@@ -1506,7 +1523,10 @@ def _resolve_arena_items(
                         f"  rendering {block_type.lower()} ({idx}/{total}): {block_title[:60]}"
                     )
             rendered = _render_block(
-                block, include_descriptions=settings.include_descriptions
+                block,
+                include_descriptions=settings.include_descriptions,
+                include_comments=settings.include_comments,
+                include_link_image_descriptions=settings.include_link_image_descriptions,
             )
         if rendered is None:
             continue

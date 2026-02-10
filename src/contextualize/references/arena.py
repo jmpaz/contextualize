@@ -6,7 +6,7 @@ import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..render.text import process_text
@@ -233,6 +233,16 @@ def _get_include_descriptions() -> bool:
     return raw not in ("0", "false", "no")
 
 
+def _get_include_comments() -> bool:
+    raw = os.environ.get("ARENA_INCLUDE_COMMENTS", "1").lower()
+    return raw not in ("0", "false", "no")
+
+
+def _get_include_link_image_descriptions() -> bool:
+    raw = os.environ.get("ARENA_INCLUDE_LINK_IMAGES", "0").lower()
+    return raw not in ("0", "false", "no")
+
+
 def _get_sort_order() -> str:
     return os.environ.get("ARENA_SORT", "desc").lower().strip()
 
@@ -264,6 +274,8 @@ class ArenaSettings:
     max_depth: int = 1
     sort_order: str = "desc"
     include_descriptions: bool = True
+    include_comments: bool = True
+    include_link_image_descriptions: bool = False
     recurse_users: set[str] | None = field(default_factory=lambda: {"self"})
 
 
@@ -272,6 +284,8 @@ def _arena_settings_from_env() -> ArenaSettings:
         max_depth=_get_max_depth(),
         sort_order=_get_sort_order(),
         include_descriptions=_get_include_descriptions(),
+        include_comments=_get_include_comments(),
+        include_link_image_descriptions=_get_include_link_image_descriptions(),
         recurse_users=_get_recurse_users(),
     )
 
@@ -286,12 +300,18 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
     include_descriptions = overrides.get(
         "include_descriptions", env.include_descriptions
     )
+    include_comments = overrides.get("include_comments", env.include_comments)
+    include_link_image_descriptions = overrides.get(
+        "include_link_image_descriptions", env.include_link_image_descriptions
+    )
     recurse_users = overrides.get("recurse_users", env.recurse_users)
 
     return ArenaSettings(
         max_depth=max_depth,
         sort_order=sort_order,
         include_descriptions=include_descriptions,
+        include_comments=include_comments,
+        include_link_image_descriptions=include_link_image_descriptions,
         recurse_users=recurse_users,
     )
 
@@ -391,6 +411,39 @@ def _fetch_block(block_id: int) -> dict:
     return _api_get(f"/blocks/{block_id}")
 
 
+def _fetch_block_comments_page(block_id: int, page: int, per: int = 100) -> dict:
+    return _api_get(f"/blocks/{block_id}/comments", {"page": page, "per": per})
+
+
+def _fetch_all_block_comments(block_id: int) -> list[dict]:
+    first_page = _fetch_block_comments_page(block_id, 1)
+    comments = list(first_page.get("data", first_page.get("comments", [])))
+    meta = first_page.get("meta", {})
+    total_pages = meta.get("total_pages", 1)
+    for page in range(2, total_pages + 1):
+        page_data = _fetch_block_comments_page(block_id, page)
+        comments.extend(page_data.get("data", page_data.get("comments", [])))
+    return comments
+
+
+def _block_image_urls(block: dict) -> list[str]:
+    image = block.get("image") or {}
+    return list(
+        dict.fromkeys(
+            [
+                u
+                for u in (
+                    image.get("src"),
+                    (image.get("large") or {}).get("src"),
+                    (image.get("original") or {}).get("url"),
+                    image.get("url"),
+                )
+                if u
+            ]
+        )
+    )
+
+
 _DOWNLOAD_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; contextualize/1.0)",
     "Accept": "image/*,application/*;q=0.9,*/*;q=0.8",
@@ -479,6 +532,189 @@ def _format_date_line(block: dict) -> str:
     return c_date or r_date
 
 
+_DESCRIPTION_HEADING_RE = re.compile(
+    r"(?m)^#{1,6}\s+Description(?: \(auto-generated\))?:?\s*$"
+)
+_IMAGE_SIZE_RE = re.compile(r"(?i)^image\s*size\s*:\s*([0-9]+\s*[x×]\s*[0-9]+)\s*$")
+_STAR_LINE_RE = re.compile(r"^\*{3,}$")
+
+
+def _extract_markdown_like_text(raw: object) -> str:
+    if isinstance(raw, dict):
+        return raw.get("markdown") or raw.get("plain") or ""
+    if isinstance(raw, str):
+        return raw
+    return ""
+
+
+def _format_comment_timestamp(iso_timestamp: str) -> str:
+    if not iso_timestamp:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return iso_timestamp
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.strftime("%Y-%m-%dT%H:%MZ")
+
+
+def _comment_author(comment: dict) -> str:
+    user = comment.get("user") or comment.get("owner") or {}
+    for key in ("name", "username", "slug"):
+        value = user.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "Unknown"
+
+
+def _comment_body(comment: dict) -> str:
+    raw = (
+        comment.get("content")
+        or comment.get("comment")
+        or comment.get("body")
+        or comment.get("text")
+        or ""
+    )
+    text = _extract_markdown_like_text(raw)
+    return " ".join(text.split())
+
+
+def _render_comments_section(comments: list[dict]) -> str:
+    if not comments:
+        return ""
+    sorted_comments = sorted(
+        comments,
+        key=lambda c: (c.get("created_at") or "", c.get("id") or 0),
+        reverse=True,
+    )
+    lines: list[str] = []
+    for comment in sorted_comments:
+        author = _comment_author(comment)
+        body = _comment_body(comment)
+        timestamp = _format_comment_timestamp(comment.get("created_at") or "")
+        prefix = author
+        if timestamp:
+            prefix += f" @ {timestamp}"
+        if body:
+            lines.append(f"{prefix}: {body}")
+        else:
+            lines.append(f"{prefix}:")
+    return "## Comments\n\n" + "\n\n".join(lines)
+
+
+def _block_comment_count_hint(block: dict) -> int | None:
+    counts = block.get("counts")
+    if isinstance(counts, dict):
+        raw = counts.get("comments")
+        if isinstance(raw, int):
+            return raw
+    for key in ("comments_count", "comment_count"):
+        raw = block.get(key)
+        if isinstance(raw, int):
+            return raw
+    return None
+
+
+def _strip_description_heading(markdown: str) -> str:
+    stripped = markdown.strip()
+    return _DESCRIPTION_HEADING_RE.sub("", stripped, count=1).strip()
+
+
+def _normalize_image_size(raw: str) -> str:
+    return raw.replace(" ", "").replace("×", "x").lower()
+
+
+def _normalize_image_description_markdown(markdown: str) -> str:
+    body = _strip_description_heading(markdown)
+    if not body:
+        return ""
+    lines = body.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+
+    dimensions = ""
+    if lines:
+        match = _IMAGE_SIZE_RE.match(lines[0].strip())
+        if match:
+            dimensions = _normalize_image_size(match.group(1))
+            lines.pop(0)
+            while lines and not lines[0].strip():
+                lines.pop(0)
+
+    normalized_body = "\n".join(lines).strip()
+    heading = "## Block image description (auto-generated"
+    if dimensions:
+        heading += f", dimensions: {dimensions}"
+    heading += ")"
+    if not normalized_body:
+        return heading
+    return f"{heading}\n\n{normalized_body}"
+
+
+def _render_link_image_description(
+    block: dict, *, block_id: object, updated_at: str, title: str
+) -> str:
+    image_urls = _block_image_urls(block)
+    for image_url in image_urls:
+        suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
+        media_cache_identity = (
+            f"arena:block:{block_id}:{updated_at}:link-image:{image_url}"
+            if block_id and updated_at
+            else image_url
+        )
+        send_label = f"link-image:{block_id or 'unknown'}:{(title or 'untitled')[:80]}"
+        converted = _render_block_binary(
+            image_url,
+            suffix,
+            media_cache_identity=media_cache_identity,
+            send_label=send_label,
+        )
+        if not converted:
+            continue
+        normalized = _normalize_image_description_markdown(converted)
+        if not normalized:
+            continue
+        return normalized
+    return ""
+
+
+def _comments_separator(rendered: str) -> str:
+    best = ""
+    for line in rendered.splitlines():
+        stripped = line.strip()
+        if _STAR_LINE_RE.fullmatch(stripped):
+            if len(stripped) > len(best):
+                best = stripped
+    return best or "***"
+
+
+def _append_comments_section(rendered: str | None, comments_section: str) -> str | None:
+    if not rendered or not comments_section:
+        return rendered
+    separator = _comments_separator(rendered)
+    return f"{rendered}\n\n{separator}\n\n{comments_section}"
+
+
+def _block_comments_output(block: dict, *, include_comments: bool) -> str:
+    if not include_comments:
+        return ""
+    block_id = block.get("id")
+    if not isinstance(block_id, int):
+        return ""
+    hint = _block_comment_count_hint(block)
+    if hint == 0:
+        return ""
+    try:
+        comments = _fetch_all_block_comments(block_id)
+    except Exception as exc:
+        _log(f"  failed to fetch comments for block {block_id}: {type(exc).__name__}")
+        return ""
+    return _render_comments_section(comments)
+
+
 def _attachment_media_kind(
     *, filename: str, extension: str, content_type: str
 ) -> str | None:
@@ -556,7 +792,11 @@ def _format_block_output(
 
 
 def _render_block(
-    block: dict, *, include_descriptions: bool | None = None
+    block: dict,
+    *,
+    include_descriptions: bool | None = None,
+    include_comments: bool | None = None,
+    include_link_image_descriptions: bool | None = None,
 ) -> str | None:
     from ..cache.arena import get_cached_block_render, store_block_render
 
@@ -573,175 +813,40 @@ def _render_block(
     if include_descriptions is None:
         include_descriptions = _get_include_descriptions()
     if include_descriptions:
-        raw_desc = block.get("description") or ""
-        if isinstance(raw_desc, dict):
-            description = raw_desc.get("markdown") or raw_desc.get("plain") or ""
-        else:
-            description = raw_desc
+        description = _extract_markdown_like_text(block.get("description") or "")
     else:
         description = ""
+    if include_comments is None:
+        include_comments = _get_include_comments()
+    if include_link_image_descriptions is None:
+        include_link_image_descriptions = _get_include_link_image_descriptions()
 
     date = _format_date_line(block)
+    core_output: str | None = None
 
     if block_type == "Text":
-        raw_content = block.get("content") or ""
-        if isinstance(raw_content, dict):
-            content = raw_content.get("markdown") or raw_content.get("plain") or ""
-        else:
-            content = raw_content
+        content = _extract_markdown_like_text(block.get("content") or "")
         if description == content:
             description = ""
-        return _format_block_output(title, description, content, date=date)
+        core_output = _format_block_output(title, description, content, date=date)
 
-    if block_type == "Image":
+    elif block_type == "Image":
         refresh_image = get_refresh_images() or get_refresh_media()
         if block_id and updated_at and not refresh_image:
             cached = get_cached_block_render(block_id, updated_at)
             if cached is not None:
-                return cached
-        image = block.get("image") or {}
-        image_urls = list(
-            dict.fromkeys(
-                [
-                    u
-                    for u in (
-                        image.get("src"),
-                        (image.get("large") or {}).get("src"),
-                        (image.get("original") or {}).get("url"),
-                        image.get("url"),
-                    )
-                    if u
-                ]
-            )
-        )
-        for image_url in image_urls:
-            suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
-            media_cache_identity = (
-                f"arena:block:{block_id}:{updated_at}:image:{image_url}"
-                if block_id and updated_at
-                else image_url
-            )
-            send_label = f"image:{block_id or 'unknown'}:{(title or 'untitled')[:80]}"
-            converted = _render_block_binary(
-                image_url,
-                suffix,
-                media_cache_identity=media_cache_identity,
-                send_label=send_label,
-            )
-            if converted:
-                result = _format_block_output(title, description, converted, date=date)
-                if result and block_id and updated_at:
-                    store_block_render(block_id, updated_at, result)
-                return result
-        fallback_url = image_urls[0] if image_urls else ""
-        fallback = f"[Image: {title or block.get('id')}]"
-        if fallback_url:
-            fallback += f"\nURL: {fallback_url}"
-        if block_id and updated_at:
-            store_block_render(block_id, updated_at, fallback)
-        return fallback
-
-    if block_type == "Link":
-        source = block.get("source") or {}
-        source_url = source.get("url") or ""
-        raw_content = block.get("content") or ""
-        if isinstance(raw_content, dict):
-            content = raw_content.get("markdown") or raw_content.get("plain") or ""
-        else:
-            content = raw_content
-        link_parts = []
-        if source_url:
-            link_parts.append(source_url)
-        if content:
-            link_parts.append(content)
-        return _format_block_output(
-            title, description, "\n\n".join(link_parts), date=date
-        )
-
-    if block_type == "Attachment":
-        attachment = block.get("attachment") or {}
-        att_url = attachment.get("url") or ""
-        filename = attachment.get("filename") or ""
-        content_type = attachment.get("content_type") or ""
-        extension = attachment.get("file_extension") or ""
-        refresh_attachment = _should_refresh_attachment_media(
-            filename=filename,
-            extension=extension,
-            content_type=content_type,
-        )
-        if block_id and updated_at and not refresh_attachment:
-            cached = get_cached_block_render(block_id, updated_at)
-            if cached is not None:
-                return cached
-        if att_url:
-            suffix = f".{extension}" if extension else Path(filename).suffix or ""
-            media_cache_identity = (
-                f"arena:block:{block_id}:{updated_at}:attachment:{att_url}"
-                if block_id and updated_at
-                else att_url
-            )
-            send_label = f"attachment:{block_id or 'unknown'}:{(filename or title or 'untitled')[:80]}"
-            converted = _render_block_binary(
-                att_url,
-                suffix,
-                media_cache_identity=media_cache_identity,
-                send_label=send_label,
-            )
-            if converted:
-                att_title = title if title != filename else ""
-                result = _format_block_output(
-                    att_title, description, converted, date=date
-                )
-                if result and block_id and updated_at:
-                    store_block_render(block_id, updated_at, result)
-                return result
-        fallback = f"[Attachment: {filename or title or block.get('id')}]"
-        if content_type:
-            fallback += f"\nType: {content_type}"
-        if att_url:
-            fallback += f"\nURL: {att_url}"
-        if block_id and updated_at:
-            store_block_render(block_id, updated_at, fallback)
-        return fallback
-
-    if block_type == "Embed":
-        refresh_embed = (
-            get_refresh_images() or get_refresh_media() or get_refresh_videos()
-        )
-        if block_id and updated_at and not refresh_embed:
-            cached = get_cached_block_render(block_id, updated_at)
-            if cached is not None:
-                return cached
-
-        embed = block.get("embed") or {}
-        embed_url = embed.get("url") or ""
-        embed_type = embed.get("type") or ""
-        embed_parts = []
-        if embed_type == "video":
-            image = block.get("image") or {}
-            image_urls = list(
-                dict.fromkeys(
-                    [
-                        u
-                        for u in (
-                            image.get("src"),
-                            (image.get("large") or {}).get("src"),
-                            (image.get("original") or {}).get("url"),
-                            image.get("url"),
-                        )
-                        if u
-                    ]
-                )
-            )
+                core_output = cached
+        if core_output is None:
+            image_urls = _block_image_urls(block)
             for image_url in image_urls:
                 suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
                 media_cache_identity = (
-                    f"arena:block:{block_id}:{updated_at}:embed-image:{image_url}"
+                    f"arena:block:{block_id}:{updated_at}:image:{image_url}"
                     if block_id and updated_at
                     else image_url
                 )
                 send_label = (
-                    f"embed-image:{block_id or 'unknown'}:{(title or 'untitled')[:80]}"
+                    f"image:{block_id or 'unknown'}:{(title or 'untitled')[:80]}"
                 )
                 converted = _render_block_binary(
                     image_url,
@@ -750,20 +855,148 @@ def _render_block(
                     send_label=send_label,
                 )
                 if converted:
-                    embed_parts.append(converted)
+                    converted = _normalize_image_description_markdown(converted)
+                    if not converted:
+                        continue
+                    core_output = _format_block_output(
+                        title, description, converted, date=date
+                    )
                     break
-        if embed_url:
-            embed_parts.append(embed_url)
-        if embed_type:
-            embed_parts.append(f"Type: {embed_type}")
-        result = _format_block_output(
-            title, description, "\n\n".join(embed_parts), date=date
-        )
-        if result and block_id and updated_at:
-            store_block_render(block_id, updated_at, result)
-        return result
+            if core_output is None:
+                fallback_url = image_urls[0] if image_urls else ""
+                fallback = f"[Image: {title or block.get('id')}]"
+                if fallback_url:
+                    fallback += f"\nURL: {fallback_url}"
+                core_output = fallback
+            if core_output and block_id and updated_at:
+                store_block_render(block_id, updated_at, core_output)
 
-    return _format_block_output(title, description, "", date=date)
+    elif block_type == "Link":
+        source = block.get("source") or {}
+        source_url = source.get("url") or ""
+        content = _extract_markdown_like_text(block.get("content") or "")
+        link_parts = []
+        link_header = source_url or content
+        if link_header:
+            link_parts.append(link_header)
+        if include_link_image_descriptions:
+            link_image_description = _render_link_image_description(
+                block,
+                block_id=block_id,
+                updated_at=updated_at,
+                title=title,
+            )
+            if link_image_description:
+                link_parts.append(link_image_description)
+        core_output = _format_block_output(
+            title, description, "\n\n".join(link_parts), date=date
+        )
+
+    elif block_type == "Attachment":
+        attachment = block.get("attachment") or {}
+        att_url = attachment.get("url") or ""
+        filename = attachment.get("filename") or ""
+        content_type = attachment.get("content_type") or ""
+        extension = attachment.get("file_extension") or ""
+        attachment_media_kind = _attachment_media_kind(
+            filename=filename,
+            extension=extension,
+            content_type=content_type,
+        )
+        refresh_attachment = _should_refresh_attachment_media(
+            filename=filename,
+            extension=extension,
+            content_type=content_type,
+        )
+        if block_id and updated_at and not refresh_attachment:
+            cached = get_cached_block_render(block_id, updated_at)
+            if cached is not None:
+                core_output = cached
+        if core_output is None:
+            if att_url:
+                suffix = f".{extension}" if extension else Path(filename).suffix or ""
+                media_cache_identity = (
+                    f"arena:block:{block_id}:{updated_at}:attachment:{att_url}"
+                    if block_id and updated_at
+                    else att_url
+                )
+                send_label = f"attachment:{block_id or 'unknown'}:{(filename or title or 'untitled')[:80]}"
+                converted = _render_block_binary(
+                    att_url,
+                    suffix,
+                    media_cache_identity=media_cache_identity,
+                    send_label=send_label,
+                )
+                if converted:
+                    if attachment_media_kind == "image":
+                        converted = _normalize_image_description_markdown(converted)
+                    if converted:
+                        att_title = title if title != filename else ""
+                        core_output = _format_block_output(
+                            att_title, description, converted, date=date
+                        )
+            if core_output is None:
+                fallback = f"[Attachment: {filename or title or block.get('id')}]"
+                if content_type:
+                    fallback += f"\nType: {content_type}"
+                if att_url:
+                    fallback += f"\nURL: {att_url}"
+                core_output = fallback
+            if core_output and block_id and updated_at:
+                store_block_render(block_id, updated_at, core_output)
+
+    elif block_type == "Embed":
+        refresh_embed = (
+            get_refresh_images() or get_refresh_media() or get_refresh_videos()
+        )
+        if block_id and updated_at and not refresh_embed:
+            cached = get_cached_block_render(block_id, updated_at)
+            if cached is not None:
+                core_output = cached
+        if core_output is None:
+            embed = block.get("embed") or {}
+            embed_url = embed.get("url") or ""
+            embed_type = embed.get("type") or ""
+            embed_parts = []
+            if embed_type == "video":
+                image_urls = _block_image_urls(block)
+                for image_url in image_urls:
+                    suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
+                    media_cache_identity = (
+                        f"arena:block:{block_id}:{updated_at}:embed-image:{image_url}"
+                        if block_id and updated_at
+                        else image_url
+                    )
+                    send_label = f"embed-image:{block_id or 'unknown'}:{(title or 'untitled')[:80]}"
+                    converted = _render_block_binary(
+                        image_url,
+                        suffix,
+                        media_cache_identity=media_cache_identity,
+                        send_label=send_label,
+                    )
+                    if converted:
+                        converted = _normalize_image_description_markdown(converted)
+                        if not converted:
+                            continue
+                        embed_parts.append(converted)
+                        break
+            if embed_url:
+                embed_parts.append(embed_url)
+            if embed_type:
+                embed_parts.append(f"Type: {embed_type}")
+            core_output = _format_block_output(
+                title, description, "\n\n".join(embed_parts), date=date
+            )
+            if core_output and block_id and updated_at:
+                store_block_render(block_id, updated_at, core_output)
+
+    else:
+        core_output = _format_block_output(title, description, "", date=date)
+
+    comments_section = _block_comments_output(
+        block, include_comments=bool(include_comments)
+    )
+    return _append_comments_section(core_output, comments_section)
 
 
 def _render_channel_stub(item: dict) -> str:
@@ -921,6 +1154,8 @@ class ArenaReference:
     depth: int = 5
     trace_collector: list = None
     include_descriptions: bool | None = None
+    include_comments: bool | None = None
+    include_link_image_descriptions: bool | None = None
 
     def __post_init__(self) -> None:
         self.file_content = ""
@@ -980,7 +1215,10 @@ class ArenaReference:
                 _log(f"  resolving {block_type.lower()}: {block_title[:60]}")
             text = (
                 _render_block(
-                    self.block, include_descriptions=self.include_descriptions
+                    self.block,
+                    include_descriptions=self.include_descriptions,
+                    include_comments=self.include_comments,
+                    include_link_image_descriptions=self.include_link_image_descriptions,
                 )
                 or ""
             )

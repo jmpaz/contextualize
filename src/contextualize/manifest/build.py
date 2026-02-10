@@ -146,6 +146,8 @@ def _wrapped_arena_references(
                     inject=inject,
                     depth=depth,
                     include_descriptions=settings.include_descriptions,
+                    include_comments=settings.include_comments,
+                    include_link_image_descriptions=settings.include_link_image_descriptions,
                 )
                 label = arena_ref.get_label()
                 if label_suffix:
@@ -170,6 +172,8 @@ def _wrapped_arena_references(
                 inject=inject,
                 depth=depth,
                 include_descriptions=settings.include_descriptions,
+                include_comments=settings.include_comments,
+                include_link_image_descriptions=settings.include_link_image_descriptions,
             )
             label = filename or arena_ref.get_label()
             if label_suffix:
