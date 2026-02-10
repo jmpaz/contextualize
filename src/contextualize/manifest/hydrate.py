@@ -829,6 +829,12 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
             raise ValueError("config.arena.include-link-images must be a boolean")
         result["include_link_image_descriptions"] = val
 
+    if "include-pdf-content" in raw:
+        val = raw["include-pdf-content"]
+        if not isinstance(val, bool):
+            raise ValueError("config.arena.include-pdf-content must be a boolean")
+        result["include_pdf_content"] = val
+
     if "recurse-users" in raw:
         val = raw["recurse-users"]
         if isinstance(val, str):
@@ -1463,6 +1469,7 @@ def _resolve_arena_items(
                 include_descriptions=settings.include_descriptions,
                 include_comments=settings.include_comments,
                 include_link_image_descriptions=settings.include_link_image_descriptions,
+                include_pdf_content=settings.include_pdf_content,
             )
             or ""
         )
@@ -1555,6 +1562,7 @@ def _resolve_arena_items(
                 include_descriptions=settings.include_descriptions,
                 include_comments=settings.include_comments,
                 include_link_image_descriptions=settings.include_link_image_descriptions,
+                include_pdf_content=settings.include_pdf_content,
             )
         if rendered is None:
             continue

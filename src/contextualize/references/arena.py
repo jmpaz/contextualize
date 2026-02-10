@@ -247,6 +247,11 @@ def _get_include_link_image_descriptions() -> bool:
     return raw not in ("0", "false", "no")
 
 
+def _get_include_pdf_content() -> bool:
+    raw = os.environ.get("ARENA_INCLUDE_PDF_CONTENT", "0").lower()
+    return raw not in ("0", "false", "no")
+
+
 def _get_sort_order() -> str:
     return (
         (os.environ.get("ARENA_BLOCK_SORT") or os.environ.get("ARENA_SORT") or "desc")
@@ -284,6 +289,7 @@ class ArenaSettings:
     include_descriptions: bool = True
     include_comments: bool = True
     include_link_image_descriptions: bool = False
+    include_pdf_content: bool = False
     recurse_users: set[str] | None = field(default_factory=lambda: {"self"})
 
 
@@ -294,6 +300,7 @@ def _arena_settings_from_env() -> ArenaSettings:
         include_descriptions=_get_include_descriptions(),
         include_comments=_get_include_comments(),
         include_link_image_descriptions=_get_include_link_image_descriptions(),
+        include_pdf_content=_get_include_pdf_content(),
         recurse_users=_get_recurse_users(),
     )
 
@@ -312,6 +319,7 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
     include_link_image_descriptions = overrides.get(
         "include_link_image_descriptions", env.include_link_image_descriptions
     )
+    include_pdf_content = overrides.get("include_pdf_content", env.include_pdf_content)
     recurse_users = overrides.get("recurse_users", env.recurse_users)
 
     return ArenaSettings(
@@ -320,6 +328,7 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
         include_descriptions=include_descriptions,
         include_comments=include_comments,
         include_link_image_descriptions=include_link_image_descriptions,
+        include_pdf_content=include_pdf_content,
         recurse_users=recurse_users,
     )
 
@@ -727,6 +736,8 @@ def _attachment_media_kind(
     *, filename: str, extension: str, content_type: str
 ) -> str | None:
     ctype = content_type.lower().strip()
+    if ctype == "application/pdf":
+        return "pdf"
     if ctype.startswith("image/"):
         return "image"
     if ctype.startswith("video/"):
@@ -745,6 +756,8 @@ def _attachment_media_kind(
         return "video"
     if suffix in {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".aiff"}:
         return "audio"
+    if suffix == ".pdf":
+        return "pdf"
     return None
 
 
@@ -805,6 +818,7 @@ def _render_block(
     include_descriptions: bool | None = None,
     include_comments: bool | None = None,
     include_link_image_descriptions: bool | None = None,
+    include_pdf_content: bool | None = None,
 ) -> str | None:
     from ..cache.arena import get_cached_block_render, store_block_render
 
@@ -828,6 +842,8 @@ def _render_block(
         include_comments = _get_include_comments()
     if include_link_image_descriptions is None:
         include_link_image_descriptions = _get_include_link_image_descriptions()
+    if include_pdf_content is None:
+        include_pdf_content = _get_include_pdf_content()
 
     date = _format_date_line(block)
     core_output: str | None = None
@@ -911,17 +927,25 @@ def _render_block(
             extension=extension,
             content_type=content_type,
         )
+        should_skip_pdf_content = (
+            attachment_media_kind == "pdf" and not include_pdf_content
+        )
         refresh_attachment = _should_refresh_attachment_media(
             filename=filename,
             extension=extension,
             content_type=content_type,
         )
-        if block_id and updated_at and not refresh_attachment:
+        if (
+            block_id
+            and updated_at
+            and not refresh_attachment
+            and not should_skip_pdf_content
+        ):
             cached = get_cached_block_render(block_id, updated_at)
             if cached is not None:
                 core_output = cached
         if core_output is None:
-            if att_url:
+            if att_url and not should_skip_pdf_content:
                 suffix = f".{extension}" if extension else Path(filename).suffix or ""
                 media_cache_identity = (
                     f"arena:block:{block_id}:{updated_at}:attachment:{att_url}"
@@ -1164,6 +1188,7 @@ class ArenaReference:
     include_descriptions: bool | None = None
     include_comments: bool | None = None
     include_link_image_descriptions: bool | None = None
+    include_pdf_content: bool | None = None
 
     def __post_init__(self) -> None:
         self.file_content = ""
@@ -1227,6 +1252,7 @@ class ArenaReference:
                     include_descriptions=self.include_descriptions,
                     include_comments=self.include_comments,
                     include_link_image_descriptions=self.include_link_image_descriptions,
+                    include_pdf_content=self.include_pdf_content,
                 )
                 or ""
             )
