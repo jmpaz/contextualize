@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from ..render.text import process_text
 from ..utils import count_tokens
@@ -129,11 +129,14 @@ class URLReference:
         return data.get("data", {}).get("content", "")
 
     def _try_fetch_markdown(self) -> tuple[str, bool]:
+        return self._try_fetch_markdown_url(self.url)
+
+    def _try_fetch_markdown_url(self, url: str) -> tuple[str, bool]:
         import requests
 
         try:
             r = requests.get(
-                self.url,
+                url,
                 timeout=30,
                 headers={
                     "User-Agent": "contextualize",
@@ -148,6 +151,29 @@ class URLReference:
         except Exception:
             pass
         return "", False
+
+    def _markdown_url_candidate(self) -> str | None:
+        split_url = urlsplit(self.url)
+        path = split_url.path
+        if not path or path.endswith(".md"):
+            return None
+        if path == "/":
+            return None
+        normalized_path = path[:-1] if path.endswith("/") else path
+        if not normalized_path:
+            return None
+        candidate = urlunsplit(
+            (
+                split_url.scheme,
+                split_url.netloc,
+                f"{normalized_path}.md",
+                split_url.query,
+                split_url.fragment,
+            )
+        )
+        if candidate == self.url:
+            return None
+        return candidate
 
     def _get_contents(self) -> str:
         if self.use_cache and not self.refresh_cache:
@@ -214,7 +240,15 @@ class URLReference:
 
         if use_jina:
             md_content, got_markdown = self._try_fetch_markdown()
-            text = md_content if got_markdown else self._fetch_via_jina()
+            if got_markdown:
+                text = md_content
+            else:
+                candidate_url = self._markdown_url_candidate()
+                if candidate_url:
+                    md_content, got_markdown = self._try_fetch_markdown_url(
+                        candidate_url
+                    )
+                text = md_content if got_markdown else self._fetch_via_jina()
             self.original_file_content = text
             self.file_content = text
             if self.inject:
