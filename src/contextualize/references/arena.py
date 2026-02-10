@@ -221,7 +221,11 @@ def _fetch_channel_page(slug: str, page: int, per: int = 100) -> dict:
 
 
 def _get_max_depth() -> int:
-    raw = os.environ.get("ARENA_MAX_DEPTH", "1")
+    raw = (
+        os.environ.get("ARENA_RECURSE_DEPTH")
+        or os.environ.get("ARENA_MAX_DEPTH")
+        or "1"
+    )
     try:
         return max(0, int(raw))
     except ValueError:
@@ -244,7 +248,11 @@ def _get_include_link_image_descriptions() -> bool:
 
 
 def _get_sort_order() -> str:
-    return os.environ.get("ARENA_SORT", "desc").lower().strip()
+    return (
+        (os.environ.get("ARENA_BLOCK_SORT") or os.environ.get("ARENA_SORT") or "desc")
+        .lower()
+        .strip()
+    )
 
 
 def _get_recurse_users() -> set[str] | None:

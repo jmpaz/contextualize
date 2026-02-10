@@ -769,19 +769,47 @@ def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
 
     result: dict[str, Any] = {}
 
-    if "max-depth" in raw:
-        val = raw["max-depth"]
-        if not isinstance(val, int) or isinstance(val, bool) or val < 0:
-            raise ValueError("config.arena.max-depth must be a non-negative integer")
-        result["max_depth"] = val
-
-    if "sort" in raw:
-        val = raw["sort"]
-        if not isinstance(val, str) or val.lower().strip() not in VALID_SORT_ORDERS:
+    recurse_depth = raw.get("recurse-depth")
+    max_depth_alias = raw.get("max-depth")
+    if recurse_depth is not None and max_depth_alias is not None:
+        if recurse_depth != max_depth_alias:
             raise ValueError(
-                f"config.arena.sort must be one of: {', '.join(sorted(VALID_SORT_ORDERS))}"
+                "config.arena.recurse-depth and config.arena.max-depth cannot differ"
             )
-        result["sort_order"] = val.lower().strip()
+    if recurse_depth is None:
+        recurse_depth = max_depth_alias
+    if recurse_depth is not None:
+        if (
+            not isinstance(recurse_depth, int)
+            or isinstance(recurse_depth, bool)
+            or recurse_depth < 0
+        ):
+            raise ValueError(
+                "config.arena.recurse-depth (alias: max-depth) must be a non-negative integer"
+            )
+        result["max_depth"] = recurse_depth
+
+    block_sort = raw.get("block-sort")
+    sort_alias = raw.get("sort")
+    if block_sort is not None and sort_alias is not None:
+        left = str(block_sort).lower().strip()
+        right = str(sort_alias).lower().strip()
+        if left != right:
+            raise ValueError(
+                "config.arena.block-sort and config.arena.sort cannot differ"
+            )
+    if block_sort is None:
+        block_sort = sort_alias
+    if block_sort is not None:
+        if (
+            not isinstance(block_sort, str)
+            or block_sort.lower().strip() not in VALID_SORT_ORDERS
+        ):
+            raise ValueError(
+                "config.arena.block-sort (alias: sort) must be one of: "
+                + ", ".join(sorted(VALID_SORT_ORDERS))
+            )
+        result["sort_order"] = block_sort.lower().strip()
 
     if "include-descriptions" in raw:
         val = raw["include-descriptions"]
@@ -2044,7 +2072,10 @@ def _build_normalized_config(
 
         arena_settings = build_arena_settings(arena_overrides)
         arena = dict(cfg.get("arena") or {})
-        arena["max-depth"] = arena_settings.max_depth
+        arena.pop("max-depth", None)
+        arena.pop("sort", None)
+        arena["recurse-depth"] = arena_settings.max_depth
+        arena["block-sort"] = arena_settings.sort_order
         normalized["arena"] = arena
     return normalized
 
