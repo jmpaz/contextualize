@@ -294,6 +294,7 @@ class ArenaSettings:
 
 
 def _arena_settings_from_env() -> ArenaSettings:
+    _load_dotenv()
     return ArenaSettings(
         max_depth=_get_max_depth(),
         sort_order=_get_sort_order(),
@@ -305,12 +306,23 @@ def _arena_settings_from_env() -> ArenaSettings:
     )
 
 
+def _has_env_recurse_depth_override() -> bool:
+    raw_recurse_depth = os.environ.get("ARENA_RECURSE_DEPTH")
+    if raw_recurse_depth is not None and raw_recurse_depth.strip():
+        return True
+    raw_max_depth = os.environ.get("ARENA_MAX_DEPTH")
+    return raw_max_depth is not None and raw_max_depth.strip() != ""
+
+
 def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
     env = _arena_settings_from_env()
     if not overrides:
         return env
 
-    max_depth = overrides.get("max_depth", env.max_depth)
+    if _has_env_recurse_depth_override():
+        max_depth = env.max_depth
+    else:
+        max_depth = overrides.get("max_depth", env.max_depth)
     sort_order = overrides.get("sort_order", env.sort_order)
     include_descriptions = overrides.get(
         "include_descriptions", env.include_descriptions
@@ -1056,9 +1068,13 @@ def _flatten_channel_blocks(
     contents: list[dict],
     channel_slug: str,
     channel_path: str = "",
+    channel_slug_path: tuple[str, ...] | None = None,
 ) -> list[tuple[str, dict]]:
     result: list[tuple[str, dict]] = []
     path = channel_path or channel_slug
+    current_slug_path = channel_slug_path
+    if current_slug_path is None:
+        current_slug_path = (channel_slug,) if channel_slug else ()
 
     for item in contents:
         if item.get("base_type") == "Channel" or item.get("type") == "Channel":
@@ -1073,13 +1089,27 @@ def _flatten_channel_blocks(
                     "-"
                 )
                 sub_path = f"{path}/{safe_name or nested_slug}"
+                nested_slug_path = current_slug_path + (
+                    (nested_slug,) if nested_slug else ()
+                )
                 result.extend(
-                    _flatten_channel_blocks(nested_contents, nested_slug, sub_path)
+                    _flatten_channel_blocks(
+                        nested_contents,
+                        nested_slug,
+                        sub_path,
+                        nested_slug_path,
+                    )
                 )
             else:
-                result.append((path, item))
+                block = dict(item)
+                if current_slug_path:
+                    block["_channel_slug_path"] = list(current_slug_path)
+                result.append((path, block))
         else:
-            result.append((path, item))
+            block = dict(item)
+            if current_slug_path:
+                block["_channel_slug_path"] = list(current_slug_path)
+            result.append((path, block))
 
     return result
 

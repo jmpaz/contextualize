@@ -72,6 +72,10 @@ class ResolvedItem:
     source_modified: str | None = None
     dir_created: str | None = None
     dir_modified: str | None = None
+    arena_kind: str | None = None
+    arena_channel_id: str | None = None
+    arena_depth: int | None = None
+    arena_settings_key: tuple[Any, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,15 @@ class HydratePlan:
     include_meta: bool
     access: str
     file_timestamps: dict[Path, tuple[float, float]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _ArenaPendingWrite:
+    rel_path: Path
+    content: str
+    should_write: bool
+    item: ResolvedItem
+    encounter_index: int
 
 
 def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
@@ -346,6 +359,8 @@ def build_hydration_plan_data(
     file_timestamps: dict[Path, tuple[float, float]] = {}
     index_components: dict[str, list[dict[str, Any]]] = {}
     normalized_components: list[dict[str, Any]] = []
+    arena_pending: dict[tuple[Any, ...], list[_ArenaPendingWrite]] = {}
+    arena_seen_counter = 0
     resolved_spec_cache: dict[
         tuple[str, bool, bool, str | None, tuple[Any, ...] | None], list[ResolvedItem]
     ] = {}
@@ -398,8 +413,6 @@ def build_hydration_plan_data(
 
         normalized_comp = _build_normalized_component(comp, comp_name)
         normalized_files: list[Any] = []
-        arena_first_paths: dict[str, Path] = {}
-
         for note_name, note_value in (
             ("text-001.md", comp_text),
             ("prefix.md", comp_prefix),
@@ -567,16 +580,37 @@ def build_hydration_plan_data(
                     skip_external_root=skip_external_root,
                     external_root_prefix=spec_root,
                 )
-                arena_identity = _arena_block_identity(item)
+                arena_identity = _arena_pending_key(item, ranges, symbols)
                 if arena_identity:
-                    first_rel = arena_first_paths.get(arena_identity)
-                    if first_rel is None:
-                        arena_first_paths[arena_identity] = rel_path
-                    elif first_rel != rel_path:
-                        should_write = False
-                        files_to_symlink.append(
-                            (context_dir / rel_path, context_dir / first_rel)
+                    arena_pending.setdefault(arena_identity, []).append(
+                        _ArenaPendingWrite(
+                            rel_path=rel_path,
+                            content=content,
+                            should_write=should_write,
+                            item=item,
+                            encounter_index=arena_seen_counter,
                         )
+                    )
+                    arena_seen_counter += 1
+                    index_components.setdefault(comp_name, []).append(
+                        _build_index_entry(
+                            rel_path,
+                            item,
+                            ranges,
+                            symbols,
+                            content,
+                        )
+                    )
+                    normalized_files.append(
+                        _build_manifest_file_entry(
+                            item,
+                            range_spec,
+                            symbols,
+                            spec_comment,
+                            file_opts,
+                        )
+                    )
+                    continue
                 if should_write:
                     can_symlink = (
                         not context_cfg["copy"]
@@ -641,6 +675,14 @@ def build_hydration_plan_data(
         index_data = {"version": 1, "components": index_components}
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
+
+    _materialize_arena_pending(
+        arena_pending,
+        context_dir,
+        files_to_write,
+        files_to_symlink,
+        file_timestamps,
+    )
 
     return HydratePlan(
         context_dir=context_dir,
@@ -895,6 +937,24 @@ def _arena_overrides_cache_key(
         else:
             normalized.append((key, value))
     return tuple(normalized)
+
+
+def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
+    recurse_users = settings.recurse_users
+    recurse_key: tuple[str, ...] | None
+    if recurse_users is None:
+        recurse_key = None
+    else:
+        recurse_key = tuple(sorted(str(v) for v in recurse_users))
+    return (
+        settings.max_depth,
+        settings.sort_order,
+        settings.include_descriptions,
+        settings.include_comments,
+        settings.include_link_image_descriptions,
+        settings.include_pdf_content,
+        recurse_key,
+    )
 
 
 def _queue_agent_files(
@@ -1501,6 +1561,7 @@ def _resolve_arena_items(
     )
 
     settings = build_arena_settings(arena_overrides)
+    settings_key = _arena_settings_cache_key(settings)
 
     block_id = extract_block_id(url)
     if block_id is not None:
@@ -1530,6 +1591,9 @@ def _resolve_arena_items(
                 alias=alias if isinstance(alias, str) else None,
                 source_created=block.get("connected_at") or block.get("created_at"),
                 source_modified=block.get("updated_at"),
+                arena_kind="block",
+                arena_depth=0,
+                arena_settings_key=settings_key,
             )
         ]
 
@@ -1615,12 +1679,20 @@ def _resolve_arena_items(
         channel_parts = [part for part in channel_path.split("/") if part]
         if channel_parts and channel_parts[0] == slug:
             channel_parts = channel_parts[1:]
+        arena_depth = len(channel_parts)
         channel_subdir = "/".join(channel_parts)
         context_subpath = (
             f"{dir_name}/{channel_subdir}/{label}.md"
             if channel_subdir
             else f"{dir_name}/{label}.md"
         )
+        channel_id = None
+        if is_channel:
+            raw_id = block.get("id")
+            if raw_id is not None:
+                channel_id = str(raw_id)
+            elif ch_slug:
+                channel_id = ch_slug
         items.append(
             ResolvedItem(
                 source_type="arena",
@@ -1635,6 +1707,10 @@ def _resolve_arena_items(
                 source_modified=block.get("updated_at"),
                 dir_created=ch_created,
                 dir_modified=ch_updated,
+                arena_kind="channel" if is_channel else "block",
+                arena_channel_id=channel_id,
+                arena_depth=arena_depth,
+                arena_settings_key=settings_key,
             )
         )
 
@@ -1857,6 +1933,7 @@ def _build_identity_key(
         item.source_ref,
         item.source_rev,
         item.source_path,
+        item.arena_settings_key if item.source_type == "arena" else None,
         ranges_key,
         symbols_key,
     )
@@ -2054,13 +2131,74 @@ def _build_manifest_file_entry(
     return entry
 
 
-def _arena_block_identity(item: ResolvedItem) -> str | None:
+def _arena_identity(item: ResolvedItem) -> tuple[Any, ...] | None:
     if item.source_type != "arena":
         return None
+    settings_key = item.arena_settings_key or ()
+    if item.arena_kind == "channel" and item.arena_channel_id:
+        return ("arena-channel", item.arena_channel_id, settings_key)
     leaf = item.source_path.rsplit("/", 1)[-1]
-    if not leaf.isdigit():
+    if leaf.isdigit():
+        return ("arena-block", leaf, settings_key)
+    return None
+
+
+def _arena_pending_key(
+    item: ResolvedItem,
+    ranges: list[tuple[int, int]] | None,
+    symbols: list[str] | None,
+) -> tuple[Any, ...] | None:
+    arena_identity = _arena_identity(item)
+    if arena_identity is None:
         return None
-    return f"{item.source_ref}:{leaf}"
+    ranges_key = tuple(tuple(r) for r in ranges) if ranges else None
+    symbols_key = tuple(symbols) if symbols else None
+    return (*arena_identity, ranges_key, symbols_key)
+
+
+def _arena_rank(item: ResolvedItem, encounter_index: int) -> tuple[int, int]:
+    depth = item.arena_depth if item.arena_depth is not None else 10**9
+    return (depth, encounter_index)
+
+
+def _materialize_arena_pending(
+    arena_pending: dict[tuple[Any, ...], list[_ArenaPendingWrite]],
+    context_dir: Path,
+    files_to_write: list[tuple[Path, str]],
+    files_to_symlink: list[tuple[Path, Path]],
+    file_timestamps: dict[Path, tuple[float, float]],
+) -> None:
+    for occurrences in arena_pending.values():
+        canonical = min(
+            occurrences,
+            key=lambda occ: _arena_rank(occ.item, occ.encounter_index),
+        )
+        canonical_path = context_dir / canonical.rel_path
+
+        writer = canonical
+        if not writer.should_write:
+            writer = next(
+                (
+                    occ
+                    for occ in occurrences
+                    if occ.rel_path == canonical.rel_path and occ.should_write
+                ),
+                writer,
+            )
+
+        if writer.should_write:
+            files_to_write.append((canonical_path, writer.content))
+            file_ts = _item_file_ts(writer.item)
+            if file_ts:
+                file_timestamps[canonical_path] = file_ts
+            dir_ts = _item_dir_ts(writer.item)
+            if dir_ts:
+                file_timestamps.setdefault(canonical_path.parent, dir_ts)
+
+        for occ in occurrences:
+            if occ.rel_path == canonical.rel_path:
+                continue
+            files_to_symlink.append((context_dir / occ.rel_path, canonical_path))
 
 
 def _dedupe_manifest_entries(files: list[Any]) -> list[Any]:

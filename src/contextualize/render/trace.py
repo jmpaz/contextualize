@@ -1,6 +1,8 @@
 """Trace output formatting for --trace flag."""
 
 import os
+import shutil
+import sys
 from collections import defaultdict
 from typing import Dict
 from urllib.parse import urlparse
@@ -18,6 +20,68 @@ def _trace_path_for_ref(ref) -> str:
         or getattr(ref, "url", None)
         or ""
     )
+
+
+def _trace_seen_key(path: str) -> str:
+    if "://" in path:
+        return path
+    if os.path.exists(path):
+        return os.path.abspath(path)
+    return f"virtual:{path}"
+
+
+def _display_trace_path(path: str, *, include_fragment: bool = False) -> str:
+    if "://" not in path:
+        return path
+    parsed = urlparse(path)
+    if not parsed.netloc or not parsed.netloc.lower().endswith("are.na"):
+        return path
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) >= 2:
+        display = f"{parts[-2]}/{parts[-1]}"
+        if include_fragment and parsed.fragment:
+            return f"{display}#{parsed.fragment}"
+        return display
+    if parts:
+        return parts[-1]
+    return path
+
+
+def _get_terminal_width() -> int | None:
+    try:
+        if not sys.stdout.isatty():
+            return None
+        width = shutil.get_terminal_size(fallback=(0, 0)).columns
+        return width if width > 0 else None
+    except Exception:
+        return None
+
+
+def _wrap_with_breakpoints(text: str, max_width: int) -> list[str]:
+    if max_width <= 0 or len(text) <= max_width:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_width:
+        break_pos = max(
+            remaining.rfind(" ", 0, max_width + 1),
+            remaining.rfind("/", 0, max_width + 1),
+        )
+        if break_pos <= 0:
+            chunks.append(remaining[:max_width].rstrip())
+            remaining = remaining[max_width:].lstrip()
+            continue
+        if remaining[break_pos] == "/":
+            chunks.append(remaining[: break_pos + 1].rstrip())
+            remaining = remaining[break_pos + 1 :].lstrip()
+            continue
+        chunks.append(remaining[:break_pos].rstrip())
+        remaining = remaining[break_pos + 1 :].lstrip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 def _parse_frontmatter_title(text: str) -> str | None:
@@ -135,14 +199,15 @@ def format_trace_output(
     seen_files = set()
     for ref in input_refs:
         path = _trace_path_for_ref(ref)
-        seen_files.add(os.path.abspath(path))
+        seen_files.add(_trace_seen_key(path))
 
     def get_rel_path(path):
-        return (
+        rel_path = (
             path[len(common_prefix) :].lstrip(os.sep)
             if common_prefix and path.startswith(common_prefix)
             else path
         )
+        return _display_trace_path(rel_path)
 
     for ref in input_refs:
         path = _trace_path_for_ref(ref)
@@ -189,19 +254,34 @@ def format_trace_output(
     parent_map = {}
     for tgt, src, depth in trace_items:
         by_depth[depth].append((tgt, src))
-        abs_tgt = os.path.abspath(tgt)
-        abs_src = os.path.abspath(src)
-        if abs_tgt not in parent_map:
-            parent_map[abs_tgt] = abs_src
+        tgt_key = _trace_seen_key(tgt)
+        src_key = _trace_seen_key(src)
+        if tgt_key not in parent_map:
+            parent_map[tgt_key] = src_key
 
-    def build_source_chain(abs_target_path, max_len=None):
+    def build_source_chain(target_key, max_len=None):
         chain_parts = []
         seen_chain = set()
-        cur = abs_target_path
+        cur = target_key
         while cur in parent_map and cur not in seen_chain:
             seen_chain.add(cur)
             parent = parent_map[cur]
-            display = os.path.basename(get_rel_path(parent))
+            if parent == cur:
+                break
+            display_source = parent
+            if parent.startswith("virtual:"):
+                display_source = parent[len("virtual:") :]
+            parsed = urlparse(display_source) if "://" in display_source else None
+            if parsed and parsed.netloc:
+                display = _display_trace_path(display_source, include_fragment=True)
+                if display == display_source:
+                    parts = [p for p in parsed.path.split("/") if p]
+                    if parts:
+                        display = parts[-1]
+                    else:
+                        display = parsed.netloc
+            else:
+                display = os.path.basename(get_rel_path(display_source))
             chain_parts.append(display)
             cur = parent
             if max_len is not None and len(chain_parts) >= max_len:
@@ -210,25 +290,33 @@ def format_trace_output(
 
     for depth in sorted(by_depth.keys()):
         depth_items = []
+        seen_targets_at_depth: set[str] = set()
         for tgt, _src in sorted(by_depth[depth]):
-            abs_tgt = os.path.abspath(tgt)
+            seen_key = _trace_seen_key(tgt)
+            if seen_key in seen_targets_at_depth:
+                continue
+            seen_targets_at_depth.add(seen_key)
             rel_path = get_rel_path(tgt)
 
-            is_duplicate = abs_tgt in seen_files
+            is_duplicate = seen_key in seen_files
             if not is_duplicate:
-                ref = FileReference(tgt, token_target=token_target)
-                token_count = (
-                    count_tokens(ref.file_content, target=token_target)["count"]
-                    if hasattr(ref, "file_content")
-                    else 0
-                )
-                title = _parse_frontmatter_title(getattr(ref, "file_content", ""))
-                seen_files.add(abs_tgt)
+                if os.path.exists(tgt):
+                    ref = FileReference(tgt, token_target=token_target)
+                    token_count = (
+                        count_tokens(ref.file_content, target=token_target)["count"]
+                        if hasattr(ref, "file_content")
+                        else 0
+                    )
+                    title = _parse_frontmatter_title(getattr(ref, "file_content", ""))
+                else:
+                    token_count = None
+                    title = None
+                seen_files.add(seen_key)
             else:
                 token_count = None
                 title = None
 
-            chain = build_source_chain(abs_tgt, max_len=depth)
+            chain = build_source_chain(seen_key, max_len=depth)
             depth_items.append((rel_path, token_count, chain, title))
         formatted_discovered[depth] = depth_items
 
@@ -268,26 +356,65 @@ def format_trace_output(
             line = f"  {rel_path} {token_str}"
         lines.append(line)
 
+    terminal_width = _get_terminal_width()
+
     for depth in sorted(formatted_discovered.keys()):
         lines.append(f"\nDiscovered (depth {depth}):")
 
-        path_token_widths = []
-        for p, t, _chain, _title in formatted_discovered[depth]:
-            token_part = "(✓)" if t is None else f"({t})"
-            title_part = f" — {_title}" if _title else ""
-            left_text = f"{p}{title_part} {token_part}"
-            path_token_widths.append(len(left_text))
-        max_path_token_width = max(path_token_widths, default=0)
+        if terminal_width is None:
+            path_token_widths = []
+            for p, t, _chain, _title in formatted_discovered[depth]:
+                token_part = "(✓)" if t is None else f"({t})"
+                title_part = f" — {_title}" if _title else ""
+                left_text = f"{p}{title_part} {token_part}"
+                path_token_widths.append(len(left_text))
+            max_path_token_width = max(path_token_widths, default=0)
+
+            for rel_path, token_count, source_chain, title in formatted_discovered[
+                depth
+            ]:
+                token_part = "(✓)" if token_count is None else f"({token_count})"
+                title_part = f" — {title}" if title else ""
+                left_text = f"{rel_path}{title_part} {token_part}"
+                padding = max_path_token_width - len(left_text)
+
+                arrow_and_chain = f" ← {source_chain}" if source_chain else ""
+                line = f"  {left_text}{' ' * padding}{arrow_and_chain}"
+                lines.append(line)
+            continue
+
+        first_indent = "  "
+        cont_indent = "    "
+        first_width = max(terminal_width - len(first_indent), 20)
+        cont_width = max(terminal_width - len(cont_indent), 20)
 
         for rel_path, token_count, source_chain, title in formatted_discovered[depth]:
             token_part = "(✓)" if token_count is None else f"({token_count})"
             title_part = f" — {title}" if title else ""
             left_text = f"{rel_path}{title_part} {token_part}"
-            padding = max_path_token_width - len(left_text)
+            chain_text = f"← {source_chain}" if source_chain else ""
 
-            arrow_and_chain = f" ← {source_chain}" if source_chain else ""
-            line = f"  {left_text}{' ' * padding}{arrow_and_chain}"
-            lines.append(line)
+            rendered: list[tuple[str, str]] = []
+            left_chunks = _wrap_with_breakpoints(left_text, first_width)
+            rendered.append((first_indent, left_chunks[0]))
+            for chunk in left_chunks[1:]:
+                rendered.append((first_indent, chunk))
+
+            if chain_text:
+                last_prefix, last_text = rendered[-1]
+                available = max(terminal_width - len(last_prefix), 20)
+                if len(last_text) + 1 + len(chain_text) <= available:
+                    rendered[-1] = (last_prefix, f"{last_text} {chain_text}")
+                else:
+                    chain_chunks = _wrap_with_breakpoints(
+                        source_chain, max(cont_width - 2, 1)
+                    )
+                    rendered.append((cont_indent, f"↖ {chain_chunks[0]}"))
+                    for chunk in chain_chunks[1:]:
+                        rendered.append((cont_indent, f"  {chunk}"))
+
+            for prefix, chunk in rendered:
+                lines.append(f"{prefix}{chunk}")
 
     if formatted_skipped:
         lines.append("\nSkipped:")

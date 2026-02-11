@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
@@ -44,8 +45,88 @@ class _MapReference:
         self.is_map = True
 
 
+class _TraceReference:
+    def __init__(self, path: str, content: str):
+        self.path = path
+        self.file_content = content
+        self.original_file_content = content
+
+
 _DEFAULT_MAP_TOKENS = 10000
 _MIN_MAP_NONEMPTY_LINES = 2
+
+
+def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
+    recurse_users = settings.recurse_users
+    recurse_key: tuple[str, ...] | None
+    if recurse_users is None:
+        recurse_key = None
+    else:
+        recurse_key = tuple(sorted(str(v) for v in recurse_users))
+    return (
+        settings.max_depth,
+        settings.sort_order,
+        settings.include_descriptions,
+        settings.include_comments,
+        settings.include_link_image_descriptions,
+        settings.include_pdf_content,
+        recurse_key,
+    )
+
+
+def _arena_channel_identity(
+    channel: dict[str, Any], settings_key: tuple[Any, ...]
+) -> tuple[Any, ...] | None:
+    slug = channel.get("slug")
+    if isinstance(slug, str) and slug:
+        return ("arena-channel", f"slug:{slug}", settings_key)
+    channel_id = channel.get("id")
+    if channel_id is not None:
+        return ("arena-channel", f"id:{channel_id}", settings_key)
+    return None
+
+
+def _arena_channel_depth(channel_path: str, root_slug: str) -> int:
+    parts = [p for p in channel_path.split("/") if p]
+    if parts and parts[0] == root_slug:
+        parts = parts[1:]
+    return len(parts)
+
+
+@dataclass
+class _ArenaChannelTracker:
+    canonical: dict[tuple[Any, ...], tuple[int, int]]
+    counter: int = 0
+
+    def should_expand(self, identity: tuple[Any, ...], *, depth: int) -> bool:
+        rank = (depth, self.counter)
+        self.counter += 1
+        current = self.canonical.get(identity)
+        if current is None or rank < current:
+            self.canonical[identity] = rank
+            return True
+        return False
+
+    def observe(self, identity: tuple[Any, ...], *, depth: int) -> None:
+        rank = (depth, self.counter)
+        self.counter += 1
+        current = self.canonical.get(identity)
+        if current is None or rank < current:
+            self.canonical[identity] = rank
+
+
+def _arena_channel_label(block: dict[str, Any], fallback: str) -> str:
+    slug = block.get("slug")
+    if isinstance(slug, str) and slug:
+        owner = block.get("owner") or block.get("user") or {}
+        owner_slug = owner.get("slug")
+        if isinstance(owner_slug, str) and owner_slug:
+            return f"https://are.na/{owner_slug}/{slug}"
+        return f"https://are.na/channel/{slug}"
+    channel_id = block.get("id")
+    if channel_id is not None:
+        return f"https://www.are.na/block/{channel_id}"
+    return fallback
 
 
 def _format_comment(value: Any) -> str | None:
@@ -114,7 +195,8 @@ def _wrapped_arena_references(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
-) -> list[_SimpleReference]:
+    channel_tracker: _ArenaChannelTracker | None = None,
+) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
     from ..references.arena import (
         ArenaReference,
         build_arena_settings,
@@ -126,43 +208,111 @@ def _wrapped_arena_references(
     )
 
     settings = build_arena_settings(arena_overrides)
+    settings_key = _arena_settings_cache_key(settings)
 
-    refs = []
+    refs: list[_SimpleReference] = []
+    trace_inputs: list[Any] = []
+    channel_trace_items: list[tuple[str, str, int]] = []
+
+    def _append_channel_blocks(
+        flat_blocks: list[tuple[str, dict[str, Any]]], slug: str
+    ) -> list[str]:
+        root_label = url
+        channel_contents: list[str] = []
+        observed_flattened_channels: set[tuple[str, int]] = set()
+        for channel_path, block in flat_blocks:
+            channel_slug_path = block.get("_channel_slug_path")
+            if channel_tracker is not None and isinstance(channel_slug_path, list):
+                for idx, nested_slug in enumerate(channel_slug_path[1:], start=1):
+                    if not isinstance(nested_slug, str) or not nested_slug:
+                        continue
+                    nested_depth = idx - 1
+                    observe_key = (nested_slug, nested_depth)
+                    if observe_key in observed_flattened_channels:
+                        continue
+                    observed_flattened_channels.add(observe_key)
+                    channel_tracker.observe(
+                        ("arena-channel", f"slug:{nested_slug}", settings_key),
+                        depth=nested_depth,
+                    )
+            block_type = block.get("type", "")
+            is_channel = block_type == "Channel" or block.get("base_type") == "Channel"
+            channel_identity = (
+                _arena_channel_identity(block, settings_key) if is_channel else None
+            )
+            if channel_tracker is not None and channel_identity is not None:
+                channel_tracker.observe(
+                    channel_identity,
+                    depth=_arena_channel_depth(channel_path, slug),
+                )
+                nested_contents = block.get("_nested_contents")
+                if isinstance(nested_contents, list) and nested_contents:
+                    child_depth = _arena_channel_depth(channel_path, slug) + 1
+                    parent_label = (
+                        root_label
+                        if child_depth == 1
+                        else f"{root_label}#{channel_path.rsplit('/', 1)[-1]}"
+                    )
+                    child_label = _arena_channel_label(
+                        block, f"{root_label}#{channel_path}"
+                    )
+                    channel_trace_items.append((child_label, parent_label, child_depth))
+            arena_ref = ArenaReference(
+                url,
+                block=block,
+                channel_path=channel_path,
+                format="raw",
+                inject=inject,
+                depth=depth,
+                include_descriptions=settings.include_descriptions,
+                include_comments=settings.include_comments,
+                include_link_image_descriptions=settings.include_link_image_descriptions,
+                include_pdf_content=settings.include_pdf_content,
+            )
+            label = filename or arena_ref.get_label()
+            if label_suffix:
+                label = f"{label} {label_suffix}"
+            wrapped = wrap_text(arena_ref.output, wrap or "md", label)
+            refs.append(
+                _SimpleReference(
+                    wrapped,
+                    path=arena_ref.path,
+                    trace_path=arena_ref.trace_path,
+                    content=arena_ref.file_content,
+                )
+            )
+            if arena_ref.file_content:
+                channel_contents.append(arena_ref.file_content)
+        return channel_contents
+
     if is_arena_channel_url(url):
         slug = extract_channel_slug(url)
         if slug:
+            root_identity = ("arena-channel", f"slug:{slug}", settings_key)
+            should_expand = True
+            if channel_tracker is not None:
+                should_expand = channel_tracker.should_expand(root_identity, depth=0)
+
+            resolve_settings = settings
+            if not should_expand and settings.max_depth > 0:
+                resolve_settings = replace(settings, max_depth=0)
+
             metadata, flat_blocks = resolve_channel(
                 slug,
                 use_cache=use_cache,
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
-                settings=settings,
+                settings=resolve_settings,
             )
-            for channel_path, block in flat_blocks:
-                arena_ref = ArenaReference(
+            channel_contents = _append_channel_blocks(flat_blocks, slug)
+            trace_inputs.append(
+                _TraceReference(
                     url,
-                    block=block,
-                    channel_path=channel_path,
-                    format="raw",
-                    inject=inject,
-                    depth=depth,
-                    include_descriptions=settings.include_descriptions,
-                    include_comments=settings.include_comments,
-                    include_link_image_descriptions=settings.include_link_image_descriptions,
-                    include_pdf_content=settings.include_pdf_content,
+                    "\n\n".join(channel_contents)
+                    if channel_contents
+                    else (metadata.get("title") or metadata.get("slug") or slug),
                 )
-                label = arena_ref.get_label()
-                if label_suffix:
-                    label = f"{label} {label_suffix}"
-                wrapped = wrap_text(arena_ref.output, wrap or "md", label)
-                refs.append(
-                    _SimpleReference(
-                        wrapped,
-                        path=arena_ref.path,
-                        trace_path=arena_ref.trace_path,
-                        content=arena_ref.file_content,
-                    )
-                )
+            )
     else:
         block_id = extract_block_id(url)
         if block_id is not None:
@@ -190,7 +340,8 @@ def _wrapped_arena_references(
                     content=arena_ref.file_content,
                 )
             )
-    return refs
+            trace_inputs.append(refs[-1])
+    return refs, trace_inputs, channel_trace_items
 
 
 def _wrapped_youtube_reference(
@@ -335,9 +486,12 @@ def _resolve_spec_to_seed_refs(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
-) -> List[Any]:
+    channel_tracker: _ArenaChannelTracker | None = None,
+) -> tuple[List[Any], List[Any], List[tuple[str, str, int]]]:
     spec = os.path.expanduser(raw_spec)
     seed_refs: List[Any] = []
+    trace_inputs: List[Any] = []
+    channel_trace_items: list[tuple[str, str, int]] = []
 
     if is_http_url(spec):
         opts = parse_target_spec(spec)
@@ -382,7 +536,7 @@ def _resolve_spec_to_seed_refs(
                 )
             )
         elif is_arena_url(url):
-            seed_refs.extend(
+            arena_refs, arena_trace_inputs, arena_trace_items = (
                 _wrapped_arena_references(
                     url,
                     filename=filename,
@@ -394,8 +548,12 @@ def _resolve_spec_to_seed_refs(
                     cache_ttl=cache_ttl,
                     refresh_cache=refresh_cache,
                     arena_overrides=arena_overrides,
+                    channel_tracker=channel_tracker,
                 )
             )
+            seed_refs.extend(arena_refs)
+            trace_inputs.extend(arena_trace_inputs)
+            channel_trace_items.extend(arena_trace_items)
         else:
             seed_refs.append(
                 _wrapped_url_reference(
@@ -410,7 +568,9 @@ def _resolve_spec_to_seed_refs(
                     refresh_cache=refresh_cache,
                 )
             )
-        return seed_refs
+        if not is_arena_url(url):
+            trace_inputs.extend([r for r in seed_refs if hasattr(r, "path")])
+        return seed_refs, trace_inputs, channel_trace_items
 
     tgt = parse_git_target(spec)
     if tgt:
@@ -450,7 +610,8 @@ def _resolve_spec_to_seed_refs(
             )["refs"]
             seed_refs.extend(refs)
 
-    return seed_refs
+    trace_inputs.extend([r for r in seed_refs if hasattr(r, "path")])
+    return seed_refs, trace_inputs, channel_trace_items
 
 
 def _render_attachment_block(
@@ -536,6 +697,7 @@ def build_payload_impl(
     if overlap:
         names = ", ".join(overlap)
         raise ValueError(f"Components cannot be both mapped and excluded: {names}")
+    channel_tracker = _ArenaChannelTracker(canonical={})
 
     for comp in components:
         selectors = component_selectors(comp)
@@ -647,21 +809,25 @@ def build_payload_impl(
                         skip_path = os.path.join(base_dir, skip_path)
                     resolved_link_skip.append(skip_path)
 
-            seed_refs = _resolve_spec_to_seed_refs(
-                raw_spec,
-                file_opts,
-                base_dir,
-                inject=inject,
-                depth=depth,
-                component_name=name,
-                label_suffix=item_comment,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-                arena_overrides=effective_arena_overrides,
+            seed_refs, spec_trace_inputs, arena_channel_trace_items = (
+                _resolve_spec_to_seed_refs(
+                    raw_spec,
+                    file_opts,
+                    base_dir,
+                    inject=inject,
+                    depth=depth,
+                    component_name=name,
+                    label_suffix=item_comment,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                    arena_overrides=effective_arena_overrides,
+                    channel_tracker=channel_tracker,
+                )
             )
 
-            input_refs_for_comp.extend([r for r in seed_refs if hasattr(r, "path")])
+            input_refs_for_comp.extend(spec_trace_inputs)
+            all_trace_items.extend(arena_channel_trace_items)
 
             effective_link_depth = int(
                 per_file_link_depth
