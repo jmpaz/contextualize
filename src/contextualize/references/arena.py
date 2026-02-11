@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import tempfile
+from functools import lru_cache
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -67,6 +68,15 @@ def is_arena_channel_url(url: str) -> bool:
 
 def is_arena_block_url(url: str) -> bool:
     return bool(_ARENA_BLOCK_RE.match(url))
+
+
+@lru_cache(maxsize=1)
+def warmup_arena_network_stack() -> None:
+    import ssl
+    import requests
+
+    ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    _ = requests.__version__
 
 
 def extract_channel_slug(url: str) -> str | None:

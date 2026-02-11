@@ -7,6 +7,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+from ..concurrency import run_indexed_tasks_fail_fast
 from ..utils import brace_expand, count_tokens
 from .file import FileReference
 from .helpers import (
@@ -133,32 +134,48 @@ def create_file_references(
             continue
 
         if is_arena_channel_url(target):
-            from .arena import extract_channel_slug, resolve_channel, _fetch_block
+            from .arena import (
+                extract_channel_slug,
+                resolve_channel,
+                warmup_arena_network_stack,
+            )
+            from ..runtime import get_payload_media_jobs
 
             slug = extract_channel_slug(target)
             if slug:
+                warmup_arena_network_stack()
                 metadata, flat_blocks = resolve_channel(
                     slug,
                     use_cache=use_cache,
                     cache_ttl=cache_ttl,
                     refresh_cache=refresh_cache,
                 )
-                for channel_path, block in flat_blocks:
-                    file_references.append(
-                        ArenaReference(
-                            target,
-                            block=block,
-                            channel_path=channel_path,
-                            format=format,
-                            label=label,
-                            label_suffix=label_suffix,
-                            include_token_count=include_token_count,
-                            token_target=token_target,
-                            inject=inject,
-                            depth=depth,
-                            trace_collector=trace_collector,
-                        )
+                tasks = [
+                    (
+                        index,
+                        (
+                            lambda cp=channel_path, b=block: ArenaReference(
+                                target,
+                                block=b,
+                                channel_path=cp,
+                                format=format,
+                                label=label,
+                                label_suffix=label_suffix,
+                                include_token_count=include_token_count,
+                                token_target=token_target,
+                                inject=inject,
+                                depth=depth,
+                                trace_collector=trace_collector,
+                            )
+                        ),
                     )
+                    for index, (channel_path, block) in enumerate(flat_blocks)
+                ]
+                for _, arena_ref in run_indexed_tasks_fail_fast(
+                    tasks,
+                    max_workers=get_payload_media_jobs(),
+                ):
+                    file_references.append(arena_ref)
                 continue
 
         if is_arena_block_url(target):

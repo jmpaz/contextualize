@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from ..concurrency import run_indexed_tasks_fail_fast
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_channel_url, is_arena_url
+from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
     is_http_url,
@@ -453,6 +455,13 @@ def build_hydration_plan_data(
                     str | None,
                 ]
             ] = []
+            spec_jobs = get_payload_spec_jobs()
+            prepared_specs: list[dict[str, Any]] = []
+            pending_by_key: dict[
+                tuple[str, bool, bool, str | None, tuple[Any, ...] | None],
+                tuple[str, Any | None, bool, dict | None],
+            ] = {}
+
             for spec_index, (file_spec, force_git, spec_root) in enumerate(
                 all_specs, 1
             ):
@@ -487,22 +496,74 @@ def build_hydration_plan_data(
                     cache_alias,
                     arena_overrides_key,
                 )
-                cached_items = resolved_spec_cache.get(spec_cache_key)
-                if cached_items is None:
-                    cached_items = _resolve_spec_items(
+                if (
+                    spec_cache_key not in resolved_spec_cache
+                    and spec_cache_key not in pending_by_key
+                ):
+                    pending_by_key[spec_cache_key] = (
                         raw_spec,
-                        base_dir,
-                        component_name=comp_name,
-                        alias_hint=alias_hint,
-                        gitignore=comp_gitignore,
-                        use_cache=context_cfg["use_cache"],
-                        cache_ttl=context_cfg["cache_ttl"],
-                        refresh_cache=context_cfg["refresh_cache"],
-                        force_git=force_git,
-                        arena_overrides=effective_arena_overrides,
+                        alias_hint,
+                        force_git,
+                        effective_arena_overrides,
                     )
-                    resolved_spec_cache[spec_cache_key] = cached_items
 
+                prepared_specs.append(
+                    {
+                        "spec_cache_key": spec_cache_key,
+                        "spec_comment": spec_comment,
+                        "range_spec": range_spec,
+                        "symbols_spec": symbols_spec,
+                        "file_opts": file_opts,
+                        "spec_root": spec_root,
+                    }
+                )
+
+            tasks = [
+                (
+                    index,
+                    (
+                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, eao=effective_arena_overrides: (
+                            _resolve_spec_items(
+                                rs,
+                                base_dir,
+                                component_name=comp_name,
+                                alias_hint=ah,
+                                gitignore=comp_gitignore,
+                                use_cache=context_cfg["use_cache"],
+                                cache_ttl=context_cfg["cache_ttl"],
+                                refresh_cache=context_cfg["refresh_cache"],
+                                force_git=fg,
+                                arena_overrides=eao,
+                            )
+                        )
+                    ),
+                )
+                for index, (
+                    cache_key,
+                    (raw_spec, alias_hint, force_git, effective_arena_overrides),
+                ) in enumerate(pending_by_key.items())
+            ]
+            if tasks and any(
+                is_http_url(raw_spec) for raw_spec, *_ in pending_by_key.values()
+            ):
+                from ..references.arena import warmup_arena_network_stack
+
+                warmup_arena_network_stack()
+            pending_keys = list(pending_by_key.keys())
+            for task_index, result_items in run_indexed_tasks_fail_fast(
+                tasks, max_workers=spec_jobs
+            ):
+                resolved_spec_cache[pending_keys[task_index]] = result_items
+
+            for prepared in prepared_specs:
+                spec_cache_key = prepared["spec_cache_key"]
+                spec_comment = prepared["spec_comment"]
+                range_spec = prepared["range_spec"]
+                symbols_spec = prepared["symbols_spec"]
+                file_opts = prepared["file_opts"]
+                spec_root = prepared["spec_root"]
+
+                cached_items = resolved_spec_cache[spec_cache_key]
                 for item in cached_items:
                     ranges = range_spec[:] if range_spec else None
                     symbols = symbols_spec[:] if symbols_spec else None
@@ -1593,6 +1654,7 @@ def _resolve_arena_items(
         extract_block_id,
         extract_channel_slug,
         resolve_channel,
+        warmup_arena_network_stack,
     )
     from ..references.arena import (
         _log as _arena_log,
@@ -1640,6 +1702,7 @@ def _resolve_arena_items(
     if not slug:
         raise ValueError(f"Could not parse Are.na URL: {url}")
 
+    warmup_arena_network_stack()
     metadata, flat = resolve_channel(
         slug,
         use_cache=use_cache,
@@ -1654,7 +1717,11 @@ def _resolve_arena_items(
     ch_updated = metadata.get("updated_at")
 
     total = len(flat)
-    for idx, (channel_path, block) in enumerate(flat, 1):
+    media_jobs = get_payload_media_jobs()
+
+    def _render_channel_item(
+        idx: int, channel_path: str, block: dict[str, Any]
+    ) -> ResolvedItem | None:
         block_type = block.get("type", "")
         is_channel = block_type == "Channel" or block.get("base_type") == "Channel"
 
@@ -1711,7 +1778,7 @@ def _resolve_arena_items(
                 include_media_descriptions=settings.include_media_descriptions,
             )
         if rendered is None:
-            continue
+            return None
 
         bid = block.get("id", "unknown")
         ch_slug = block.get("slug", "")
@@ -1733,26 +1800,35 @@ def _resolve_arena_items(
                 channel_id = str(raw_id)
             elif ch_slug:
                 channel_id = ch_slug
-        items.append(
-            ResolvedItem(
-                source_type="arena",
-                source_ref="are.na",
-                source_rev=None,
-                source_path=f"{slug}/{label}",
-                context_subpath=context_subpath,
-                content=rendered,
-                manifest_spec=url,
-                alias=alias if isinstance(alias, str) else None,
-                source_created=block.get("connected_at") or block.get("created_at"),
-                source_modified=block.get("updated_at"),
-                dir_created=ch_created,
-                dir_modified=ch_updated,
-                arena_kind="channel" if is_channel else "block",
-                arena_channel_id=channel_id,
-                arena_depth=arena_depth,
-                arena_settings_key=settings_key,
-            )
+        return ResolvedItem(
+            source_type="arena",
+            source_ref="are.na",
+            source_rev=None,
+            source_path=f"{slug}/{label}",
+            context_subpath=context_subpath,
+            content=rendered,
+            manifest_spec=url,
+            alias=alias if isinstance(alias, str) else None,
+            source_created=block.get("connected_at") or block.get("created_at"),
+            source_modified=block.get("updated_at"),
+            dir_created=ch_created,
+            dir_modified=ch_updated,
+            arena_kind="channel" if is_channel else "block",
+            arena_channel_id=channel_id,
+            arena_depth=arena_depth,
+            arena_settings_key=settings_key,
         )
+
+    tasks = [
+        (
+            idx - 1,
+            (lambda i=idx, cp=channel_path, b=block: _render_channel_item(i, cp, b)),
+        )
+        for idx, (channel_path, block) in enumerate(flat, 1)
+    ]
+    for _, rendered_item in run_indexed_tasks_fail_fast(tasks, max_workers=media_jobs):
+        if rendered_item is not None:
+            items.append(rendered_item)
 
     return items
 

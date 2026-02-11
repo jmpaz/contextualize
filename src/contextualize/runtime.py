@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
+import os
 
 _REFRESH_IMAGES: ContextVar[bool] = ContextVar(
     "contextualize_refresh_images", default=False
@@ -14,6 +15,23 @@ _REFRESH_AUDIO: ContextVar[bool] = ContextVar(
 _REFRESH_CACHE: ContextVar[bool] = ContextVar(
     "contextualize_refresh_cache", default=False
 )
+
+_DEFAULT_PAYLOAD_SPEC_JOBS = 4
+_DEFAULT_PAYLOAD_MEDIA_JOBS = 3
+_MAX_PAYLOAD_JOBS = 64
+
+
+def _read_positive_int_env(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value <= 0:
+        return default
+    return min(value, _MAX_PAYLOAD_JOBS)
 
 
 def get_refresh_images() -> bool:
@@ -66,3 +84,15 @@ def set_refresh_cache(enabled: bool) -> Token[bool]:
 
 def reset_refresh_cache(token: Token[bool]) -> None:
     _REFRESH_CACHE.reset(token)
+
+
+def get_payload_spec_jobs() -> int:
+    return _read_positive_int_env(
+        "CONTEXTUALIZE_PAYLOAD_SPEC_JOBS", _DEFAULT_PAYLOAD_SPEC_JOBS
+    )
+
+
+def get_payload_media_jobs() -> int:
+    return _read_positive_int_env(
+        "CONTEXTUALIZE_PAYLOAD_MEDIA_JOBS", _DEFAULT_PAYLOAD_MEDIA_JOBS
+    )

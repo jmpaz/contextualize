@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
+from threading import Lock
 
+from ..concurrency import run_indexed_tasks_fail_fast
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
+from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..render.links import add_markdown_link_refs
 from .hydrate import _merge_arena_overrides, _parse_arena_config_mapping
 from .manifest import coerce_file_spec, component_selectors
@@ -98,22 +101,34 @@ def _arena_channel_depth(channel_path: str, root_slug: str) -> int:
 class _ArenaChannelTracker:
     canonical: dict[tuple[Any, ...], tuple[int, int]]
     counter: int = 0
+    lock: Lock = field(default_factory=Lock)
 
     def should_expand(self, identity: tuple[Any, ...], *, depth: int) -> bool:
-        rank = (depth, self.counter)
-        self.counter += 1
-        current = self.canonical.get(identity)
-        if current is None or rank < current:
-            self.canonical[identity] = rank
-            return True
-        return False
+        with self.lock:
+            rank = (depth, self.counter)
+            self.counter += 1
+            current = self.canonical.get(identity)
+            if current is None or rank < current:
+                self.canonical[identity] = rank
+                return True
+            return False
 
     def observe(self, identity: tuple[Any, ...], *, depth: int) -> None:
-        rank = (depth, self.counter)
-        self.counter += 1
-        current = self.canonical.get(identity)
-        if current is None or rank < current:
-            self.canonical[identity] = rank
+        with self.lock:
+            rank = (depth, self.counter)
+            self.counter += 1
+            current = self.canonical.get(identity)
+            if current is None or rank < current:
+                self.canonical[identity] = rank
+
+
+@dataclass
+class _SpecResolution:
+    refs: list[Any]
+    input_refs: list[Any]
+    trace_items: list[Any]
+    skipped_paths: set[str]
+    skip_impact: dict[str, Any]
 
 
 def _arena_channel_label(block: dict[str, Any], fallback: str) -> str:
@@ -205,6 +220,7 @@ def _wrapped_arena_references(
         extract_channel_slug,
         is_arena_channel_url,
         resolve_channel,
+        warmup_arena_network_stack,
         _fetch_block,
     )
 
@@ -230,7 +246,8 @@ def _wrapped_arena_references(
             emitted_channel_edges.add(edge)
             channel_trace_items.append(edge)
 
-        for channel_path, block in flat_blocks:
+        block_entries: list[tuple[int, str, dict[str, Any]]] = []
+        for block_index, (channel_path, block) in enumerate(flat_blocks):
             channel_slug_path = block.get("_channel_slug_path")
             if isinstance(channel_slug_path, list):
                 for idx, nested_slug in enumerate(channel_slug_path[1:], start=1):
@@ -276,6 +293,11 @@ def _wrapped_arena_references(
                         block, f"{root_label}#{channel_path}"
                     )
                     _append_channel_edge(child_label, parent_label, child_depth)
+            block_entries.append((block_index, channel_path, block))
+
+        def _render_channel_block(
+            channel_path: str, block: dict[str, Any]
+        ) -> tuple[_SimpleReference, str]:
             arena_ref = ArenaReference(
                 url,
                 block=block,
@@ -293,21 +315,34 @@ def _wrapped_arena_references(
             if label_suffix:
                 label = f"{label} {label_suffix}"
             wrapped = wrap_text(arena_ref.output, wrap or "md", label)
-            refs.append(
-                _SimpleReference(
-                    wrapped,
-                    path=arena_ref.path,
-                    trace_path=arena_ref.trace_path,
-                    content=arena_ref.file_content,
-                )
+            simple_ref = _SimpleReference(
+                wrapped,
+                path=arena_ref.path,
+                trace_path=arena_ref.trace_path,
+                content=arena_ref.file_content,
             )
-            if arena_ref.file_content:
-                channel_contents.append(arena_ref.file_content)
+            return simple_ref, arena_ref.file_content
+
+        tasks = [
+            (
+                block_index,
+                (lambda p=channel_path, b=block: _render_channel_block(p, b)),
+            )
+            for block_index, channel_path, block in block_entries
+        ]
+        for _, (simple_ref, block_content) in run_indexed_tasks_fail_fast(
+            tasks,
+            max_workers=get_payload_media_jobs(),
+        ):
+            refs.append(simple_ref)
+            if block_content:
+                channel_contents.append(block_content)
         return channel_contents
 
     if is_arena_channel_url(url):
         slug = extract_channel_slug(url)
         if slug:
+            warmup_arena_network_stack()
             root_identity = ("arena-channel", f"slug:{slug}", settings_key)
             should_expand = True
             if channel_tracker is not None:
@@ -672,6 +707,105 @@ def _append_refs(target: list[Any], refs: list[Any]) -> None:
     target.extend(refs)
 
 
+def _resolve_spec(
+    *,
+    raw_spec: str,
+    file_opts: Dict[str, Any],
+    base_dir: str,
+    inject: bool,
+    depth: int,
+    component_name: str,
+    item_comment: str | None,
+    map_component: bool,
+    token_target: str,
+    comp_link_depth: int,
+    per_file_link_depth: int | None,
+    per_file_link_scope: str,
+    resolved_link_skip: list[str],
+    use_cache: bool,
+    cache_ttl: timedelta | None,
+    refresh_cache: bool,
+    effective_arena_overrides: dict | None,
+    channel_tracker: _ArenaChannelTracker | None,
+) -> _SpecResolution:
+    if map_component:
+        map_paths = _resolve_spec_to_paths(
+            raw_spec,
+            base_dir,
+            component_name=component_name,
+        )
+        if map_paths:
+            map_output = _generate_repo_map_output(map_paths, token_target=token_target)
+            if _map_output_is_compatible(map_output):
+                map_ref = _build_map_reference(
+                    raw_spec,
+                    map_output,
+                    label_suffix=item_comment,
+                    token_target=token_target,
+                )
+                return _SpecResolution(
+                    refs=[map_ref],
+                    input_refs=[map_ref],
+                    trace_items=[],
+                    skipped_paths=set(),
+                    skip_impact={},
+                )
+
+    seed_refs, spec_trace_inputs, arena_channel_trace_items = (
+        _resolve_spec_to_seed_refs(
+            raw_spec,
+            file_opts,
+            base_dir,
+            inject=inject,
+            depth=depth,
+            component_name=component_name,
+            label_suffix=item_comment,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            arena_overrides=effective_arena_overrides,
+            channel_tracker=channel_tracker,
+        )
+    )
+
+    trace_items: list[Any] = list(arena_channel_trace_items)
+    effective_link_depth = int(
+        per_file_link_depth if per_file_link_depth is not None else comp_link_depth
+    )
+    if effective_link_depth <= 0:
+        return _SpecResolution(
+            refs=seed_refs,
+            input_refs=spec_trace_inputs,
+            trace_items=trace_items,
+            skipped_paths=set(),
+            skip_impact={},
+        )
+
+    expanded_refs, comp_trace_items, comp_skip_impact = add_markdown_link_refs(
+        seed_refs,
+        link_depth=effective_link_depth,
+        scope=per_file_link_scope,
+        format_="md",
+        label="relative",
+        inject=inject,
+        link_skip=resolved_link_skip if resolved_link_skip else None,
+    )
+    trace_items.extend(comp_trace_items)
+    skipped_paths: set[str] = set()
+    if resolved_link_skip:
+        for skip_path in resolved_link_skip:
+            abs_skip_path = os.path.abspath(skip_path)
+            if os.path.exists(abs_skip_path):
+                skipped_paths.add(abs_skip_path)
+    return _SpecResolution(
+        refs=expanded_refs,
+        input_refs=spec_trace_inputs,
+        trace_items=trace_items,
+        skipped_paths=skipped_paths,
+        skip_impact=comp_skip_impact or {},
+    )
+
+
 def _should_map_component(
     selectors: set[str],
     *,
@@ -719,6 +853,7 @@ def build_payload_impl(
         names = ", ".join(overlap)
         raise ValueError(f"Components cannot be both mapped and excluded: {names}")
     channel_tracker = _ArenaChannelTracker(canonical={})
+    spec_jobs = get_payload_spec_jobs()
 
     for comp in components:
         selectors = component_selectors(comp)
@@ -777,6 +912,7 @@ def build_payload_impl(
 
         refs_for_attachment = []
         input_refs_for_comp = []
+        spec_tasks: list[tuple[int, Any]] = []
 
         for spec_index, spec in enumerate(files, 1):
             spec, file_opts = coerce_file_spec(spec)
@@ -791,27 +927,6 @@ def build_payload_impl(
                 component_arena_overrides,
                 file_arena_overrides,
             )
-
-            if map_component:
-                map_paths = _resolve_spec_to_paths(
-                    raw_spec,
-                    base_dir,
-                    component_name=name,
-                )
-                if map_paths:
-                    map_output = _generate_repo_map_output(
-                        map_paths, token_target=token_target
-                    )
-                    if _map_output_is_compatible(map_output):
-                        map_ref = _build_map_reference(
-                            raw_spec,
-                            map_output,
-                            label_suffix=item_comment,
-                            token_target=token_target,
-                        )
-                        _append_refs(refs_for_attachment, [map_ref])
-                        input_refs_for_comp.append(map_ref)
-                        continue
 
             per_file_link_depth = file_opts.get("link-depth")
             per_file_link_scope = (
@@ -830,54 +945,44 @@ def build_payload_impl(
                         skip_path = os.path.join(base_dir, skip_path)
                     resolved_link_skip.append(skip_path)
 
-            seed_refs, spec_trace_inputs, arena_channel_trace_items = (
-                _resolve_spec_to_seed_refs(
-                    raw_spec,
-                    file_opts,
-                    base_dir,
-                    inject=inject,
-                    depth=depth,
-                    component_name=name,
-                    label_suffix=item_comment,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                    arena_overrides=effective_arena_overrides,
-                    channel_tracker=channel_tracker,
+            spec_tasks.append(
+                (
+                    spec_index,
+                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, eao=effective_arena_overrides: (
+                        _resolve_spec(
+                            raw_spec=rs,
+                            file_opts=fo,
+                            base_dir=base_dir,
+                            inject=inject,
+                            depth=depth,
+                            component_name=name,
+                            item_comment=ic,
+                            map_component=map_component,
+                            token_target=token_target,
+                            comp_link_depth=comp_link_depth,
+                            per_file_link_depth=pld,
+                            per_file_link_scope=pls,
+                            resolved_link_skip=rls,
+                            use_cache=use_cache,
+                            cache_ttl=cache_ttl,
+                            refresh_cache=refresh_cache,
+                            effective_arena_overrides=eao,
+                            channel_tracker=channel_tracker,
+                        )
+                    ),
                 )
             )
 
-            input_refs_for_comp.extend(spec_trace_inputs)
-            all_trace_items.extend(arena_channel_trace_items)
-
-            effective_link_depth = int(
-                per_file_link_depth
-                if per_file_link_depth is not None
-                else comp_link_depth
-            )
-            if effective_link_depth > 0:
-                expanded_refs, comp_trace_items, comp_skip_impact = (
-                    add_markdown_link_refs(
-                        seed_refs,
-                        link_depth=effective_link_depth,
-                        scope=per_file_link_scope,
-                        format_="md",
-                        label="relative",
-                        inject=inject,
-                        link_skip=resolved_link_skip if resolved_link_skip else None,
-                    )
-                )
-                _append_refs(refs_for_attachment, expanded_refs)
-                all_trace_items.extend(comp_trace_items)
-                if resolved_link_skip:
-                    for skip_path in resolved_link_skip:
-                        abs_skip_path = os.path.abspath(skip_path)
-                        if os.path.exists(abs_skip_path):
-                            all_skipped_paths.add(abs_skip_path)
-                if comp_skip_impact:
-                    all_skip_impact.update(comp_skip_impact)
-            else:
-                _append_refs(refs_for_attachment, seed_refs)
+        for _, spec_result in run_indexed_tasks_fail_fast(
+            spec_tasks,
+            max_workers=spec_jobs,
+        ):
+            _append_refs(refs_for_attachment, spec_result.refs)
+            input_refs_for_comp.extend(spec_result.input_refs)
+            all_trace_items.extend(spec_result.trace_items)
+            all_skipped_paths.update(spec_result.skipped_paths)
+            if spec_result.skip_impact:
+                all_skip_impact.update(spec_result.skip_impact)
 
         all_input_refs.extend(input_refs_for_comp)
 
