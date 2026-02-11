@@ -631,6 +631,13 @@ def _audio_prompt() -> str:
     return _compose_alt_text_prompt(modality="audio", include_transcript_hint=True)
 
 
+def _merge_prompt(base_prompt: str, prompt_append: str | None) -> str:
+    append = (prompt_append or "").strip()
+    if not append:
+        return base_prompt
+    return f"{base_prompt}\n\n{append}"
+
+
 def _video_has_audio_stream(path: Path) -> bool:
     ffprobe = _ffprobe_path()
     if ffprobe is None:
@@ -929,7 +936,10 @@ def _get_converter():
 
 
 def convert_path_to_markdown(
-    path: str | Path, *, refresh_images: bool = False
+    path: str | Path,
+    *,
+    refresh_images: bool = False,
+    prompt_append: str | None = None,
 ) -> MarkItDownResult:
     path_obj = Path(path)
     is_image = path_obj.suffix.lower() in _IMAGE_SUFFIXES
@@ -942,6 +952,7 @@ def convert_path_to_markdown(
     if is_image:
         media_md5 = _file_md5(path_obj)
         llm_enabled, base_url, model, prompt, exiftool_path = _image_context()
+        prompt = _merge_prompt(prompt, prompt_append)
 
         cache_key_payload = _image_cache_payload(
             media_md5,
@@ -971,7 +982,7 @@ def convert_path_to_markdown(
             markdown = _llm_video_markdown(
                 video_path.read_bytes(),
                 suffix=video_path.suffix.lower(),
-                prompt=_video_prompt(video_path),
+                prompt=_merge_prompt(_video_prompt(video_path), prompt_append),
             )
             return MarkItDownResult(markdown=markdown, title=None)
         except MarkItDownConversionError as exc:
@@ -988,7 +999,7 @@ def convert_path_to_markdown(
             markdown = _llm_audio_markdown(
                 path_obj.read_bytes(),
                 suffix=path_obj.suffix.lower(),
-                prompt=_audio_prompt(),
+                prompt=_merge_prompt(_audio_prompt(), prompt_append),
             )
             return MarkItDownResult(markdown=markdown, title=None)
         except MarkItDownConversionError:
@@ -1011,7 +1022,10 @@ def convert_path_to_markdown(
 
 
 def convert_response_to_markdown(
-    response: ResponseLike, *, refresh_images: bool = False
+    response: ResponseLike,
+    *,
+    refresh_images: bool = False,
+    prompt_append: str | None = None,
 ) -> MarkItDownResult:
     content_type = (
         str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip()
@@ -1027,6 +1041,7 @@ def convert_response_to_markdown(
 
     if is_image:
         llm_enabled, base_url, model, prompt, exiftool_path = _image_context()
+        prompt = _merge_prompt(prompt, prompt_append)
         media_md5 = hashlib.md5(response.content).hexdigest()
 
         cache_key_payload = _image_cache_payload(
@@ -1057,7 +1072,7 @@ def convert_response_to_markdown(
             temp_path.write_bytes(response.content)
             video_path = _maybe_convert_gif_to_mp4(temp_path)
             cleanup_video = video_path is not temp_path
-            prompt = _video_prompt(video_path)
+            prompt = _merge_prompt(_video_prompt(video_path), prompt_append)
             remote_url = str(response.url).strip()
             if remote_url and remote_url.startswith(("http://", "https://")):
                 try:
@@ -1093,7 +1108,7 @@ def convert_response_to_markdown(
             markdown = _llm_audio_markdown(
                 response.content,
                 suffix=suffix.lower(),
-                prompt=_audio_prompt(),
+                prompt=_merge_prompt(_audio_prompt(), prompt_append),
             )
             return MarkItDownResult(markdown=markdown, title=None)
         except MarkItDownConversionError:

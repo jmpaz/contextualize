@@ -21,6 +21,7 @@ from .helpers import (
 )
 from .url import URLReference
 from .arena import ArenaReference, is_arena_channel_url, is_arena_block_url
+from .discord import DiscordReference, is_discord_url, resolve_discord_url
 from .youtube import YouTubeReference, is_youtube_url
 
 
@@ -199,6 +200,30 @@ def create_file_references(
                     )
                 )
                 continue
+
+        if is_discord_url(target):
+            discord_docs = resolve_discord_url(
+                target,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+            )
+            for document in discord_docs:
+                file_references.append(
+                    DiscordReference(
+                        target,
+                        document=document,
+                        format=format,
+                        label=label,
+                        label_suffix=label_suffix,
+                        include_token_count=include_token_count,
+                        token_target=token_target,
+                        inject=inject,
+                        depth=depth,
+                        trace_collector=trace_collector,
+                    )
+                )
+            continue
 
         if is_http_url(target):
             gist_id = parse_gist_url(target)

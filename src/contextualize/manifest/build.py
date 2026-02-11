@@ -12,10 +12,21 @@ from ..concurrency import run_indexed_tasks_fail_fast
 from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..render.links import add_markdown_link_refs
-from .hydrate import _merge_arena_overrides, _parse_arena_config_mapping
+from .hydrate import (
+    _merge_arena_overrides,
+    _merge_discord_overrides,
+    _parse_arena_config_mapping,
+)
+from ..references.discord import parse_discord_config_mapping
 from .manifest import coerce_file_spec, component_selectors
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_url
+from ..references.discord import (
+    DiscordReference,
+    build_discord_settings,
+    is_discord_url,
+    resolve_discord_url,
+)
 from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
 from ..references.youtube import is_youtube_url
 from ..utils import wrap_text
@@ -433,6 +444,60 @@ def _wrapped_youtube_reference(
     )
 
 
+def _wrapped_discord_references(
+    url: str,
+    *,
+    filename: Optional[str],
+    wrap: Optional[str],
+    inject: bool,
+    depth: int,
+    label_suffix: str | None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    discord_overrides: dict | None = None,
+) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
+    settings = build_discord_settings(discord_overrides)
+    documents = resolve_discord_url(
+        url,
+        settings=settings,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+
+    refs: list[_SimpleReference] = []
+    trace_inputs: list[Any] = []
+    trace_items: list[tuple[str, str, int]] = []
+
+    for document in documents:
+        discord_ref = DiscordReference(
+            url,
+            document=document,
+            format="raw",
+            inject=inject,
+            depth=depth,
+        )
+        label = filename or discord_ref.get_label()
+        if label_suffix:
+            label = f"{label} {label_suffix}"
+        wrapped = wrap_text(discord_ref.output, wrap or "md", label)
+        simple_ref = _SimpleReference(
+            wrapped,
+            path=discord_ref.path,
+            trace_path=discord_ref.trace_path,
+            content=discord_ref.file_content,
+        )
+        refs.append(simple_ref)
+        trace_inputs.append(simple_ref)
+
+        if document.thread_id and document.parent_channel_id:
+            parent_trace = f"discord/{document.guild_id}/{document.parent_channel_id}"
+            trace_items.append((discord_ref.trace_path, parent_trace, 1))
+
+    return refs, trace_inputs, trace_items
+
+
 def _resolve_spec_to_paths(
     raw_spec: str,
     base_dir: str,
@@ -542,6 +607,7 @@ def _resolve_spec_to_seed_refs(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
+    discord_overrides: dict | None = None,
     channel_tracker: _ArenaChannelTracker | None = None,
 ) -> tuple[List[Any], List[Any], List[tuple[str, str, int]]]:
     spec = os.path.expanduser(raw_spec)
@@ -610,6 +676,24 @@ def _resolve_spec_to_seed_refs(
             seed_refs.extend(arena_refs)
             trace_inputs.extend(arena_trace_inputs)
             channel_trace_items.extend(arena_trace_items)
+        elif is_discord_url(url):
+            discord_refs, discord_trace_inputs, discord_trace_items = (
+                _wrapped_discord_references(
+                    url,
+                    filename=filename,
+                    wrap=wrap,
+                    inject=inject,
+                    depth=depth,
+                    label_suffix=label_suffix,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                    discord_overrides=discord_overrides,
+                )
+            )
+            seed_refs.extend(discord_refs)
+            trace_inputs.extend(discord_trace_inputs)
+            channel_trace_items.extend(discord_trace_items)
         else:
             seed_refs.append(
                 _wrapped_url_reference(
@@ -624,7 +708,7 @@ def _resolve_spec_to_seed_refs(
                     refresh_cache=refresh_cache,
                 )
             )
-        if not is_arena_url(url):
+        if not is_arena_url(url) and not is_discord_url(url):
             trace_inputs.extend([r for r in seed_refs if hasattr(r, "path")])
         return seed_refs, trace_inputs, channel_trace_items
 
@@ -726,6 +810,7 @@ def _resolve_spec(
     cache_ttl: timedelta | None,
     refresh_cache: bool,
     effective_arena_overrides: dict | None,
+    effective_discord_overrides: dict | None,
     channel_tracker: _ArenaChannelTracker | None,
 ) -> _SpecResolution:
     if map_component:
@@ -764,6 +849,7 @@ def _resolve_spec(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             arena_overrides=effective_arena_overrides,
+            discord_overrides=effective_discord_overrides,
             channel_tracker=channel_tracker,
         )
     )
@@ -840,6 +926,7 @@ def build_payload_impl(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
+    discord_overrides: dict | None = None,
 ):
     parts: List[str] = []
     all_input_refs = []
@@ -896,6 +983,9 @@ def build_payload_impl(
         component_arena_overrides = _parse_arena_config_mapping(
             comp.get("arena"), prefix=f"component '{name}'.arena"
         )
+        component_discord_overrides = parse_discord_config_mapping(
+            comp.get("discord"), prefix=f"component '{name}'.discord"
+        )
 
         comp_link_skip = comp.get("link-skip", link_skip_default)
         if comp_link_skip is None:
@@ -927,6 +1017,15 @@ def build_payload_impl(
                 component_arena_overrides,
                 file_arena_overrides,
             )
+            file_discord_overrides = parse_discord_config_mapping(
+                file_opts.get("discord"),
+                prefix=f"component '{name}' file[{spec_index}].discord",
+            )
+            effective_discord_overrides = _merge_discord_overrides(
+                discord_overrides,
+                component_discord_overrides,
+                file_discord_overrides,
+            )
 
             per_file_link_depth = file_opts.get("link-depth")
             per_file_link_scope = (
@@ -948,7 +1047,7 @@ def build_payload_impl(
             spec_tasks.append(
                 (
                     spec_index,
-                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, eao=effective_arena_overrides: (
+                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, eao=effective_arena_overrides, edo=effective_discord_overrides: (
                         _resolve_spec(
                             raw_spec=rs,
                             file_opts=fo,
@@ -967,6 +1066,7 @@ def build_payload_impl(
                             cache_ttl=cache_ttl,
                             refresh_cache=refresh_cache,
                             effective_arena_overrides=eao,
+                            effective_discord_overrides=edo,
                             channel_tracker=channel_tracker,
                         )
                     ),

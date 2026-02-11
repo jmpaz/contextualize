@@ -17,6 +17,7 @@ from .helpers import (
 from .shell import CommandReference, ShellReference, create_command_references
 from .url import URLReference, create_url_reference
 from .arena import ArenaReference, is_arena_url
+from .discord import DiscordReference, is_discord_url
 from .youtube import YouTubeReference, is_youtube_url
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "FileReference",
     "URLReference",
     "ArenaReference",
+    "DiscordReference",
     "YouTubeReference",
     "CommandReference",
     "ShellReference",
@@ -35,6 +37,7 @@ __all__ = [
     "split_path_and_symbols",
     "is_utf8_file",
     "is_arena_url",
+    "is_discord_url",
     "is_youtube_url",
     "remove_ansi",
     "strip_content_type",

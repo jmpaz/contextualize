@@ -17,6 +17,16 @@ from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_channel_url, is_arena_url
+from ..references.discord import (
+    build_discord_settings,
+    discord_overrides_cache_key,
+    discord_settings_cache_key,
+    is_discord_url,
+    merge_discord_overrides,
+    parse_discord_url,
+    parse_discord_config_mapping,
+    resolve_discord_url,
+)
 from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
@@ -78,6 +88,10 @@ class ResolvedItem:
     arena_channel_id: str | None = None
     arena_depth: int | None = None
     arena_settings_key: tuple[Any, ...] | None = None
+    discord_kind: str | None = None
+    discord_scope_id: str | None = None
+    discord_depth: int | None = None
+    discord_settings_key: tuple[Any, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -343,12 +357,14 @@ def build_hydration_plan_data(
     components = normalize_components(components)
 
     arena_overrides = _resolve_arena_config(cfg)
+    discord_overrides = _resolve_discord_config(cfg)
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
     context_dir = context_cfg["dir"]
     has_local_sources = _manifest_has_local_sources(components)
     has_arena_channels = _manifest_has_arena_channels(components)
+    has_discord_channels = _manifest_has_discord_channels(components)
     use_external_root = context_cfg["path_strategy"] == "on-disk" and has_local_sources
     flatten_groups: set[tuple[str, ...]] = set()
     if context_cfg["path_strategy"] == "by-component":
@@ -364,7 +380,15 @@ def build_hydration_plan_data(
     arena_pending: dict[tuple[Any, ...], list[_ArenaPendingWrite]] = {}
     arena_seen_counter = 0
     resolved_spec_cache: dict[
-        tuple[str, bool, bool, str | None, tuple[Any, ...] | None], list[ResolvedItem]
+        tuple[
+            str,
+            bool,
+            bool,
+            str | None,
+            tuple[Any, ...] | None,
+            tuple[Any, ...] | None,
+        ],
+        list[ResolvedItem],
     ] = {}
 
     global_strip_prefix: Path | None = None
@@ -402,6 +426,9 @@ def build_hydration_plan_data(
         )
         component_arena_overrides = _parse_arena_config_mapping(
             comp.get("arena"), prefix=f"component '{comp_name}'.arena"
+        )
+        component_discord_overrides = parse_discord_config_mapping(
+            comp.get("discord"), prefix=f"component '{comp_name}'.discord"
         )
 
         if (
@@ -458,8 +485,15 @@ def build_hydration_plan_data(
             spec_jobs = get_payload_spec_jobs()
             prepared_specs: list[dict[str, Any]] = []
             pending_by_key: dict[
-                tuple[str, bool, bool, str | None, tuple[Any, ...] | None],
-                tuple[str, Any | None, bool, dict | None],
+                tuple[
+                    str,
+                    bool,
+                    bool,
+                    str | None,
+                    tuple[Any, ...] | None,
+                    tuple[Any, ...] | None,
+                ],
+                tuple[str, Any | None, bool, dict | None, dict | None],
             ] = {}
 
             for spec_index, (file_spec, force_git, spec_root) in enumerate(
@@ -483,8 +517,20 @@ def build_hydration_plan_data(
                     component_arena_overrides,
                     file_arena_overrides,
                 )
+                file_discord_overrides = parse_discord_config_mapping(
+                    file_opts.get("discord"),
+                    prefix=f"component '{comp_name}' file[{spec_index}].discord",
+                )
+                effective_discord_overrides = _merge_discord_overrides(
+                    discord_overrides,
+                    component_discord_overrides,
+                    file_discord_overrides,
+                )
                 arena_overrides_key = _arena_overrides_cache_key(
                     effective_arena_overrides
+                )
+                discord_overrides_key = _discord_overrides_cache_key(
+                    effective_discord_overrides
                 )
 
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
@@ -495,6 +541,7 @@ def build_hydration_plan_data(
                     comp_gitignore,
                     cache_alias,
                     arena_overrides_key,
+                    discord_overrides_key,
                 )
                 if (
                     spec_cache_key not in resolved_spec_cache
@@ -505,6 +552,7 @@ def build_hydration_plan_data(
                         alias_hint,
                         force_git,
                         effective_arena_overrides,
+                        effective_discord_overrides,
                     )
 
                 prepared_specs.append(
@@ -522,7 +570,7 @@ def build_hydration_plan_data(
                 (
                     index,
                     (
-                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, eao=effective_arena_overrides: (
+                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, eao=effective_arena_overrides, edo=effective_discord_overrides: (
                             _resolve_spec_items(
                                 rs,
                                 base_dir,
@@ -534,13 +582,20 @@ def build_hydration_plan_data(
                                 refresh_cache=context_cfg["refresh_cache"],
                                 force_git=fg,
                                 arena_overrides=eao,
+                                discord_overrides=edo,
                             )
                         )
                     ),
                 )
                 for index, (
                     cache_key,
-                    (raw_spec, alias_hint, force_git, effective_arena_overrides),
+                    (
+                        raw_spec,
+                        alias_hint,
+                        force_git,
+                        effective_arena_overrides,
+                        effective_discord_overrides,
+                    ),
                 ) in enumerate(pending_by_key.items())
             ]
             if tasks and any(
@@ -726,6 +781,8 @@ def build_hydration_plan_data(
                 include_root=has_local_sources,
                 include_arena_max_depth=has_arena_channels,
                 arena_overrides=arena_overrides,
+                include_discord_defaults=has_discord_channels,
+                discord_overrides=discord_overrides,
             ),
             "components": normalized_components,
         }
@@ -1037,6 +1094,26 @@ def _arena_overrides_cache_key(
     return tuple(normalized)
 
 
+def _resolve_discord_config(cfg: dict[str, Any]) -> dict | None:
+    return parse_discord_config_mapping(cfg.get("discord"), prefix="config.discord")
+
+
+def _merge_discord_overrides(
+    *overrides: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    return merge_discord_overrides(*overrides)
+
+
+def _discord_overrides_cache_key(
+    overrides: dict[str, Any] | None,
+) -> tuple[Any, ...] | None:
+    return discord_overrides_cache_key(overrides)
+
+
+def _discord_settings_cache_key(settings: Any) -> tuple[Any, ...]:
+    return discord_settings_cache_key(settings)
+
+
 def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
     recurse_users = settings.recurse_users
     recurse_key: tuple[str, ...] | None
@@ -1318,6 +1395,23 @@ def _manifest_has_arena_channels(components: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _manifest_has_discord_channels(components: list[dict[str, Any]]) -> bool:
+    for comp in components:
+        files = comp.get("files")
+        if not files or not isinstance(files, list):
+            continue
+        for file_spec in files:
+            raw_spec, _ = coerce_file_spec(file_spec)
+            spec = os.path.expanduser(raw_spec)
+            if not is_http_url(spec):
+                continue
+            opts = parse_target_spec(spec)
+            target = opts.get("target", spec)
+            if is_discord_url(target):
+                return True
+    return False
+
+
 def _is_external_spec(raw_spec: str) -> bool:
     spec = os.path.expanduser(raw_spec)
     if is_http_url(spec):
@@ -1405,6 +1499,7 @@ def _resolve_spec_items(
     refresh_cache: bool = False,
     force_git: bool = False,
     arena_overrides: dict | None = None,
+    discord_overrides: dict | None = None,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
 
@@ -1477,6 +1572,16 @@ def _resolve_spec_items(
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
                 arena_overrides=arena_overrides,
+            )
+
+        if is_discord_url(url):
+            return _resolve_discord_items(
+                url,
+                alias,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+                discord_overrides=discord_overrides,
             )
 
         return [
@@ -1833,6 +1938,105 @@ def _resolve_arena_items(
     return items
 
 
+def _sanitize_discord_segment(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
+    cleaned = cleaned.strip("-._")
+    return cleaned or fallback
+
+
+def _resolve_discord_items(
+    url: str,
+    alias: Any | None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    discord_overrides: dict | None = None,
+) -> list[ResolvedItem]:
+    settings = build_discord_settings(discord_overrides)
+    settings_key = _discord_settings_cache_key(settings)
+    documents = resolve_discord_url(
+        url,
+        settings=settings,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+
+    ext = ".yaml" if settings.format == "yaml" else ".md"
+    items: list[ResolvedItem] = []
+    parsed = parse_discord_url(url)
+    target_message_id = (
+        parsed.get("message_id") if parsed and parsed.get("kind") == "message" else None
+    )
+
+    if alias and isinstance(alias, str):
+        alias_name = alias
+    else:
+        if parsed:
+            alias_name = f"discord-{parsed['guild_id']}-{parsed['channel_id']}"
+        else:
+            alias_name = "discord"
+    safe_root = _sanitize_discord_segment(alias_name, "discord")
+    multi = len(documents) > 1
+
+    for index, document in enumerate(documents, 1):
+        if multi:
+            if document.kind == "thread" and document.thread_id:
+                stem = f"thread-{document.thread_id}"
+            else:
+                stem = f"{document.kind}-{index}"
+            context_subpath = (
+                f"{safe_root}/{_sanitize_discord_segment(stem, 'item')}{ext}"
+            )
+        else:
+            if alias and isinstance(alias, str):
+                context_subpath = alias if alias.endswith(ext) else f"{alias}{ext}"
+            elif document.kind == "thread" and document.thread_id:
+                context_subpath = f"{safe_root}/thread-{document.thread_id}{ext}"
+            else:
+                context_subpath = f"{safe_root}/{document.kind}{ext}"
+
+        source_path_parts = [document.guild_id, document.channel_id]
+        if document.thread_id:
+            source_path_parts.append(document.thread_id)
+        if target_message_id:
+            source_path_parts.append(f"message-{target_message_id}")
+        source_path = "/".join(source_path_parts)
+
+        timestamps = [
+            message.get("timestamp")
+            for message in document.messages
+            if isinstance(message, dict) and isinstance(message.get("timestamp"), str)
+        ]
+        source_created = min(timestamps) if timestamps else None
+        source_modified = max(timestamps) if timestamps else None
+
+        scope_id = document.thread_id or document.channel_id
+        depth = 1 if document.thread_id else 0
+
+        items.append(
+            ResolvedItem(
+                source_type="discord",
+                source_ref="discord.com",
+                source_rev=None,
+                source_path=source_path,
+                context_subpath=context_subpath,
+                content=document.rendered,
+                manifest_spec=url,
+                alias=alias if isinstance(alias, str) else None,
+                source_created=source_created,
+                source_modified=source_modified,
+                discord_kind=document.kind,
+                discord_scope_id=scope_id,
+                discord_depth=depth,
+                discord_settings_key=settings_key,
+            )
+        )
+
+    return items
+
+
 def _resolve_gist_item(
     raw_url: str,
     filename: str,
@@ -2050,6 +2254,7 @@ def _build_identity_key(
         item.source_rev,
         item.source_path,
         item.arena_settings_key if item.source_type == "arena" else None,
+        item.discord_settings_key if item.source_type == "discord" else None,
         ranges_key,
         symbols_key,
     )
@@ -2110,6 +2315,8 @@ def _build_external_path(
             / subpath
         )
     if item.source_type == "arena":
+        return prefix / subpath if prefix.parts else subpath
+    if item.source_type == "discord":
         return prefix / subpath if prefix.parts else subpath
     return (
         prefix
@@ -2339,6 +2546,17 @@ def _format_ranges(ranges: list[tuple[int, int]]) -> str | list[str]:
     return formatted
 
 
+def _format_duration_for_manifest(value: timedelta) -> str:
+    total = int(value.total_seconds())
+    if total % 86400 == 0:
+        return f"{total // 86400}d"
+    if total % 3600 == 0:
+        return f"{total // 3600}h"
+    if total % 60 == 0:
+        return f"{total // 60}i"
+    return f"{total}s"
+
+
 def _build_normalized_config(
     cfg: dict[str, Any],
     context_cfg: dict[str, Any],
@@ -2347,6 +2565,8 @@ def _build_normalized_config(
     include_root: bool,
     include_arena_max_depth: bool,
     arena_overrides: dict[str, Any] | None,
+    include_discord_defaults: bool,
+    discord_overrides: dict[str, Any] | None,
 ) -> dict[str, Any]:
     normalized = dict(cfg)
     if include_root:
@@ -2381,6 +2601,49 @@ def _build_normalized_config(
         arena["recurse-depth"] = arena_settings.max_depth
         arena["block-sort"] = arena_settings.sort_order
         normalized["arena"] = arena
+    if include_discord_defaults:
+        discord_settings = build_discord_settings(discord_overrides)
+        discord = dict(cfg.get("discord") or {})
+        window = dict(discord.get("window") or {})
+        media = dict(discord.get("media") or {})
+
+        discord["format"] = discord_settings.format
+        discord["include-system"] = discord_settings.include_system
+        discord["include-thread-starters"] = discord_settings.include_thread_starters
+        discord["expand-threads"] = discord_settings.expand_threads
+        discord["gap-threshold"] = _format_duration_for_manifest(
+            discord_settings.gap_threshold
+        )
+
+        window["before-messages"] = discord_settings.before_messages
+        window["after-messages"] = discord_settings.after_messages
+        window["around-messages"] = discord_settings.around_messages
+        window["message-context"] = discord_settings.message_context
+        window["channel-limit"] = discord_settings.channel_limit
+        if discord_settings.start:
+            window["start"] = discord_settings.start.isoformat().replace("+00:00", "Z")
+        if discord_settings.end:
+            window["end"] = discord_settings.end.isoformat().replace("+00:00", "Z")
+        if discord_settings.before_duration:
+            window["before-duration"] = _format_duration_for_manifest(
+                discord_settings.before_duration
+            )
+        if discord_settings.after_duration:
+            window["after-duration"] = _format_duration_for_manifest(
+                discord_settings.after_duration
+            )
+        if discord_settings.around_duration:
+            window["around-duration"] = _format_duration_for_manifest(
+                discord_settings.around_duration
+            )
+        discord["window"] = {k: v for k, v in window.items() if v is not None}
+
+        media["describe"] = discord_settings.include_media_descriptions
+        media["embed-media-describe"] = (
+            discord_settings.include_embed_media_descriptions
+        )
+        discord["media"] = media
+        normalized["discord"] = discord
     return normalized
 
 
