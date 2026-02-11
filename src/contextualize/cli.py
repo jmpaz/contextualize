@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 from dataclasses import dataclass
@@ -719,9 +720,53 @@ def payload_cmd(
         raise click.BadParameter(
             f"--exclude cannot be combined with --map for: {names}"
         )
+
+    def _payload_cache_key_data(
+        *,
+        manifest_source: str,
+        manifest_text: str,
+        base_dir: str,
+    ) -> dict[str, object]:
+        arena_env_keys = (
+            "ARENA_RECURSE_DEPTH",
+            "ARENA_MAX_DEPTH",
+            "ARENA_SORT",
+            "ARENA_BLOCK_SORT",
+            "ARENA_RECURSE_USERS",
+            "ARENA_INCLUDE_DESCRIPTIONS",
+            "ARENA_INCLUDE_COMMENTS",
+            "ARENA_INCLUDE_LINK_IMAGES",
+            "ARENA_INCLUDE_PDF_CONTENT",
+            "ARENA_COMMENTS_CACHE_TTL",
+        )
+        arena_env = {k: os.environ.get(k) for k in arena_env_keys}
+        manifest_hash = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+        return {
+            "source": manifest_source,
+            "manifest_hash": manifest_hash,
+            "base_dir": os.path.abspath(base_dir),
+            "inject": bool(inject),
+            "trace": bool(trace),
+            "exclude": sorted(exclude_keys_list),
+            "map_mode": bool(map_mode),
+            "map_keys": sorted(map_keys_list),
+            "token_target": token_target,
+            "use_cache": bool(use_cache),
+            "cache_ttl": (
+                int(parsed_cache_ttl.total_seconds()) if parsed_cache_ttl else None
+            ),
+            "refresh_cache": bool(refresh_cache),
+            "arena_env": arena_env,
+        }
+
     try:
         import yaml
 
+        from .cache.payload import (
+            load_payload_cache,
+            payload_cache_enabled,
+            store_payload_cache,
+        )
         from .render.trace import format_trace_output
         from .manifest.payload import (
             render_manifest,
@@ -731,6 +776,25 @@ def payload_cmd(
         raise click.ClickException("pyyaml is required")
 
     if manifest_path:
+        manifest_abs = os.path.abspath(manifest_path)
+        with open(manifest_abs, "r", encoding="utf-8") as fh:
+            manifest_text = fh.read()
+        manifest_base_dir = os.path.dirname(manifest_abs)
+        cache_key_data = _payload_cache_key_data(
+            manifest_source=f"file:{manifest_abs}",
+            manifest_text=manifest_text,
+            base_dir=manifest_base_dir,
+        )
+        if use_cache and not refresh_cache and payload_cache_enabled():
+            cached = load_payload_cache(cache_key_data)
+            if cached is not None:
+                trace_output = cached.get("trace_output")
+                if trace and isinstance(trace_output, str):
+                    ctx.obj["trace_output"] = trace_output
+                payload = cached.get("payload")
+                if isinstance(payload, str):
+                    return payload
+
         from .render.markitdown import MarkItDownConversionError
 
         try:
@@ -766,6 +830,14 @@ def payload_cmd(
                 token_target=token_target,
             )
             ctx.obj["trace_output"] = trace_output
+        if use_cache and not refresh_cache and payload_cache_enabled():
+            store_payload_cache(
+                cache_key_data,
+                {
+                    "payload": payload_content,
+                    "trace_output": ctx.obj.get("trace_output") if trace else None,
+                },
+            )
         return payload_content
 
     # only use stdin when no manifest file is provided
@@ -777,6 +849,21 @@ def payload_cmd(
     ctx.obj["stdin_data"] = ""
 
     raw = stdin_data
+    cache_key_data = _payload_cache_key_data(
+        manifest_source="stdin",
+        manifest_text=raw,
+        base_dir=os.getcwd(),
+    )
+    if use_cache and not refresh_cache and payload_cache_enabled():
+        cached = load_payload_cache(cache_key_data)
+        if cached is not None:
+            trace_output = cached.get("trace_output")
+            if trace and isinstance(trace_output, str):
+                ctx.obj["trace_output"] = trace_output
+            payload = cached.get("payload")
+            if isinstance(payload, str):
+                return payload
+
     try:
         data = yaml.safe_load(raw)
     except Exception as e:
@@ -825,6 +912,15 @@ def payload_cmd(
             token_target=token_target,
         )
         ctx.obj["trace_output"] = trace_output
+
+    if use_cache and not refresh_cache and payload_cache_enabled():
+        store_payload_cache(
+            cache_key_data,
+            {
+                "payload": payload_content,
+                "trace_output": ctx.obj.get("trace_output") if trace else None,
+            },
+        )
 
     return payload_content
 

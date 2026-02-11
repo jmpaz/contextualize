@@ -14,6 +14,7 @@ ARENA_CACHE_ROOT = Path(
     )
 )
 BLOCK_CACHE_ROOT = ARENA_CACHE_ROOT / "blocks"
+COMMENTS_CACHE_ROOT = ARENA_CACHE_ROOT / "comments"
 MEDIA_CACHE_ROOT = ARENA_CACHE_ROOT / "media"
 DEFAULT_TTL = timedelta(days=7)
 CACHE_VERSION = 1
@@ -129,6 +130,35 @@ def store_block_render(block_id: int, updated_at: str, rendered: str) -> None:
     BLOCK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     key = _block_cache_key(block_id, updated_at)
     path = BLOCK_CACHE_ROOT / f"{key}.txt"
+    path.write_text(rendered, encoding="utf-8")
+
+
+def get_cached_block_comments(
+    block_id: int,
+    ttl: timedelta | None = None,
+) -> str | None:
+    if ttl is None:
+        ttl = DEFAULT_TTL
+    if ttl == timedelta(0):
+        return None
+
+    path = COMMENTS_CACHE_ROOT / f"{block_id}.txt"
+    if not path.exists():
+        return None
+
+    try:
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if (now - modified) > ttl:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def store_block_comments(block_id: int, rendered: str) -> None:
+    COMMENTS_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    path = COMMENTS_CACHE_ROOT / f"{block_id}.txt"
     path.write_text(rendered, encoding="utf-8")
 
 

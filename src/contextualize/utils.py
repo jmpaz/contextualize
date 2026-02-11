@@ -1,6 +1,17 @@
+import hashlib
+import json
 import os
 import re
+from pathlib import Path
 from typing import Dict, Optional, Union
+
+TOKEN_CACHE_ROOT = Path(
+    os.environ.get(
+        "CONTEXTUALIZE_TOKEN_CACHE",
+        os.path.expanduser("~/.local/share/contextualize/cache/tokens/v1"),
+    )
+)
+TOKEN_CACHE_VERSION = 1
 
 
 def get_config_path(custom_path=None):
@@ -238,6 +249,57 @@ def call_tiktoken(
     return {"tokens": tokens, "count": len(tokens), "encoding": encoding.name}
 
 
+def _token_cache_enabled() -> bool:
+    raw = (os.environ.get("CONTEXTUALIZE_DISABLE_TOKEN_CACHE") or "").strip().lower()
+    return raw not in {"1", "true", "yes"}
+
+
+def _token_cache_key(text: str, target: str) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(target.encode("utf-8"))
+    hasher.update(b"\0")
+    hasher.update(text.encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _token_cache_path(cache_key: str) -> Path:
+    return TOKEN_CACHE_ROOT / cache_key[:2] / f"{cache_key}.json"
+
+
+def _read_token_cache(cache_key: str) -> Dict[str, Union[int, str]] | None:
+    path = _token_cache_path(cache_key)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if data.get("cache_version") != TOKEN_CACHE_VERSION:
+        return None
+    count = data.get("count")
+    method = data.get("method")
+    if not isinstance(count, int) or not isinstance(method, str):
+        return None
+    return {"count": count, "method": method}
+
+
+def _write_token_cache(cache_key: str, count: int, method: str) -> None:
+    path = _token_cache_path(cache_key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        payload = {
+            "cache_version": TOKEN_CACHE_VERSION,
+            "count": count,
+            "method": method,
+        }
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        return
+
+
 def count_tokens(text: str, target: str = "cl100k_base") -> Dict[str, Union[int, str]]:
     """
     Count tokens using either Anthropic's API or tiktoken, based on the 'target'.
@@ -245,6 +307,13 @@ def count_tokens(text: str, target: str = "cl100k_base") -> Dict[str, Union[int,
     If the target string includes 'claude' and ANTHROPIC_API_KEY is set, attempt
     Anthropic's token counting. Otherwise, fall back to tiktoken.
     """
+    cache_key = None
+    if _token_cache_enabled():
+        cache_key = _token_cache_key(text, target)
+        cached = _read_token_cache(cache_key)
+        if cached is not None:
+            return cached
+
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
 
     if "claude" in target.lower() and anthropic_api_key:
@@ -257,7 +326,10 @@ def count_tokens(text: str, target: str = "cl100k_base") -> Dict[str, Union[int,
                 model=target,
                 messages=[{"role": "user", "content": text}],
             )
-            return {"count": response.input_tokens, "method": f"anthropic-{target}"}
+            result = {"count": response.input_tokens, "method": f"anthropic-{target}"}
+            if cache_key is not None:
+                _write_token_cache(cache_key, result["count"], result["method"])
+            return result
         except Exception as e:
             print(f"Error using Anthropic API: {str(e)}. Falling back to tiktoken.")
 
@@ -265,4 +337,7 @@ def count_tokens(text: str, target: str = "cl100k_base") -> Dict[str, Union[int,
     result = call_tiktoken(
         text, encoding_str=target if "claude" not in target.lower() else "cl100k_base"
     )
-    return {"count": result["count"], "method": f"{result['encoding']}"}
+    output = {"count": result["count"], "method": f"{result['encoding']}"}
+    if cache_key is not None:
+        _write_token_cache(cache_key, output["count"], output["method"])
+    return output

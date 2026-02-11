@@ -220,21 +220,39 @@ def _wrapped_arena_references(
         root_label = url
         channel_contents: list[str] = []
         observed_flattened_channels: set[tuple[str, int]] = set()
+        emitted_channel_edges: set[tuple[str, str, int]] = set()
+
+        def _append_channel_edge(child: str, parent: str, depth_value: int) -> None:
+            edge = (child, parent, depth_value)
+            if edge in emitted_channel_edges:
+                return
+            emitted_channel_edges.add(edge)
+            channel_trace_items.append(edge)
+
         for channel_path, block in flat_blocks:
             channel_slug_path = block.get("_channel_slug_path")
-            if channel_tracker is not None and isinstance(channel_slug_path, list):
+            if isinstance(channel_slug_path, list):
                 for idx, nested_slug in enumerate(channel_slug_path[1:], start=1):
                     if not isinstance(nested_slug, str) or not nested_slug:
                         continue
                     nested_depth = idx - 1
-                    observe_key = (nested_slug, nested_depth)
-                    if observe_key in observed_flattened_channels:
-                        continue
-                    observed_flattened_channels.add(observe_key)
-                    channel_tracker.observe(
-                        ("arena-channel", f"slug:{nested_slug}", settings_key),
-                        depth=nested_depth,
+                    if channel_tracker is not None:
+                        observe_key = (nested_slug, nested_depth)
+                        if observe_key in observed_flattened_channels:
+                            continue
+                        observed_flattened_channels.add(observe_key)
+                        channel_tracker.observe(
+                            ("arena-channel", f"slug:{nested_slug}", settings_key),
+                            depth=nested_depth,
+                        )
+                    parent_slug = channel_slug_path[idx - 1]
+                    parent_label = (
+                        root_label
+                        if idx == 1
+                        else f"https://www.are.na/channel/{parent_slug}"
                     )
+                    child_label = f"https://www.are.na/channel/{nested_slug}"
+                    _append_channel_edge(child_label, parent_label, idx)
             block_type = block.get("type", "")
             is_channel = block_type == "Channel" or block.get("base_type") == "Channel"
             channel_identity = (
@@ -256,7 +274,7 @@ def _wrapped_arena_references(
                     child_label = _arena_channel_label(
                         block, f"{root_label}#{channel_path}"
                     )
-                    channel_trace_items.append((child_label, parent_label, child_depth))
+                    _append_channel_edge(child_label, parent_label, child_depth)
             arena_ref = ArenaReference(
                 url,
                 block=block,

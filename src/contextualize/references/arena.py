@@ -252,6 +252,28 @@ def _get_include_pdf_content() -> bool:
     return raw not in ("0", "false", "no")
 
 
+def _get_comments_cache_ttl() -> timedelta | None:
+    raw = (os.environ.get("ARENA_COMMENTS_CACHE_TTL") or "").strip().lower()
+    if not raw:
+        return None
+    if raw == "0":
+        return timedelta(0)
+    match = re.fullmatch(r"(\d+)([smhdw])", raw)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit == "s":
+        return timedelta(seconds=amount)
+    if unit == "m":
+        return timedelta(minutes=amount)
+    if unit == "h":
+        return timedelta(hours=amount)
+    if unit == "d":
+        return timedelta(days=amount)
+    return timedelta(weeks=amount)
+
+
 def _get_sort_order() -> str:
     return (
         (os.environ.get("ARENA_BLOCK_SORT") or os.environ.get("ARENA_SORT") or "desc")
@@ -728,6 +750,9 @@ def _append_comments_section(rendered: str | None, comments_section: str) -> str
 
 
 def _block_comments_output(block: dict, *, include_comments: bool) -> str:
+    from ..cache.arena import get_cached_block_comments, store_block_comments
+    from ..runtime import get_refresh_cache
+
     if not include_comments:
         return ""
     block_id = block.get("id")
@@ -736,12 +761,20 @@ def _block_comments_output(block: dict, *, include_comments: bool) -> str:
     hint = _block_comment_count_hint(block)
     if hint == 0:
         return ""
+
+    if not get_refresh_cache():
+        cached = get_cached_block_comments(block_id, ttl=_get_comments_cache_ttl())
+        if cached is not None:
+            return cached
+
     try:
         comments = _fetch_all_block_comments(block_id)
     except Exception as exc:
         _log(f"  failed to fetch comments for block {block_id}: {type(exc).__name__}")
         return ""
-    return _render_comments_section(comments)
+    rendered = _render_comments_section(comments)
+    store_block_comments(block_id, rendered)
+    return rendered
 
 
 def _attachment_media_kind(
