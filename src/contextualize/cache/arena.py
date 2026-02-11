@@ -110,13 +110,19 @@ def store_channel(
         json.dump(asdict(metadata), f, indent=2)
 
 
-def _block_cache_key(block_id: int, updated_at: str) -> str:
+def _block_cache_key(
+    block_id: int, updated_at: str, render_variant: str | None = None
+) -> str:
     raw = f"{block_id}:{updated_at}"
+    if render_variant:
+        raw = f"{raw}:{render_variant}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def get_cached_block_render(block_id: int, updated_at: str) -> str | None:
-    key = _block_cache_key(block_id, updated_at)
+def get_cached_block_render(
+    block_id: int, updated_at: str, render_variant: str | None = None
+) -> str | None:
+    key = _block_cache_key(block_id, updated_at, render_variant)
     path = BLOCK_CACHE_ROOT / f"{key}.txt"
     if not path.exists():
         return None
@@ -126,9 +132,14 @@ def get_cached_block_render(block_id: int, updated_at: str) -> str | None:
         return None
 
 
-def store_block_render(block_id: int, updated_at: str, rendered: str) -> None:
+def store_block_render(
+    block_id: int,
+    updated_at: str,
+    rendered: str,
+    render_variant: str | None = None,
+) -> None:
     BLOCK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    key = _block_cache_key(block_id, updated_at)
+    key = _block_cache_key(block_id, updated_at, render_variant)
     path = BLOCK_CACHE_ROOT / f"{key}.txt"
     path.write_text(rendered, encoding="utf-8")
 

@@ -263,7 +263,7 @@ def _get_include_pdf_content() -> bool:
 
 
 def _get_include_media_descriptions() -> bool:
-    raw = os.environ.get("ARENA_BLOCK_MEDIA_DESC", "0").lower()
+    raw = os.environ.get("ARENA_BLOCK_MEDIA_DESC", "1").lower()
     return raw not in ("0", "false", "no")
 
 
@@ -327,7 +327,7 @@ class ArenaSettings:
     include_comments: bool = True
     include_link_image_descriptions: bool = False
     include_pdf_content: bool = False
-    include_media_descriptions: bool = False
+    include_media_descriptions: bool = True
     recurse_users: set[str] | None = field(default_factory=lambda: {"self"})
 
 
@@ -914,6 +914,14 @@ def _render_block(
     if include_media_descriptions is None:
         include_media_descriptions = _get_include_media_descriptions()
 
+    render_variant = (
+        f"v2:type={str(block_type).lower()}"
+        f":desc={int(bool(include_descriptions))}"
+        f":linkimg={int(bool(include_link_image_descriptions))}"
+        f":pdf={int(bool(include_pdf_content))}"
+        f":media={int(bool(include_media_descriptions))}"
+    )
+
     date = _format_date_line(block)
     core_output: str | None = None
 
@@ -926,7 +934,9 @@ def _render_block(
     elif block_type == "Image":
         refresh_image = get_refresh_images() or get_refresh_media()
         if block_id and updated_at and not refresh_image:
-            cached = get_cached_block_render(block_id, updated_at)
+            cached = get_cached_block_render(
+                block_id, updated_at, render_variant=render_variant
+            )
             if cached is not None:
                 core_output = cached
         if core_output is None and include_media_descriptions:
@@ -962,7 +972,12 @@ def _render_block(
                     fallback += f"\nURL: {fallback_url}"
                 core_output = fallback
             if core_output and block_id and updated_at:
-                store_block_render(block_id, updated_at, core_output)
+                store_block_render(
+                    block_id,
+                    updated_at,
+                    core_output,
+                    render_variant=render_variant,
+                )
         elif core_output is None:
             image_urls = _block_image_urls(block)
             fallback_url = image_urls[0] if image_urls else ""
@@ -1022,7 +1037,9 @@ def _render_block(
             and not should_skip_pdf_content
             and not should_skip_media_description
         ):
-            cached = get_cached_block_render(block_id, updated_at)
+            cached = get_cached_block_render(
+                block_id, updated_at, render_variant=render_variant
+            )
             if cached is not None:
                 core_output = cached
         if core_output is None:
@@ -1060,14 +1077,21 @@ def _render_block(
                     fallback += f"\nURL: {att_url}"
                 core_output = fallback
             if core_output and block_id and updated_at:
-                store_block_render(block_id, updated_at, core_output)
+                store_block_render(
+                    block_id,
+                    updated_at,
+                    core_output,
+                    render_variant=render_variant,
+                )
 
     elif block_type == "Embed":
         refresh_embed = (
             get_refresh_images() or get_refresh_media() or get_refresh_videos()
         )
         if block_id and updated_at and not refresh_embed:
-            cached = get_cached_block_render(block_id, updated_at)
+            cached = get_cached_block_render(
+                block_id, updated_at, render_variant=render_variant
+            )
             if cached is not None:
                 core_output = cached
         if core_output is None:
@@ -1105,7 +1129,12 @@ def _render_block(
                 title, description, "\n\n".join(embed_parts), date=date
             )
             if core_output and block_id and updated_at:
-                store_block_render(block_id, updated_at, core_output)
+                store_block_render(
+                    block_id,
+                    updated_at,
+                    core_output,
+                    render_variant=render_variant,
+                )
 
     else:
         core_output = _format_block_output(title, description, "", date=date)
