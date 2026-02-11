@@ -77,6 +77,7 @@ _DESCRIPTION_HEADING_RE = re.compile(
 )
 _HAS_LLM_DESCRIPTION_RE = re.compile(r"(?m)^# Description")
 _AUTO_DESCRIPTION_HEADING = "# Description (auto-generated):"
+_AUTO_VIDEO_HEADING = "# Video (auto-generated):"
 _IMAGE_SUFFIXES = frozenset(
     {
         ".jpg",
@@ -123,7 +124,7 @@ _CONTENT_TYPE_SUFFIXES: dict[str, str] = {
 }
 _VIDEO_MIME_BY_SUFFIX: dict[str, str] = {
     ".mp4": "video/mp4",
-    ".mov": "video/mov",
+    ".mov": "video/quicktime",
     ".mpeg": "video/mpeg",
     ".mpg": "video/mpeg",
     ".webm": "video/webm",
@@ -150,6 +151,38 @@ def _postprocess_image_markdown(markdown: str) -> str:
 
 def _format_auto_generated_description(text: str) -> str:
     return f"{_AUTO_DESCRIPTION_HEADING}\n{text}\n"
+
+
+def _is_non_recoverable_video_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "error code: 401" in message
+        or "error code: 402" in message
+        or "error code: 403" in message
+        or "'code': 401" in message
+        or "'code': 402" in message
+        or "'code': 403" in message
+        or "insufficient" in message
+        or "requires at least $" in message
+        or "unauthorized" in message
+        or "forbidden" in message
+    )
+
+
+def _format_auto_generated_video_fallback(path: Path) -> str:
+    lines = [_AUTO_VIDEO_HEADING]
+    duration = _video_duration_seconds(path)
+    if duration is not None:
+        lines.append(f"DurationSeconds: {duration:.3f}")
+    has_audio = _video_has_audio_stream(path)
+    lines.append(f"HasAudio: {'yes' if has_audio else 'no'}")
+    if has_audio:
+        is_silent = _video_audio_is_silent(path)
+        lines.append(f"AudioSilent: {'yes' if is_silent else 'no'}")
+    lines.append(
+        "Detailed video analysis was unavailable; this fallback preserves video modality."
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _cache_entries_dir() -> Path:
@@ -415,13 +448,20 @@ def _llm_chat_completion(
     raise MarkItDownConversionError(f"LLM request failed: {last_exc}")
 
 
-def _llm_video_markdown(data: bytes, *, suffix: str, prompt: str) -> str:
+def _llm_video_markdown(
+    data: bytes | None, *, suffix: str, prompt: str, video_url: str | None = None
+) -> str:
     llm_client, llm_model = _build_llm_config()
     if llm_client is None or llm_model is None:
         raise MarkItDownConversionError("LLM client not configured for video analysis")
-    mime = _VIDEO_MIME_BY_SUFFIX.get(suffix, "video/mp4")
-    encoded = base64.b64encode(data).decode("ascii")
-    data_url = f"data:{mime};base64,{encoded}"
+    if video_url:
+        input_url = video_url
+    else:
+        if data is None:
+            raise MarkItDownConversionError("Video data is required for video analysis")
+        mime = _VIDEO_MIME_BY_SUFFIX.get(suffix, "video/mp4")
+        encoded = base64.b64encode(data).decode("ascii")
+        input_url = f"data:{mime};base64,{encoded}"
     response = _llm_chat_completion(
         llm_client,
         model=llm_model,
@@ -430,7 +470,7 @@ def _llm_video_markdown(data: bytes, *, suffix: str, prompt: str) -> str:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "video_url", "video_url": {"url": data_url}},
+                    {"type": "video_url", "video_url": {"url": input_url}},
                 ],
             }
         ],
@@ -934,8 +974,11 @@ def convert_path_to_markdown(
                 prompt=_video_prompt(video_path),
             )
             return MarkItDownResult(markdown=markdown, title=None)
-        except MarkItDownConversionError:
-            pass
+        except MarkItDownConversionError as exc:
+            if _is_non_recoverable_video_error(exc):
+                raise
+            markdown = _format_auto_generated_video_fallback(video_path)
+            return MarkItDownResult(markdown=markdown, title=None)
         finally:
             if cleanup_video:
                 video_path.unlink(missing_ok=True)
@@ -1008,23 +1051,40 @@ def convert_response_to_markdown(
     if is_video:
         temp_suffix = url_suffix or _suffix_from_content_type(content_type) or ".mp4"
         temp_path = _mktemp_output(temp_suffix)
+        video_path = temp_path
+        cleanup_video = False
         try:
             temp_path.write_bytes(response.content)
             video_path = _maybe_convert_gif_to_mp4(temp_path)
             cleanup_video = video_path is not temp_path
-            try:
-                markdown = _llm_video_markdown(
-                    video_path.read_bytes(),
-                    suffix=video_path.suffix.lower(),
-                    prompt=_video_prompt(video_path),
-                )
-                return MarkItDownResult(markdown=markdown, title=None)
-            finally:
-                if cleanup_video:
-                    video_path.unlink(missing_ok=True)
-        except MarkItDownConversionError:
-            pass
+            prompt = _video_prompt(video_path)
+            remote_url = str(response.url).strip()
+            if remote_url and remote_url.startswith(("http://", "https://")):
+                try:
+                    markdown = _llm_video_markdown(
+                        None,
+                        suffix=video_path.suffix.lower(),
+                        prompt=prompt,
+                        video_url=remote_url,
+                    )
+                    return MarkItDownResult(markdown=markdown, title=None)
+                except MarkItDownConversionError as exc:
+                    if _is_non_recoverable_video_error(exc):
+                        raise
+            markdown = _llm_video_markdown(
+                video_path.read_bytes(),
+                suffix=video_path.suffix.lower(),
+                prompt=prompt,
+            )
+            return MarkItDownResult(markdown=markdown, title=None)
+        except MarkItDownConversionError as exc:
+            if _is_non_recoverable_video_error(exc):
+                raise
+            markdown = _format_auto_generated_video_fallback(video_path)
+            return MarkItDownResult(markdown=markdown, title=None)
         finally:
+            if cleanup_video:
+                video_path.unlink(missing_ok=True)
             temp_path.unlink(missing_ok=True)
 
     if is_audio:
