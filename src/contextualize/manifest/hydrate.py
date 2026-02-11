@@ -868,29 +868,66 @@ def _parse_arena_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | No
             )
         result["sort_order"] = block_sort.lower().strip()
 
-    if "include-descriptions" in raw:
-        val = raw["include-descriptions"]
+    allowed_keys = {
+        "recurse-depth",
+        "max-depth",
+        "block-sort",
+        "sort",
+        "recurse-users",
+        "block",
+    }
+    unknown_keys = sorted(str(key) for key in raw.keys() if key not in allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"{prefix} has invalid keys: {', '.join(unknown_keys)}")
+
+    block_cfg = raw.get("block")
+    if block_cfg is not None and not isinstance(block_cfg, dict):
+        raise ValueError(f"{prefix}.block must be a mapping")
+    block_cfg = block_cfg or {}
+    allowed_block_keys = {
+        "media-desc",
+        "link-image-desc",
+        "pdf-content",
+        "comments",
+        "description",
+    }
+    unknown_block_keys = sorted(
+        str(key) for key in block_cfg.keys() if key not in allowed_block_keys
+    )
+    if unknown_block_keys:
+        raise ValueError(
+            f"{prefix}.block has invalid keys: {', '.join(unknown_block_keys)}"
+        )
+
+    if "description" in block_cfg:
+        val = block_cfg["description"]
         if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.include-descriptions must be a boolean")
+            raise ValueError(f"{prefix}.block.description must be a boolean")
         result["include_descriptions"] = val
 
-    if "include-comments" in raw:
-        val = raw["include-comments"]
+    if "comments" in block_cfg:
+        val = block_cfg["comments"]
         if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.include-comments must be a boolean")
+            raise ValueError(f"{prefix}.block.comments must be a boolean")
         result["include_comments"] = val
 
-    if "include-link-images" in raw:
-        val = raw["include-link-images"]
+    if "link-image-desc" in block_cfg:
+        val = block_cfg["link-image-desc"]
         if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.include-link-images must be a boolean")
+            raise ValueError(f"{prefix}.block.link-image-desc must be a boolean")
         result["include_link_image_descriptions"] = val
 
-    if "include-pdf-content" in raw:
-        val = raw["include-pdf-content"]
+    if "pdf-content" in block_cfg:
+        val = block_cfg["pdf-content"]
         if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.include-pdf-content must be a boolean")
+            raise ValueError(f"{prefix}.block.pdf-content must be a boolean")
         result["include_pdf_content"] = val
+
+    if "media-desc" in block_cfg:
+        val = block_cfg["media-desc"]
+        if not isinstance(val, bool):
+            raise ValueError(f"{prefix}.block.media-desc must be a boolean")
+        result["include_media_descriptions"] = val
 
     if "recurse-users" in raw:
         val = raw["recurse-users"]
@@ -953,6 +990,7 @@ def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
         settings.include_comments,
         settings.include_link_image_descriptions,
         settings.include_pdf_content,
+        settings.include_media_descriptions,
         recurse_key,
     )
 
@@ -1573,6 +1611,7 @@ def _resolve_arena_items(
                 include_comments=settings.include_comments,
                 include_link_image_descriptions=settings.include_link_image_descriptions,
                 include_pdf_content=settings.include_pdf_content,
+                include_media_descriptions=settings.include_media_descriptions,
             )
             or ""
         )
@@ -1669,6 +1708,7 @@ def _resolve_arena_items(
                 include_comments=settings.include_comments,
                 include_link_image_descriptions=settings.include_link_image_descriptions,
                 include_pdf_content=settings.include_pdf_content,
+                include_media_descriptions=settings.include_media_descriptions,
             )
         if rendered is None:
             continue

@@ -233,22 +233,27 @@ def _get_max_depth() -> int:
 
 
 def _get_include_descriptions() -> bool:
-    raw = os.environ.get("ARENA_INCLUDE_DESCRIPTIONS", "1").lower()
+    raw = os.environ.get("ARENA_BLOCK_DESCRIPTION", "1").lower()
     return raw not in ("0", "false", "no")
 
 
 def _get_include_comments() -> bool:
-    raw = os.environ.get("ARENA_INCLUDE_COMMENTS", "1").lower()
+    raw = os.environ.get("ARENA_BLOCK_COMMENTS", "1").lower()
     return raw not in ("0", "false", "no")
 
 
 def _get_include_link_image_descriptions() -> bool:
-    raw = os.environ.get("ARENA_INCLUDE_LINK_IMAGES", "0").lower()
+    raw = os.environ.get("ARENA_BLOCK_LINK_IMAGE_DESC", "0").lower()
     return raw not in ("0", "false", "no")
 
 
 def _get_include_pdf_content() -> bool:
-    raw = os.environ.get("ARENA_INCLUDE_PDF_CONTENT", "0").lower()
+    raw = os.environ.get("ARENA_BLOCK_PDF_CONTENT", "0").lower()
+    return raw not in ("0", "false", "no")
+
+
+def _get_include_media_descriptions() -> bool:
+    raw = os.environ.get("ARENA_BLOCK_MEDIA_DESC", "0").lower()
     return raw not in ("0", "false", "no")
 
 
@@ -312,6 +317,7 @@ class ArenaSettings:
     include_comments: bool = True
     include_link_image_descriptions: bool = False
     include_pdf_content: bool = False
+    include_media_descriptions: bool = False
     recurse_users: set[str] | None = field(default_factory=lambda: {"self"})
 
 
@@ -324,6 +330,7 @@ def _arena_settings_from_env() -> ArenaSettings:
         include_comments=_get_include_comments(),
         include_link_image_descriptions=_get_include_link_image_descriptions(),
         include_pdf_content=_get_include_pdf_content(),
+        include_media_descriptions=_get_include_media_descriptions(),
         recurse_users=_get_recurse_users(),
     )
 
@@ -354,6 +361,9 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
         "include_link_image_descriptions", env.include_link_image_descriptions
     )
     include_pdf_content = overrides.get("include_pdf_content", env.include_pdf_content)
+    include_media_descriptions = overrides.get(
+        "include_media_descriptions", env.include_media_descriptions
+    )
     recurse_users = overrides.get("recurse_users", env.recurse_users)
 
     return ArenaSettings(
@@ -363,6 +373,7 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
         include_comments=include_comments,
         include_link_image_descriptions=include_link_image_descriptions,
         include_pdf_content=include_pdf_content,
+        include_media_descriptions=include_media_descriptions,
         recurse_users=recurse_users,
     )
 
@@ -864,6 +875,7 @@ def _render_block(
     include_comments: bool | None = None,
     include_link_image_descriptions: bool | None = None,
     include_pdf_content: bool | None = None,
+    include_media_descriptions: bool | None = None,
 ) -> str | None:
     from ..cache.arena import get_cached_block_render, store_block_render
 
@@ -889,6 +901,8 @@ def _render_block(
         include_link_image_descriptions = _get_include_link_image_descriptions()
     if include_pdf_content is None:
         include_pdf_content = _get_include_pdf_content()
+    if include_media_descriptions is None:
+        include_media_descriptions = _get_include_media_descriptions()
 
     date = _format_date_line(block)
     core_output: str | None = None
@@ -905,7 +919,7 @@ def _render_block(
             cached = get_cached_block_render(block_id, updated_at)
             if cached is not None:
                 core_output = cached
-        if core_output is None:
+        if core_output is None and include_media_descriptions:
             image_urls = _block_image_urls(block)
             for image_url in image_urls:
                 suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
@@ -939,6 +953,13 @@ def _render_block(
                 core_output = fallback
             if core_output and block_id and updated_at:
                 store_block_render(block_id, updated_at, core_output)
+        elif core_output is None:
+            image_urls = _block_image_urls(block)
+            fallback_url = image_urls[0] if image_urls else ""
+            fallback = f"[Image: {title or block.get('id')}]"
+            if fallback_url:
+                fallback += f"\nURL: {fallback_url}"
+            core_output = fallback
 
     elif block_type == "Link":
         source = block.get("source") or {}
@@ -948,7 +969,7 @@ def _render_block(
         link_header = source_url or content
         if link_header:
             link_parts.append(link_header)
-        if include_link_image_descriptions:
+        if include_link_image_descriptions and include_media_descriptions:
             link_image_description = _render_link_image_description(
                 block,
                 block_id=block_id,
@@ -975,6 +996,10 @@ def _render_block(
         should_skip_pdf_content = (
             attachment_media_kind == "pdf" and not include_pdf_content
         )
+        should_skip_media_description = (
+            attachment_media_kind in {"image", "video", "audio"}
+            and not include_media_descriptions
+        )
         refresh_attachment = _should_refresh_attachment_media(
             filename=filename,
             extension=extension,
@@ -985,12 +1010,17 @@ def _render_block(
             and updated_at
             and not refresh_attachment
             and not should_skip_pdf_content
+            and not should_skip_media_description
         ):
             cached = get_cached_block_render(block_id, updated_at)
             if cached is not None:
                 core_output = cached
         if core_output is None:
-            if att_url and not should_skip_pdf_content:
+            if (
+                att_url
+                and not should_skip_pdf_content
+                and not should_skip_media_description
+            ):
                 suffix = f".{extension}" if extension else Path(filename).suffix or ""
                 media_cache_identity = (
                     f"arena:block:{block_id}:{updated_at}:attachment:{att_url}"
@@ -1035,7 +1065,7 @@ def _render_block(
             embed_url = embed.get("url") or ""
             embed_type = embed.get("type") or ""
             embed_parts = []
-            if embed_type == "video":
+            if embed_type == "video" and include_media_descriptions:
                 image_urls = _block_image_urls(block)
                 for image_url in image_urls:
                     suffix = Path(image_url.split("?")[0]).suffix or ".jpg"
@@ -1252,6 +1282,7 @@ class ArenaReference:
     include_comments: bool | None = None
     include_link_image_descriptions: bool | None = None
     include_pdf_content: bool | None = None
+    include_media_descriptions: bool | None = None
 
     def __post_init__(self) -> None:
         self.file_content = ""
@@ -1316,6 +1347,7 @@ class ArenaReference:
                     include_comments=self.include_comments,
                     include_link_image_descriptions=self.include_link_image_descriptions,
                     include_pdf_content=self.include_pdf_content,
+                    include_media_descriptions=self.include_media_descriptions,
                 )
                 or ""
             )
