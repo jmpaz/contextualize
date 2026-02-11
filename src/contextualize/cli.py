@@ -23,6 +23,7 @@ GLOBAL_OPTION_LABELS = (
     ("wrap_short", "-w"),
     ("wrap_mode", "--wrap"),
     ("copy", "--copy"),
+    ("staged_copy", "--staged-copy"),
     ("count_only", "--count"),
     ("copy_segments", "--copy-segments"),
     ("write_file", "--write-file"),
@@ -38,6 +39,7 @@ GLOBAL_OPTION_DEFAULTS = {
     "wrap_short": False,
     "wrap_mode": None,
     "copy": False,
+    "staged_copy": False,
     "count_only": False,
     "copy_segments": None,
     "write_file": None,
@@ -223,11 +225,16 @@ def preprocess_args():
         "-w",
         "--copy",
         "-c",
+        "--staged-copy",
+        "-s",
         "--count",
+        "-a",
+        "-b",
         "--write-file",
         "--copy-segments",
         "--token-target",
         "--md-model",
+        "--position",
     }
     value_options = {
         "--prompt",
@@ -237,7 +244,10 @@ def preprocess_args():
         "--copy-segments",
         "--token-target",
         "--md-model",
+        "--position",
     }
+    short_forwardable = {"-p", "-w", "-c", "-s", "-a", "-b"}
+    short_value_options = {"-p"}
 
     # find subcommand position
     subcommand_idx = None
@@ -262,7 +272,49 @@ def preprocess_args():
 
     while i < len(sys.argv):
         arg = sys.argv[i]
-        if arg in forwardable:
+        if arg.startswith("--"):
+            option_name, has_eq, _option_value = arg.partition("=")
+            if option_name in forwardable:
+                to_move.append(arg)
+                if (
+                    option_name in value_options
+                    and not has_eq
+                    and i + 1 < len(sys.argv)
+                    and not sys.argv[i + 1].startswith("-")
+                ):
+                    to_move.append(sys.argv[i + 1])
+                    i += 1
+            else:
+                remaining.append(arg)
+        elif arg.startswith("-") and len(arg) > 2:
+            chars = arg[1:]
+            expanded: list[str] = []
+            consumed_next = False
+            j = 0
+            valid_cluster = True
+            while j < len(chars):
+                opt = f"-{chars[j]}"
+                if opt not in short_forwardable:
+                    valid_cluster = False
+                    break
+                expanded.append(opt)
+                if opt in short_value_options:
+                    remainder = chars[j + 1 :]
+                    if remainder:
+                        expanded.append(remainder)
+                    elif i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
+                        expanded.append(sys.argv[i + 1])
+                        consumed_next = True
+                    j = len(chars)
+                    break
+                j += 1
+            if valid_cluster:
+                to_move.extend(expanded)
+                if consumed_next:
+                    i += 1
+            else:
+                remaining.append(arg)
+        elif arg in forwardable:
             to_move.append(arg)
             if (  # check if this option takes a value
                 arg in value_options
@@ -321,6 +373,12 @@ preprocess_args()
     help="Copy output to clipboard instead of printing to console. Prints labeled token count.",
 )
 @click.option(
+    "-s",
+    "--staged-copy",
+    is_flag=True,
+    help="With --prompt and a copy mode, copy preprompt, content, and postprompt in stages.",
+)
+@click.option(
     "--count",
     "count_only",
     is_flag=True,
@@ -367,6 +425,7 @@ def cli(
     wrap_short,
     wrap_mode,
     copy,
+    staged_copy,
     count_only,
     copy_segments,
     write_file,
@@ -383,6 +442,7 @@ def cli(
     ctx.obj["prompt"] = prompt
     ctx.obj["wrap_mode"] = "md" if wrap_short else wrap_mode
     ctx.obj["copy"] = copy
+    ctx.obj["staged_copy"] = staged_copy
     ctx.obj["count_only"] = count_only
     ctx.obj["copy_segments"] = copy_segments
     ctx.obj["write_file"] = write_file
@@ -401,6 +461,12 @@ def cli(
         raise click.BadParameter("--copy and --count are mutually exclusive")
     if count_only and copy_segments:
         raise click.BadParameter("--count and --copy-segments are mutually exclusive")
+    if staged_copy and not (copy or copy_segments):
+        raise click.BadParameter("--staged-copy requires --copy or --copy-segments")
+    if staged_copy and not prompt:
+        raise click.BadParameter("--staged-copy requires --prompt")
+    if staged_copy and write_file:
+        raise click.BadParameter("--staged-copy cannot be used with --write-file")
 
     if append_flag:
         output_pos = "append"
@@ -441,15 +507,28 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     no_subcmd = ctx.invoked_subcommand is None
     prompt_only = ctx.obj.get("prompt_only", False)
     max_tokens_budget = ctx.obj.get("max_tokens")
+    staged_copy = ctx.obj.get("staged_copy", False)
+    before_prompt = ""
+    after_prompt = ""
+    content_output = ""
+    raw_text = ""
 
     if subcommand_output and stdin_data:
         # pipeline: wrap and prompt only the new content
+        raw_text = subcommand_output
         wrapped_new = wrap_text(subcommand_output, ctx.obj["wrap_mode"])
         prompted = add_prompt_wrappers(wrapped_new, prompts)
+        if len(prompts) == 1:
+            before_prompt = prompts[0]
+        elif len(prompts) == 2:
+            before_prompt = prompts[0]
+            after_prompt = prompts[1]
 
         if position == "append":
+            content_output = stdin_data + "\n\n" + wrapped_new
             final_output = stdin_data + "\n\n" + prompted
         else:
+            content_output = wrapped_new + "\n\n" + stdin_data
             final_output = prompted + "\n\n" + stdin_data
     else:
         if subcommand_output:
@@ -467,15 +546,30 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
 
         # normal case: wrap everything and add prompts
         wrapped_text = wrap_text(raw_text, ctx.obj["wrap_mode"])
+        content_output = wrapped_text
 
         if prompt_only:
+            if len(prompts) == 1:
+                before_prompt = prompts[0]
+            elif len(prompts) == 2:
+                before_prompt = prompts[0]
+                after_prompt = prompts[1]
+            content_output = ""
             final_output = wrapped_text
         else:
-            if len(prompts) == 1:
+            if len(prompts) == 0:
+                final_output = wrapped_text
+            elif len(prompts) == 1:
                 if ctx.obj["output_pos"] == "append":
+                    after_prompt = prompts[0]
                     final_output = f"{wrapped_text}\n{prompts[0]}"
                 else:
+                    before_prompt = prompts[0]
                     final_output = f"{prompts[0]}\n{wrapped_text}"
+            elif len(prompts) == 2:
+                before_prompt = prompts[0]
+                after_prompt = prompts[1]
+                final_output = add_prompt_wrappers(wrapped_text, prompts)
             else:
                 final_output = add_prompt_wrappers(wrapped_text, prompts)
 
@@ -513,40 +607,107 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
     elif copy_segments:
         from .utils import build_segment, segment_output, wait_for_enter
 
-        segments = segment_output(
-            raw_text, copy_segments, ctx.obj.get("format", "md"), token_target
-        )
-        if not segments:
-            click.echo("No content to copy.", err=True)
-            return
-
         try:
-            for i, (segment_text, _) in enumerate(segments, 1):
-                final_segment = build_segment(
-                    segment_text,
-                    ctx.obj["wrap_mode"],
-                    [] if prompt_only else prompts,
-                    ctx.obj["output_pos"],
-                    i,
-                    len(segments),
+            if staged_copy:
+                content_text = raw_text if raw_text else content_output
+                segment_format = ctx.obj.get("format", "md")
+                segments = segment_output(
+                    content_text, copy_segments, segment_format, token_target
                 )
 
-                copy(final_segment)
-                tokens = count_tokens(final_segment, target=token_target)["count"]
+                stages_present = (
+                    int(bool(before_prompt))
+                    + int(bool(segments))
+                    + int(bool(after_prompt))
+                )
+                if stages_present == 0:
+                    click.echo("No content to copy.", err=True)
+                    return
 
-                if i == 1:
-                    msg = f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard ({token_method})"
-                else:
-                    msg = f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard"
-
-                if i < len(segments):
-                    click.echo(msg + "...", nl=False)
+                def maybe_wait(next_label: str) -> bool:
+                    click.echo(
+                        f" Press Enter to copy {next_label}...",
+                        nl=False,
+                    )
                     if not wait_for_enter():
                         click.echo("\nCopying interrupted.", err=True)
-                        break
-                else:
-                    click.echo(msg + ".")
+                        return False
+                    return True
+
+                if before_prompt:
+                    copy(before_prompt)
+                    if segments or after_prompt:
+                        click.echo("Copied preprompt to clipboard.", nl=False)
+                        if not maybe_wait("content"):
+                            return
+                    else:
+                        click.echo("Copied preprompt to clipboard.")
+
+                if segments:
+                    for i, (segment_text, _) in enumerate(segments, 1):
+                        copied_segment = wrap_text(segment_text, ctx.obj["wrap_mode"])
+                        copy(copied_segment)
+                        tokens = count_tokens(copied_segment, target=token_target)[
+                            "count"
+                        ]
+                        is_last_segment = i == len(segments)
+                        msg = f"({i}/{len(segments)}) Copied content segment ({tokens} tokens) to clipboard"
+                        if not is_last_segment:
+                            click.echo(msg + "...", nl=False)
+                            if not wait_for_enter():
+                                click.echo("\nCopying interrupted.", err=True)
+                                return
+                        elif after_prompt:
+                            click.echo(msg + ".", nl=False)
+                            if not maybe_wait("postprompt"):
+                                return
+                        else:
+                            click.echo(msg + ".")
+
+                if after_prompt:
+                    copy(after_prompt)
+                    click.echo("Copied postprompt to clipboard.")
             else:
+                segments = segment_output(
+                    raw_text, copy_segments, ctx.obj.get("format", "md"), token_target
+                )
+                if not segments:
+                    click.echo("No content to copy.", err=True)
+                    return
+
+                for i, (segment_text, _) in enumerate(segments, 1):
+                    final_segment = build_segment(
+                        segment_text,
+                        ctx.obj["wrap_mode"],
+                        [] if prompt_only else prompts,
+                        ctx.obj["output_pos"],
+                        i,
+                        len(segments),
+                    )
+
+                    copy(final_segment)
+                    tokens = count_tokens(final_segment, target=token_target)["count"]
+
+                    if i == 1:
+                        msg = f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard ({token_method})"
+                    else:
+                        msg = (
+                            f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard"
+                        )
+
+                    if i < len(segments):
+                        click.echo(msg + "...", nl=False)
+                        if not wait_for_enter():
+                            click.echo("\nCopying interrupted.", err=True)
+                            break
+                    else:
+                        click.echo(msg + ".")
+                else:
+                    if trace_output:
+                        click.echo("\n-----\n")
+                        click.echo(trace_output)
+                    return
+
                 if trace_output:
                     click.echo("\n-----\n")
                     click.echo(trace_output)
@@ -559,11 +720,55 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         click.echo(f"Total: {token_count} tokens ({token_method}).")
     elif copy_flag:
         try:
-            copy(final_output)
-            if trace_output:
-                click.echo(trace_output)
-                click.echo("\n-----\n")
-            click.echo(f"Copied {token_count} tokens ({token_method}) to clipboard.")
+            if staged_copy:
+                from .utils import wait_for_enter
+
+                stages: list[tuple[str, str]] = []
+                if before_prompt:
+                    stages.append(("preprompt", before_prompt))
+                if content_output:
+                    stages.append(("content", content_output))
+                if after_prompt:
+                    stages.append(("postprompt", after_prompt))
+
+                if not stages:
+                    stages.append(("content", final_output))
+
+                for i, (label, stage_text) in enumerate(stages):
+                    content_stage_info = None
+                    if label == "content":
+                        content_stage_info = count_tokens(
+                            stage_text, target=token_target
+                        )
+                    copy(stage_text)
+                    label_msg = label
+                    if content_stage_info is not None:
+                        label_msg = (
+                            f"{label} ({content_stage_info['count']} tokens, "
+                            f"{content_stage_info['method']})"
+                        )
+                    if i < len(stages) - 1:
+                        next_label = stages[i + 1][0]
+                        click.echo(
+                            f"Copied {label_msg} to clipboard. Press Enter to copy {next_label}...",
+                            nl=False,
+                        )
+                        if not wait_for_enter():
+                            click.echo("\nCopying interrupted.", err=True)
+                            return
+                    else:
+                        click.echo(f"Copied {label_msg} to clipboard.")
+                if trace_output:
+                    click.echo(trace_output)
+                    click.echo("\n-----\n")
+            else:
+                copy(final_output)
+                if trace_output:
+                    click.echo(trace_output)
+                    click.echo("\n-----\n")
+                click.echo(
+                    f"Copied {token_count} tokens ({token_method}) to clipboard."
+                )
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)
     else:

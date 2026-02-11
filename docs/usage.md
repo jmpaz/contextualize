@@ -6,12 +6,15 @@
 - `-p, --prompt` prepend and optionally append up to two strings
 - `-w, --wrap` wrap output as `md` or `xml`; `-w` alone is a shorthand for `--wrap xml`
 - `-c, --copy` copy to clipboard instead of printing; displays the token count
+- `-s, --staged-copy` with `--prompt` and a copy mode, copy preprompt, content, and postprompt as distinct stages
 - `--count` dry run of `--copy`; prints a string containing the token count
 - `--write-file PATH` write final output to a file
 - `--token-target STR` choose the encoding/model for token counting (e.g. `cl100k_base`, `gpt-4o-mini`, `claude-3-5-sonnet-20241022`)
 - `-a, --after` / `-b, --before` control placement in pipelines (default: after)
 
-`--copy`, `--count`, and `--copy-segments` cannot be combined.
+`--count` cannot be combined with `--copy` or `--copy-segments`.
+`--copy` and `--copy-segments` cannot be combined.
+`--staged-copy` requires `--prompt` and either `--copy` or `--copy-segments`.
 
 these flags can be combined with any command:
 

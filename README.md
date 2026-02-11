@@ -28,7 +28,7 @@ uv tool install contextualize
 | `payload` | compose text and file blocks from a YAML manifest                                                      |
 | `paste`   | capture staged clipboard snippets                                                                      |
 
-All commands work with the global flags `--prompt`, `--wrap`, `--copy`, `--count`, and `--write-file`.
+All commands work with the global flags `--prompt`, `--wrap`, `--copy`, `--staged-copy`, `--count`, and `--write-file`.
 
 
 **Sample invocations (`cat`):**
