@@ -71,12 +71,7 @@ def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
 def parse_git_url_target(url: str) -> GitTarget | None:
     from ..git.cache import parse_git_target
 
-    tgt = parse_git_target(url)
-    if not tgt:
-        return None
-    if tgt.path is None and not tgt.repo_url.endswith(".git") and tgt.repo_url == url:
-        return None
-    return tgt
+    return parse_git_target(url)
 
 
 def is_utf8_file(path: str, sample_size: int = 4096) -> bool:

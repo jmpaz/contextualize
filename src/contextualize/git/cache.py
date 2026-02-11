@@ -3,7 +3,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from ..references.helpers import parse_target_spec
 from ..utils import _split_brace_options, brace_expand
@@ -64,27 +64,25 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
             protocol_end = target.find("://")
             if protocol_end != -1:
                 slash_after_host = target.find("/", protocol_end + 3)
-                scan_start = (
-                    slash_after_host if slash_after_host != -1 else protocol_end + 3
-                )
-                depth = 0
-                colon_pos = -1
-                for i in range(scan_start, len(target)):
-                    ch = target[i]
-                    if ch == "{":
-                        depth += 1
-                        continue
-                    elif ch == "}":
-                        depth = max(0, depth - 1)
-                        continue
-                    if depth == 0 and target.startswith("://", i):
-                        break
-                    if ch == ":" and depth == 0:
-                        colon_pos = i
-                        break
-                if colon_pos != -1 and colon_pos + 1 < len(target):
-                    path = target[colon_pos + 1 :]
-                    repo_url = target[:colon_pos]
+                if slash_after_host != -1:
+                    depth = 0
+                    colon_pos = -1
+                    for i in range(slash_after_host, len(target)):
+                        ch = target[i]
+                        if ch == "{":
+                            depth += 1
+                            continue
+                        elif ch == "}":
+                            depth = max(0, depth - 1)
+                            continue
+                        if depth == 0 and target.startswith("://", i):
+                            break
+                        if ch == ":" and depth == 0:
+                            colon_pos = i
+                            break
+                    if colon_pos != -1 and colon_pos + 1 < len(target):
+                        path = target[colon_pos + 1 :]
+                        repo_url = target[:colon_pos]
 
     # revision specifier
     if "#" in repo_url:
@@ -115,11 +113,52 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
                     rev = potential_rev
                 repo_url = repo_url[:at_pos]
 
-    # clean up .git suffix
-    if repo_url.startswith("http") and repo_url.endswith(".git"):
-        repo_url = repo_url[:-4]
+    parsed_repo = urlparse(repo_url)
+    if parsed_repo.scheme in {"http", "https"}:
+        repo_url = urlunparse(
+            (
+                parsed_repo.scheme,
+                parsed_repo.netloc,
+                parsed_repo.path,
+                "",
+                "",
+                "",
+            )
+        )
 
     return repo_url, rev, path
+
+
+def _is_supported_git_http_url(
+    repo_url: str, *, has_explicit_ref: bool, has_explicit_path: bool
+) -> bool:
+    parsed = urlparse(repo_url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+
+    host = (parsed.hostname or "").lower()
+    segments = [part for part in parsed.path.split("/") if part]
+    if not segments:
+        return False
+    if segments[-1].endswith(".git"):
+        return True
+
+    known_hosts = {
+        "github.com",
+        "gitlab.com",
+        "bitbucket.org",
+        "git.sr.ht",
+        "www.github.com",
+        "www.gitlab.com",
+        "www.bitbucket.org",
+    }
+    if host in known_hosts:
+        return len(segments) == 2
+
+    if has_explicit_ref or has_explicit_path:
+        return len(segments) >= 2
+
+    return False
 
 
 def parse_git_target(target: str) -> GitTarget | None:
@@ -137,6 +176,12 @@ def parse_git_target(target: str) -> GitTarget | None:
     repo_url, rev, path = _extract_path_and_rev(target)
 
     if not (repo_url.startswith("http") or repo_url.startswith("git@")):
+        return None
+    if repo_url.startswith("http") and not _is_supported_git_http_url(
+        repo_url,
+        has_explicit_ref=rev is not None,
+        has_explicit_path=path is not None,
+    ):
         return None
 
     host, repo = _get_host_and_repo(repo_url)

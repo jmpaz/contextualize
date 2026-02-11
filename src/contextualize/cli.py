@@ -1665,11 +1665,7 @@ def cat_cmd(
     for p in expanded_all_paths:
         if p.startswith("http://") or p.startswith("https://"):
             tgt = parse_git_target(p)
-            if tgt and (
-                tgt.path is not None
-                or tgt.repo_url.endswith(".git")
-                or tgt.repo_url != p
-            ):
+            if tgt:
                 repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
                 expanded_paths = (
                     [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)]
