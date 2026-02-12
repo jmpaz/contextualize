@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
@@ -458,13 +459,23 @@ def _wrapped_discord_references(
     discord_overrides: dict | None = None,
 ) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
     settings = build_discord_settings(discord_overrides)
-    documents = resolve_discord_url(
-        url,
-        settings=settings,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
+    try:
+        documents = resolve_discord_url(
+            url,
+            settings=settings,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        )
+    except ValueError as exc:
+        if str(exc).startswith("Discord resource not found:"):
+            print(
+                f"Warning: skipping unavailable Discord URL: {url} ({exc})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return [], [], []
+        raise
 
     refs: list[_SimpleReference] = []
     trace_inputs: list[Any] = []

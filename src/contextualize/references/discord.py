@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -55,11 +55,12 @@ def _log(message: str) -> None:
 
 @lru_cache(maxsize=1)
 def warmup_discord_network_stack() -> None:
-    import ssl
-    import requests
+    try:
+        import requests
 
-    ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    _ = requests.__version__
+        _ = requests.__version__
+    except Exception:
+        return
 
 
 @lru_cache(maxsize=1)
@@ -301,6 +302,45 @@ def _embed_media_cache_identity(
     if not message_id:
         return url
     return f"discord:message:{message_id}:embed:{embed_index}:{role}:{url}"
+
+
+def _media_render_cache_identity(
+    *, media_cache_identity: str, prompt_append: str | None, suffix: str
+) -> str:
+    payload = {
+        "media_cache_identity": media_cache_identity,
+        "prompt_append": prompt_append or "",
+        "suffix": suffix,
+    }
+    return "discord-media-render:" + json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _resolution_cache_identity(url: str, settings: DiscordSettings) -> str:
+    payload = {
+        "v": 1,
+        "url": url,
+        "settings": discord_settings_cache_key(settings),
+    }
+    return "discord-resolve:" + json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _documents_from_cached_payload(payload: Any) -> list[DiscordDocument] | None:
+    if not isinstance(payload, list):
+        return None
+    documents: list[DiscordDocument] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            return None
+        try:
+            document = DiscordDocument(**item)
+        except TypeError:
+            return None
+        documents.append(document)
+    return documents
 
 
 def _normalize_datetime(value: datetime | None) -> datetime | None:
@@ -722,6 +762,14 @@ def _api_cache_identity(path: str, params: dict[str, Any] | None) -> str:
     return "discord-api:" + json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _requests_exception_type(requests_module: Any) -> type[Exception]:
+    namespace = getattr(requests_module, "exceptions", None)
+    request_exception = getattr(namespace, "RequestException", None)
+    if isinstance(request_exception, type) and issubclass(request_exception, Exception):
+        return request_exception
+    return Exception
+
+
 def _api_get(
     path: str,
     params: dict[str, Any] | None = None,
@@ -745,6 +793,7 @@ def _api_get(
     max_attempts = _api_max_attempts()
     headers = _get_auth_headers()
     transient_statuses = {429, 500, 502, 503, 504}
+    request_exception_type = _requests_exception_type(requests)
 
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
@@ -752,10 +801,10 @@ def _api_get(
             response = requests.get(
                 url, headers=headers, params=params, timeout=timeout
             )
-        except requests.exceptions.RequestException as exc:
+        except request_exception_type as exc:
             last_exc = exc
             if attempt >= max_attempts:
-                raise
+                break
             wait = _retry_delay_seconds(attempt)
             _log(
                 f"  Discord request failed ({type(exc).__name__}); retrying in {wait:.1f}s "
@@ -786,6 +835,12 @@ def _api_get(
         if use_cache:
             store_api_json(identity, payload)
         return payload
+
+    if use_cache and not refresh_cache:
+        stale_payload = get_cached_api_json(identity, ttl=timedelta.max)
+        if stale_payload is not None:
+            _log(f"  Discord API request failed; using stale cache: {path}")
+            return stale_payload
 
     if last_exc is not None:
         raise last_exc
@@ -1161,13 +1216,29 @@ def _describe_remote_media(
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):
         return None
 
-    from ..cache.discord import get_cached_media_bytes, store_media_bytes
+    from ..cache.discord import (
+        get_cached_media_bytes,
+        get_cached_rendered,
+        store_media_bytes,
+        store_rendered,
+    )
     from ..render.markitdown import MarkItDownConversionError, convert_path_to_markdown
     from ..runtime import get_refresh_images, get_refresh_media
     from .media import download_cached_media_to_temp
 
     cache_identity = media_cache_identity or url
+    render_identity = _media_render_cache_identity(
+        media_cache_identity=cache_identity,
+        prompt_append=prompt_append,
+        suffix=suffix,
+    )
     cache_label = send_label or cache_identity
+    refresh_media = get_refresh_media()
+    if not refresh_media:
+        cached_render = get_cached_rendered(render_identity)
+        if cached_render and cached_render.strip():
+            _log(f"  discord media render cache hit: {cache_label}")
+            return cached_render.strip()
     tmp = download_cached_media_to_temp(
         url,
         suffix=suffix,
@@ -1175,7 +1246,7 @@ def _describe_remote_media(
         cache_identity=cache_identity,
         get_cached_media_bytes=get_cached_media_bytes,
         store_media_bytes=store_media_bytes,
-        refresh_cache=get_refresh_media(),
+        refresh_cache=refresh_media,
         on_cache_hit=lambda _identity: _log(
             f"  discord media cache hit: {cache_label}"
         ),
@@ -1201,6 +1272,7 @@ def _describe_remote_media(
     markdown = (result.markdown or "").strip()
     if not markdown:
         return None
+    store_rendered(render_identity, markdown)
     return markdown
 
 
@@ -2727,6 +2799,7 @@ def resolve_discord_url(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
 ) -> list[DiscordDocument]:
+    from ..cache.discord import get_cached_api_json, store_api_json
     from ..runtime import get_refresh_media
 
     warmup_discord_network_stack()
@@ -2744,6 +2817,18 @@ def resolve_discord_url(
     effective_settings = (
         settings if settings is not None else _discord_settings_from_env()
     )
+    refresh_media = get_refresh_media()
+    refresh_resolution_cache = refresh_cache or refresh_media
+    resolution_cache_identity = _resolution_cache_identity(url, effective_settings)
+    if use_cache and not refresh_resolution_cache:
+        cached_payload = get_cached_api_json(
+            resolution_cache_identity,
+            ttl=cache_ttl,
+        )
+        cached_documents = _documents_from_cached_payload(cached_payload)
+        if cached_documents is not None:
+            _log(f"  Discord resolution cache hit: {url}")
+            return cached_documents
 
     if parsed["kind"] == "message":
         documents = _resolve_message_url(
@@ -2764,6 +2849,11 @@ def resolve_discord_url(
             refresh_cache=refresh_cache,
         )
     _log(f"Resolved Discord URL to {len(documents)} document(s)")
+    if use_cache:
+        store_api_json(
+            resolution_cache_identity,
+            [asdict(document) for document in documents],
+        )
     return documents
 
 

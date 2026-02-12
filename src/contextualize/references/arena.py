@@ -72,11 +72,12 @@ def is_arena_block_url(url: str) -> bool:
 
 @lru_cache(maxsize=1)
 def warmup_arena_network_stack() -> None:
-    import ssl
-    import requests
+    try:
+        import requests
 
-    ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    _ = requests.__version__
+        _ = requests.__version__
+    except Exception:
+        return
 
 
 def extract_channel_slug(url: str) -> str | None:
@@ -171,6 +172,14 @@ def _retry_after_seconds(resp: object) -> float | None:
     return None
 
 
+def _requests_exception_type(requests_module: object) -> type[Exception]:
+    namespace = getattr(requests_module, "exceptions", None)
+    request_exception = getattr(namespace, "RequestException", None)
+    if isinstance(request_exception, type) and issubclass(request_exception, Exception):
+        return request_exception
+    return Exception
+
+
 def _api_get(path: str, params: dict | None = None) -> dict:
     import requests
     import time
@@ -180,15 +189,16 @@ def _api_get(path: str, params: dict | None = None) -> dict:
     timeout = _api_timeout_seconds()
     max_attempts = _api_max_attempts()
     transient_statuses = {429, 500, 502, 503, 504}
+    request_exception_type = _requests_exception_type(requests)
 
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
             resp = requests.get(url, headers=headers, params=params, timeout=timeout)
-        except requests.exceptions.RequestException as exc:
+        except request_exception_type as exc:
             last_exc = exc
             if attempt >= max_attempts:
-                raise
+                break
             wait = _retry_delay_seconds(attempt)
             _log(
                 f"  Are.na request failed ({type(exc).__name__}); retrying in {wait:.1f}s "

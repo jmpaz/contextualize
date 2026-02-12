@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -1955,13 +1956,23 @@ def _resolve_discord_items(
 ) -> list[ResolvedItem]:
     settings = build_discord_settings(discord_overrides)
     settings_key = _discord_settings_cache_key(settings)
-    documents = resolve_discord_url(
-        url,
-        settings=settings,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
+    try:
+        documents = resolve_discord_url(
+            url,
+            settings=settings,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        )
+    except ValueError as exc:
+        if str(exc).startswith("Discord resource not found:"):
+            print(
+                f"Warning: skipping unavailable Discord URL: {url} ({exc})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return []
+        raise
 
     ext = ".yaml" if settings.format == "yaml" else ".md"
     items: list[ResolvedItem] = []

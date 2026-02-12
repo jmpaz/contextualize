@@ -48,10 +48,10 @@ def download_cached_media_to_temp(
             timeout=timeout_seconds,
         )
         response.raise_for_status()
-    except requests.exceptions.RequestException:
+        content = response.content
+    except Exception:
         return None
 
-    content = response.content
     if not content:
         return None
     store_media_bytes(cache_identity, content)

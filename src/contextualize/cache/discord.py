@@ -84,16 +84,19 @@ def get_cached_api_json(identity: str, ttl: timedelta | None = None) -> Any | No
 
 
 def store_api_json(identity: str, payload: Any) -> None:
-    API_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    content_path, meta_path = _cache_paths(API_CACHE_ROOT, identity, "json")
-    text = json.dumps(payload, ensure_ascii=False)
-    content_path.write_text(text, encoding="utf-8")
-    meta = DiscordCacheMetadata(
-        identity=identity,
-        cached_at=datetime.now(timezone.utc).isoformat(),
-        size_bytes=len(text.encode("utf-8")),
-    )
-    meta_path.write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
+    try:
+        API_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        content_path, meta_path = _cache_paths(API_CACHE_ROOT, identity, "json")
+        text = json.dumps(payload, ensure_ascii=False)
+        content_path.write_text(text, encoding="utf-8")
+        meta = DiscordCacheMetadata(
+            identity=identity,
+            cached_at=datetime.now(timezone.utc).isoformat(),
+            size_bytes=len(text.encode("utf-8")),
+        )
+        meta_path.write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
+    except OSError:
+        return
 
 
 def get_cached_rendered(identity: str, ttl: timedelta | None = None) -> str | None:
@@ -111,15 +114,18 @@ def get_cached_rendered(identity: str, ttl: timedelta | None = None) -> str | No
 
 
 def store_rendered(identity: str, content: str) -> None:
-    RENDER_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    content_path, meta_path = _cache_paths(RENDER_CACHE_ROOT, identity, "txt")
-    content_path.write_text(content, encoding="utf-8")
-    meta = DiscordCacheMetadata(
-        identity=identity,
-        cached_at=datetime.now(timezone.utc).isoformat(),
-        size_bytes=len(content.encode("utf-8")),
-    )
-    meta_path.write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
+    try:
+        RENDER_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        content_path, meta_path = _cache_paths(RENDER_CACHE_ROOT, identity, "txt")
+        content_path.write_text(content, encoding="utf-8")
+        meta = DiscordCacheMetadata(
+            identity=identity,
+            cached_at=datetime.now(timezone.utc).isoformat(),
+            size_bytes=len(content.encode("utf-8")),
+        )
+        meta_path.write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
+    except OSError:
+        return
 
 
 def get_cached_media_bytes(identity: str) -> bytes | None:
