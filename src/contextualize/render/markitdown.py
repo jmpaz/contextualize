@@ -185,6 +185,13 @@ def _format_auto_generated_video_fallback(path: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _verbose_log(message: str) -> None:
+    from ..runtime import get_verbose_logging
+
+    if get_verbose_logging():
+        print(message)
+
+
 def _cache_entries_dir() -> Path:
     return _llm_cache_dir() / "v1"
 
@@ -576,6 +583,17 @@ def _is_openrouter_base_url(base_url: str) -> bool:
     return host in {"openrouter.ai", "www.openrouter.ai"}
 
 
+def _llm_provider_label(base_url: str) -> str:
+    host = (urlparse(base_url).hostname or "").lower()
+    if host in {"openrouter.ai", "www.openrouter.ai"}:
+        return "openrouter"
+    if host in {"api.openai.com", "www.api.openai.com"}:
+        return "openai"
+    if host:
+        return host
+    return "unknown"
+
+
 def _openrouter_extra_body(extra_body: Any) -> dict[str, Any]:
     payload: dict[str, Any] = (
         dict(extra_body) if isinstance(extra_body, Mapping) else {}
@@ -588,22 +606,50 @@ def _openrouter_extra_body(extra_body: Any) -> dict[str, Any]:
 
 
 class _OpenRouterCompletionsProxy:
-    def __init__(self, completions: Any):
+    def __init__(
+        self, completions: Any, *, provider: str, add_openrouter_defaults: bool
+    ):
         self._completions = completions
+        self._provider = provider
+        self._add_openrouter_defaults = add_openrouter_defaults
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
-        kwargs["extra_body"] = _openrouter_extra_body(kwargs.get("extra_body"))
+        if self._add_openrouter_defaults:
+            kwargs["extra_body"] = _openrouter_extra_body(kwargs.get("extra_body"))
+        model = kwargs.get("model")
+        model_label = (
+            model.strip() if isinstance(model, str) and model.strip() else "unknown"
+        )
+        _verbose_log(
+            "  sending to model: "
+            f"provider={self._provider} model={model_label} endpoint=chat.completions"
+        )
         return self._completions.create(*args, **kwargs)
 
 
 class _OpenRouterChatProxy:
-    def __init__(self, chat: Any):
-        self.completions = _OpenRouterCompletionsProxy(chat.completions)
+    def __init__(self, chat: Any, *, provider: str, add_openrouter_defaults: bool):
+        self.completions = _OpenRouterCompletionsProxy(
+            chat.completions,
+            provider=provider,
+            add_openrouter_defaults=add_openrouter_defaults,
+        )
 
 
 class _OpenRouterClientProxy:
-    def __init__(self, client: Any):
-        self.chat = _OpenRouterChatProxy(client.chat)
+    def __init__(self, client: Any, *, provider: str, add_openrouter_defaults: bool):
+        self.chat = _OpenRouterChatProxy(
+            client.chat,
+            provider=provider,
+            add_openrouter_defaults=add_openrouter_defaults,
+        )
+
+
+def _configured_llm_base_url() -> str:
+    _load_dotenv_once()
+    return (
+        os.getenv("OPENAI_BASE_URL") or ""
+    ).strip() or "https://openrouter.ai/api/v1"
 
 
 def _image_context() -> tuple[bool, str, str, str, str | None]:
@@ -612,9 +658,7 @@ def _image_context() -> tuple[bool, str, str, str, str | None]:
         (os.getenv("OPENAI_API_KEY") or "").strip()
         or (os.getenv("OPENROUTER_API_KEY") or "").strip()
     )
-    base_url = (
-        os.getenv("OPENAI_BASE_URL") or ""
-    ).strip() or "https://openrouter.ai/api/v1"
+    base_url = _configured_llm_base_url()
     model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-3-flash-preview"
     prompt = _image_prompt()
     exiftool_path = (os.getenv("EXIFTOOL_PATH") or "").strip() or shutil.which(
@@ -896,16 +940,17 @@ def _build_llm_config() -> tuple[object | None, str | None]:
     if not api_key:
         return None, None
 
-    base_url = (
-        os.getenv("OPENAI_BASE_URL") or ""
-    ).strip() or "https://openrouter.ai/api/v1"
+    base_url = _configured_llm_base_url()
     model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-3-flash-preview"
 
     from openai import OpenAI
 
-    client: object = OpenAI(api_key=api_key, base_url=base_url)
-    if _is_openrouter_base_url(base_url):
-        client = _OpenRouterClientProxy(client)
+    raw_client: object = OpenAI(api_key=api_key, base_url=base_url)
+    client = _OpenRouterClientProxy(
+        raw_client,
+        provider=_llm_provider_label(base_url),
+        add_openrouter_defaults=_is_openrouter_base_url(base_url),
+    )
     return client, model
 
 
