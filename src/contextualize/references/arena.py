@@ -24,8 +24,9 @@ _API_BASE = "https://api.are.na/v3"
 
 
 def _log(msg: str) -> None:
-    _load_dotenv()
-    if os.environ.get("ARENA_VERBOSE", "1").lower() not in ("0", "false", "no"):
+    from ..runtime import get_verbose_logging
+
+    if get_verbose_logging():
         print(msg, file=sys.stderr, flush=True)
 
 

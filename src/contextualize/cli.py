@@ -22,6 +22,8 @@ GLOBAL_OPTION_LABELS = (
     ("prompt", "--prompt"),
     ("wrap_short", "-w"),
     ("wrap_mode", "--wrap"),
+    ("verbose", "--verbose"),
+    ("quiet", "--quiet"),
     ("copy", "--copy"),
     ("staged_copy", "--staged-copy"),
     ("count_only", "--count"),
@@ -38,6 +40,8 @@ GLOBAL_OPTION_DEFAULTS = {
     "prompt": (),
     "wrap_short": False,
     "wrap_mode": None,
+    "verbose": False,
+    "quiet": False,
     "copy": False,
     "staged_copy": False,
     "count_only": False,
@@ -235,6 +239,8 @@ def preprocess_args():
         "--token-target",
         "--md-model",
         "--position",
+        "--verbose",
+        "--quiet",
     }
     value_options = {
         "--prompt",
@@ -406,6 +412,16 @@ preprocess_args()
     help="Override OPENAI_MODEL (used for optional image captioning during conversion).",
 )
 @click.option(
+    "--verbose",
+    is_flag=True,
+    help="Enable provider progress logs on stderr.",
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    help="Disable provider progress logs on stderr (default).",
+)
+@click.option(
     "--position",
     "output_position",
     type=click.Choice(["append", "prepend"], case_sensitive=False),
@@ -431,6 +447,8 @@ def cli(
     write_file,
     token_target,
     md_model,
+    verbose,
+    quiet,
     output_position,
     append_flag,
     prepend_flag,
@@ -447,6 +465,10 @@ def cli(
     ctx.obj["copy_segments"] = copy_segments
     ctx.obj["write_file"] = write_file
     ctx.obj["token_target"] = token_target
+    if verbose and quiet:
+        raise click.BadParameter("use --verbose or --quiet, not both")
+    verbose_logging = bool(verbose and not quiet)
+    ctx.obj["verbose_logging"] = verbose_logging
     if md_model is not None:
         model = md_model.strip()
         if not model:
@@ -467,6 +489,10 @@ def cli(
         raise click.BadParameter("--staged-copy requires --prompt")
     if staged_copy and write_file:
         raise click.BadParameter("--staged-copy cannot be used with --write-file")
+
+    from .runtime import set_verbose_logging
+
+    set_verbose_logging(verbose_logging)
 
     if append_flag:
         output_pos = "append"

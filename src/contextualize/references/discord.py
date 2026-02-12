@@ -43,8 +43,9 @@ _MARKDOWN_ESCAPED_PUNCT_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|])")
 
 
 def _log(message: str) -> None:
-    _load_dotenv()
-    if os.environ.get("DISCORD_VERBOSE", "1").lower() not in {"0", "false", "no"}:
+    from ..runtime import get_verbose_logging
+
+    if get_verbose_logging():
         print(message, file=sys.stderr, flush=True)
 
 
@@ -2056,6 +2057,9 @@ def _resolve_message_url(
     channel_id = parsed["channel_id"]
     message_id = parsed["message_id"]
 
+    _log(
+        f"Resolving Discord message URL (guild={guild_id}, channel={channel_id}, message={message_id})"
+    )
     _validate_guild_scope(guild_id)
     guild_name: str | None = None
     try:
@@ -2068,6 +2072,10 @@ def _resolve_message_url(
         guild_name = _guild_label(guild, guild_id)
     except Exception:
         guild_name = None
+    if guild_name:
+        _log(f"  Resolved guild: {guild_name} ({guild_id})")
+    else:
+        _log(f"  Guild metadata unavailable for {guild_id}")
 
     channel = _fetch_channel(
         channel_id,
@@ -2075,6 +2083,8 @@ def _resolve_message_url(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
     )
+    channel_name = _channel_label(channel, channel_id)
+    _log(f"  Resolved channel: #{channel_name} ({channel_id})")
     target = _fetch_message(
         channel_id,
         message_id,
@@ -2087,6 +2097,7 @@ def _resolve_message_url(
         raise ValueError(f"Missing timestamp for Discord message {message_id}")
 
     if _time_window_enabled(settings):
+        _log("  Fetching message context via configured time window")
         start, end = _window_bounds_for_target(target_ts, settings)
         fetched = _fetch_messages_between(
             channel_id,
@@ -2103,6 +2114,9 @@ def _resolve_message_url(
         messages = _sort_messages(fetched)
     else:
         before_count, after_count = _message_window_counts(settings)
+        _log(
+            f"  Fetching message context around anchor (before={before_count}, after={after_count})"
+        )
         previous = _fetch_previous_messages(
             channel_id,
             message_id,
@@ -2121,7 +2135,9 @@ def _resolve_message_url(
         )
         messages = _sort_messages([*previous, target, *following])
 
+    _log(f"  Retrieved {len(messages)} context message(s) before filtering")
     filtered = _filter_messages(messages, settings=settings)
+    _log(f"  Kept {len(filtered)} context message(s) after filtering")
 
     thread_id: str | None = None
     parent_channel_id: str | None = None
@@ -2145,6 +2161,7 @@ def _resolve_message_url(
                 parent_channel_name = _channel_label(parent_channel, parent_channel_id)
             except Exception:
                 parent_channel_name = None
+        _log(f"  Message belongs to thread {thread_id}")
 
     forward_source_lookup = _build_forward_source_lookup(
         filtered,
@@ -2191,7 +2208,7 @@ def _resolve_message_url(
         trace_path=trace_path,
         guild_id=guild_id,
         channel_id=channel_id,
-        channel_name=_channel_label(channel, channel_id),
+        channel_name=channel_name,
         channel_type=channel_type,
         thread_id=thread_id,
         thread_name=thread_name,
@@ -2201,6 +2218,9 @@ def _resolve_message_url(
         rendered="",
         guild_name=guild_name,
         parent_channel_name=parent_channel_name,
+    )
+    _log(
+        f"  Built message document '{base.label}' with {len(cleaned_messages)} message(s)"
     )
     rendered = _render_document(base, settings)
     return [
@@ -2233,17 +2253,26 @@ def _resolve_channel_messages(
     refresh_cache: bool,
 ) -> list[dict[str, Any]]:
     if _time_window_enabled(settings):
+        target_cap = max(200, settings.channel_limit)
+        _log(
+            f"    Fetching channel {channel_id} messages via time window (cap={target_cap})"
+        )
         start, end = _window_bounds_no_target(settings)
-        return _fetch_messages_between(
+        messages = _fetch_messages_between(
             channel_id,
             start,
             end,
-            max_messages=max(200, settings.channel_limit),
+            max_messages=target_cap,
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
         )
-    return _sort_messages(
+        _log(f"    Retrieved {len(messages)} message(s) for channel {channel_id}")
+        return messages
+    _log(
+        f"    Fetching latest channel messages for {channel_id} (limit={settings.channel_limit})"
+    )
+    messages = _sort_messages(
         _fetch_latest_messages(
             channel_id,
             settings.channel_limit,
@@ -2252,6 +2281,8 @@ def _resolve_channel_messages(
             refresh_cache=refresh_cache,
         )
     )
+    _log(f"    Retrieved {len(messages)} message(s) for channel {channel_id}")
+    return messages
 
 
 def _thread_ids_from_messages(
@@ -2353,6 +2384,9 @@ def _build_document(
         parent_channel_name=parent_channel_name,
     )
     rendered = _render_document(base, settings)
+    _log(
+        f"  Rendered {kind} document '{base.label}' with {len(cleaned_messages)} message(s)"
+    )
     return DiscordDocument(
         source_url=base.source_url,
         label=base.label,
@@ -2384,6 +2418,7 @@ def _resolve_channel_or_thread_url(
     guild_id = parsed["guild_id"]
     channel_id = parsed["channel_id"]
 
+    _log(f"Resolving Discord channel URL (guild={guild_id}, channel={channel_id})")
     _validate_guild_scope(guild_id)
     guild_name: str | None = None
     try:
@@ -2396,6 +2431,10 @@ def _resolve_channel_or_thread_url(
         guild_name = _guild_label(guild, guild_id)
     except Exception:
         guild_name = None
+    if guild_name:
+        _log(f"  Resolved guild: {guild_name} ({guild_id})")
+    else:
+        _log(f"  Guild metadata unavailable for {guild_id}")
 
     channel = _fetch_channel(
         channel_id,
@@ -2403,6 +2442,8 @@ def _resolve_channel_or_thread_url(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
     )
+    channel_name = _channel_label(channel, channel_id)
+    _log(f"  Resolved channel: #{channel_name} ({channel_id})")
     channel_type_raw = channel.get("type")
     channel_type = int(channel_type_raw) if isinstance(channel_type_raw, int) else None
 
@@ -2413,10 +2454,14 @@ def _resolve_channel_or_thread_url(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
     )
+    fetched_count = len(messages)
     thread_targets = (
         _thread_ids_from_messages(messages) if settings.expand_threads else []
     )
     messages = _filter_messages(messages, settings=settings)
+    _log(
+        f"  Channel summary: fetched={fetched_count}, kept={len(messages)}, discovered_threads={len(thread_targets)}"
+    )
 
     documents: list[DiscordDocument] = []
 
@@ -2455,6 +2500,7 @@ def _resolve_channel_or_thread_url(
                 settings=settings,
             )
         )
+        _log("  URL is a thread channel; returning one thread document")
         return documents
 
     documents.append(
@@ -2477,9 +2523,15 @@ def _resolve_channel_or_thread_url(
     )
 
     if not settings.expand_threads:
+        _log("  Thread expansion disabled; returning one channel document")
         return documents
 
+    _log(f"  Expanding {len(thread_targets)} discovered thread(s)")
     for thread_id, thread_name in thread_targets:
+        thread_label = (
+            thread_name.strip() if thread_name and thread_name.strip() else None
+        )
+        _log(f"    Resolving thread {thread_label or thread_id} ({thread_id})")
         try:
             thread_channel = _fetch_channel(
                 thread_id,
@@ -2488,6 +2540,7 @@ def _resolve_channel_or_thread_url(
                 refresh_cache=refresh_cache,
             )
         except Exception:
+            _log(f"    Skipping thread {thread_id}: unable to fetch channel metadata")
             continue
 
         thread_messages = _resolve_channel_messages(
@@ -2498,6 +2551,7 @@ def _resolve_channel_or_thread_url(
             refresh_cache=refresh_cache,
         )
         thread_messages = _filter_messages(thread_messages, settings=settings)
+        _log(f"    Thread {thread_id} kept {len(thread_messages)} message(s)")
 
         thread_doc = _build_document(
             source_url=url,
@@ -2517,6 +2571,7 @@ def _resolve_channel_or_thread_url(
         )
         documents.append(thread_doc)
 
+    _log(f"  Built {len(documents)} document(s) from channel URL")
     return documents
 
 
@@ -2530,16 +2585,20 @@ def resolve_discord_url(
 ) -> list[DiscordDocument]:
     warmup_discord_network_stack()
 
+    _log(f"Resolving Discord URL: {url}")
+    cache_mode = "refresh" if refresh_cache else "reuse"
+    _log(f"  Cache mode: enabled={use_cache}, mode={cache_mode}")
     parsed = parse_discord_url(url)
     if not parsed:
         raise ValueError(f"Not a Discord URL: {url}")
+    _log(f"  Parsed URL kind: {parsed['kind']}")
 
     effective_settings = (
         settings if settings is not None else _discord_settings_from_env()
     )
 
     if parsed["kind"] == "message":
-        return _resolve_message_url(
+        documents = _resolve_message_url(
             url,
             parsed,
             settings=effective_settings,
@@ -2547,14 +2606,17 @@ def resolve_discord_url(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
         )
-    return _resolve_channel_or_thread_url(
-        url,
-        parsed,
-        settings=effective_settings,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
+    else:
+        documents = _resolve_channel_or_thread_url(
+            url,
+            parsed,
+            settings=effective_settings,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        )
+    _log(f"Resolved Discord URL to {len(documents)} document(s)")
+    return documents
 
 
 def _parse_window_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:

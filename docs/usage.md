@@ -5,6 +5,8 @@
 
 - `-p, --prompt` prepend and optionally append up to two strings
 - `-w, --wrap` wrap output as `md` or `xml`; `-w` alone is a shorthand for `--wrap xml`
+- `--verbose` enable provider progress logs on stderr
+- `--quiet` disable provider progress logs on stderr (default)
 - `-c, --copy` copy to clipboard instead of printing; displays the token count
 - `-s, --staged-copy` with `--prompt` and a copy mode, copy preprompt, content, and postprompt as distinct stages
 - `--count` dry run of `--copy`; prints a string containing the token count

@@ -15,6 +15,9 @@ _REFRESH_AUDIO: ContextVar[bool] = ContextVar(
 _REFRESH_CACHE: ContextVar[bool] = ContextVar(
     "contextualize_refresh_cache", default=False
 )
+_VERBOSE_LOGGING: ContextVar[bool] = ContextVar(
+    "contextualize_verbose_logging", default=False
+)
 
 _DEFAULT_PAYLOAD_SPEC_JOBS = 4
 _DEFAULT_PAYLOAD_MEDIA_JOBS = 3
@@ -84,6 +87,18 @@ def set_refresh_cache(enabled: bool) -> Token[bool]:
 
 def reset_refresh_cache(token: Token[bool]) -> None:
     _REFRESH_CACHE.reset(token)
+
+
+def get_verbose_logging() -> bool:
+    return _VERBOSE_LOGGING.get()
+
+
+def set_verbose_logging(enabled: bool) -> Token[bool]:
+    return _VERBOSE_LOGGING.set(bool(enabled))
+
+
+def reset_verbose_logging(token: Token[bool]) -> None:
+    _VERBOSE_LOGGING.reset(token)
 
 
 def get_payload_spec_jobs() -> int:
