@@ -27,6 +27,8 @@ _DISCORD_CHANNEL_RE = re.compile(
 
 _DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
 _NON_SYSTEM_MESSAGE_TYPES = frozenset({0, 19, 20, 21})
+_DISCORD_THREAD_STARTER_MESSAGE_TYPE = 21
+_REPLY_QUOTE_MAX_CHARS = 600
 _VALID_FORMATS = frozenset({"idiomatic", "yaml"})
 _MEDIA_IMAGE_SUFFIXES = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif"}
@@ -1236,9 +1238,65 @@ def _normalize_attachment_nodes(
     return nodes
 
 
-def _system_content(message: dict[str, Any]) -> str:
-    msg_type = message.get("type")
+def _system_content(message: dict[str, Any], *, thread_id: str | None) -> str:
+    msg_type = int(message.get("type") or 0)
+    if msg_type == 19:
+        return ""
+    if msg_type == _DISCORD_THREAD_STARTER_MESSAGE_TYPE:
+        if thread_id:
+            return "[created thread]"
+        return "[created channel]"
     return f"[system event type {msg_type}]"
+
+
+def _reply_to_id(message: dict[str, Any]) -> str | None:
+    reference = (
+        message.get("message_reference")
+        if isinstance(message.get("message_reference"), dict)
+        else {}
+    )
+    message_id = reference.get("message_id")
+    if message_id is None:
+        return None
+    return str(message_id)
+
+
+def _build_message_lookup(messages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        message_id = message.get("id")
+        if message_id is None:
+            continue
+        out[str(message_id)] = message
+    return out
+
+
+def _reply_to_content(
+    message: dict[str, Any],
+    *,
+    reply_to_id: str | None,
+    message_lookup: dict[str, dict[str, Any]] | None,
+) -> str | None:
+    if not reply_to_id:
+        return None
+    referenced = (
+        message.get("referenced_message")
+        if isinstance(message.get("referenced_message"), dict)
+        else None
+    )
+    if referenced is not None:
+        content = _extract_message_content(referenced)
+        if content:
+            return content
+    if message_lookup is None:
+        return None
+    reply_to_message = message_lookup.get(reply_to_id)
+    if reply_to_message is None:
+        return None
+    content = _extract_message_content(reply_to_message)
+    if not content:
+        return None
+    return content
 
 
 def _snapshot_messages(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1405,6 +1463,7 @@ def _normalize_message(
     thread_id: str | None,
     include_media_descriptions: bool,
     include_embed_media_descriptions: bool,
+    message_lookup: dict[str, dict[str, Any]] | None = None,
     forward_source_lookup: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, Any] | None:
     message_id = message.get("id")
@@ -1420,7 +1479,7 @@ def _normalize_message(
     content = _extract_message_content(message)
     message_type = int(message.get("type") or 0)
     if not content and message_type != 0:
-        content = _system_content(message)
+        content = _system_content(message, thread_id=thread_id)
 
     message_with_media = _message_with_snapshot_media(message)
     attachments = _normalize_attachment_nodes(
@@ -1429,10 +1488,11 @@ def _normalize_message(
         include_embed_media_descriptions=include_embed_media_descriptions,
     )
 
-    reference = (
-        message.get("message_reference")
-        if isinstance(message.get("message_reference"), dict)
-        else {}
+    reply_to_id = _reply_to_id(message)
+    reply_to_content = _reply_to_content(
+        message,
+        reply_to_id=reply_to_id,
+        message_lookup=message_lookup,
     )
     thread_data = (
         message.get("thread") if isinstance(message.get("thread"), dict) else {}
@@ -1451,8 +1511,9 @@ def _normalize_message(
         "sender": _author_name(message),
         "sender_id": _author_id(message),
         "content": _sanitize_text(content),
-        "reply_to_id": str(reference.get("message_id"))
-        if reference.get("message_id")
+        "reply_to_id": reply_to_id,
+        "reply_to_content": _sanitize_text(reply_to_content)
+        if reply_to_content
         else None,
         "guild_id": guild_id,
         "channel_id": channel_id,
@@ -1745,6 +1806,15 @@ def _format_attachment_idiomatic(
     return lines
 
 
+def _format_reply_quote(content: str) -> list[str]:
+    normalized = _normalize_display_text(content).strip()
+    if not normalized:
+        return []
+    if len(normalized) > _REPLY_QUOTE_MAX_CHARS:
+        normalized = normalized[: _REPLY_QUOTE_MAX_CHARS - 1].rstrip() + "…"
+    return [f"> {line}" if line else ">" for line in normalized.splitlines()]
+
+
 def _render_idiomatic(document: DiscordDocument, settings: DiscordSettings) -> str:
     lines: list[str] = []
     lines.append(_format_scope_header(document))
@@ -1772,6 +1842,11 @@ def _render_idiomatic(document: DiscordDocument, settings: DiscordSettings) -> s
 
         sender = str(message.get("sender") or "unknown")
         content = str(message.get("content") or "")
+        reply_to_content = (
+            message.get("reply_to_content")
+            if isinstance(message.get("reply_to_content"), str)
+            else ""
+        )
         attachments = (
             message.get("attachments")
             if isinstance(message.get("attachments"), list)
@@ -1783,9 +1858,11 @@ def _render_idiomatic(document: DiscordDocument, settings: DiscordSettings) -> s
         lines.append(f"[{sender}]")
         if forward is not None:
             lines.append(_format_forward_open_tag(forward))
+        if reply_to_content:
+            lines.extend(_format_reply_quote(reply_to_content))
         if content:
             lines.append(content)
-        elif not attachments:
+        elif not attachments and not reply_to_content:
             lines.append("")
         for node in attachments:
             if isinstance(node, dict):
@@ -1858,6 +1935,7 @@ def _render_yaml(document: DiscordDocument, settings: DiscordSettings) -> str:
             "channel_id": message.get("channel_id"),
             "thread_id": message.get("thread_id"),
             "reply_to_id": message.get("reply_to_id"),
+            "reply_to_content": message.get("reply_to_content"),
             "forward": message.get("forward"),
             "content": _LiteralString(str(message.get("content") or "")),
         }
@@ -2074,6 +2152,7 @@ def _resolve_message_url(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
     )
+    message_lookup = _build_message_lookup(filtered)
 
     normalized_messages = [
         _normalize_message(
@@ -2083,6 +2162,7 @@ def _resolve_message_url(
             thread_id=thread_id,
             include_media_descriptions=settings.include_media_descriptions,
             include_embed_media_descriptions=settings.include_embed_media_descriptions,
+            message_lookup=message_lookup,
             forward_source_lookup=forward_source_lookup,
         )
         for message in filtered
@@ -2224,6 +2304,7 @@ def _build_document(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
     )
+    message_lookup = _build_message_lookup(messages)
 
     normalized_messages = [
         _normalize_message(
@@ -2233,6 +2314,7 @@ def _build_document(
             thread_id=thread_id,
             include_media_descriptions=settings.include_media_descriptions,
             include_embed_media_descriptions=settings.include_embed_media_descriptions,
+            message_lookup=message_lookup,
             forward_source_lookup=forward_source_lookup,
         )
         for message in messages
