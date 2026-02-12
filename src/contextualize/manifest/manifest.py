@@ -75,7 +75,7 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
         name = name.strip()
         if not name:
             raise ValueError("Component name must be a non-empty string")
-        validate_name(name, kind="Component name", allow_delimiter=not group_path)
+        validate_name(name, kind="Component name", allow_delimiter=True)
 
         full_name = join_group_name(group_path, name)
         if full_name in used_names:
@@ -105,7 +105,7 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
                 group_name = group_name.strip()
                 if not group_name:
                     raise ValueError("Group name must be a non-empty string")
-                validate_name(group_name, kind="Group name", allow_delimiter=False)
+                validate_name(group_name, kind="Group name", allow_delimiter=True)
 
                 if "components" not in entry:
                     raise ValueError(f"Group '{group_name}' must define components")
