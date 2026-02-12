@@ -307,13 +307,14 @@ def _attachment_media_cache_identity(
     *,
     message_id: str | None,
     attachment_id: str | None,
+    attachment_index: int,
     filename: str,
     url: str,
 ) -> str:
     if not message_id:
         return url
-    attachment_key = attachment_id or filename or "attachment"
-    return f"discord:message:{message_id}:attachment:{attachment_key}:{url}"
+    attachment_key = attachment_id or f"{attachment_index}:{filename or 'attachment'}"
+    return f"discord:message:{message_id}:attachment:{attachment_key}"
 
 
 def _embed_media_cache_identity(
@@ -325,7 +326,7 @@ def _embed_media_cache_identity(
 ) -> str:
     if not message_id:
         return url
-    return f"discord:message:{message_id}:embed:{embed_index}:{role}:{url}"
+    return f"discord:message:{message_id}:embed:{embed_index}:{role}"
 
 
 def _media_render_cache_identity(
@@ -1462,7 +1463,7 @@ def _normalize_attachment_nodes(
         if isinstance(message.get("attachments"), list)
         else []
     )
-    for attachment in attachments:
+    for attachment_index, attachment in enumerate(attachments):
         if not isinstance(attachment, dict):
             continue
         filename = str(attachment.get("filename") or "")
@@ -1487,6 +1488,7 @@ def _normalize_attachment_nodes(
             media_cache_identity = _attachment_media_cache_identity(
                 message_id=message_id,
                 attachment_id=attachment_id,
+                attachment_index=attachment_index,
                 filename=filename,
                 url=attachment_url,
             )

@@ -22,7 +22,7 @@ DISCORD_CACHE_ROOT = Path(
 API_CACHE_ROOT = DISCORD_CACHE_ROOT / "api"
 RENDER_CACHE_ROOT = DISCORD_CACHE_ROOT / "render"
 MEDIA_CACHE_ROOT = DISCORD_CACHE_ROOT / "media"
-DEFAULT_TTL = timedelta(days=3)
+DEFAULT_API_TTL = timedelta(days=3)
 CACHE_VERSION = 1
 
 
@@ -58,7 +58,9 @@ def _load_meta(path: Path) -> DiscordCacheMetadata | None:
         return None
 
 
-def _is_expired(meta: DiscordCacheMetadata, ttl: timedelta) -> bool:
+def _is_expired(meta: DiscordCacheMetadata, ttl: timedelta | None) -> bool:
+    if ttl is None:
+        return False
     if ttl == timedelta(0):
         return True
     try:
@@ -70,7 +72,7 @@ def _is_expired(meta: DiscordCacheMetadata, ttl: timedelta) -> bool:
 
 
 def get_cached_api_json(identity: str, ttl: timedelta | None = None) -> Any | None:
-    effective_ttl = DEFAULT_TTL if ttl is None else ttl
+    effective_ttl = DEFAULT_API_TTL if ttl is None else ttl
     content_path, meta_path = _cache_paths(API_CACHE_ROOT, identity, "json")
     if not content_path.exists():
         return None
@@ -100,7 +102,7 @@ def store_api_json(identity: str, payload: Any) -> None:
 
 
 def get_cached_rendered(identity: str, ttl: timedelta | None = None) -> str | None:
-    effective_ttl = DEFAULT_TTL if ttl is None else ttl
+    effective_ttl = ttl
     content_path, meta_path = _cache_paths(RENDER_CACHE_ROOT, identity, "txt")
     if not content_path.exists():
         return None
