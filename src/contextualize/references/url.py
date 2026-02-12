@@ -141,6 +141,7 @@ class URLReference:
                 headers={
                     "User-Agent": "contextualize",
                     "Accept": "text/markdown, text/x-markdown",
+                    "Accept-Encoding": "identity",
                 },
                 allow_redirects=True,
             )
@@ -225,7 +226,10 @@ class URLReference:
             head_r = requests.head(
                 self.url,
                 timeout=10,
-                headers={"User-Agent": "contextualize"},
+                headers={
+                    "User-Agent": "contextualize",
+                    "Accept": "text/markdown, text/x-markdown",
+                },
                 allow_redirects=True,
             )
             head_r.raise_for_status()
@@ -236,19 +240,25 @@ class URLReference:
             head_content_type = ""
 
         self._content_type = head_content_type
-        use_jina = not self._bypass_jina and head_content_type in _JINA_HTML_TYPES
+        try_markdown = not self._bypass_jina and (
+            head_content_type in _JINA_HTML_TYPES
+            or head_content_type in _MARKDOWN_CONTENT_TYPES
+        )
 
-        if use_jina:
+        if try_markdown:
             md_content, got_markdown = self._try_fetch_markdown()
-            if got_markdown:
-                text = md_content
-            else:
+            if not got_markdown:
                 candidate_url = self._markdown_url_candidate()
                 if candidate_url:
                     md_content, got_markdown = self._try_fetch_markdown_url(
                         candidate_url
                     )
-                text = md_content if got_markdown else self._fetch_via_jina()
+            if got_markdown:
+                text = md_content
+            elif head_content_type in _JINA_HTML_TYPES:
+                text = self._fetch_via_jina()
+            else:
+                text = md_content
             self.original_file_content = text
             self.file_content = text
             if self.inject:
