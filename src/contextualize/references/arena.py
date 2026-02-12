@@ -528,7 +528,7 @@ def _download_to_temp(
 ) -> Path | None:
     from ..cache.arena import get_cached_media_bytes, store_media_bytes
     from .media import download_cached_media_to_temp
-    from ..runtime import get_refresh_cache
+    from ..runtime import get_refresh_media
 
     cache_identity = media_cache_identity or url
     return download_cached_media_to_temp(
@@ -538,7 +538,7 @@ def _download_to_temp(
         cache_identity=cache_identity,
         get_cached_media_bytes=get_cached_media_bytes,
         store_media_bytes=store_media_bytes,
-        refresh_cache=get_refresh_cache(),
+        refresh_cache=get_refresh_media(),
     )
 
 

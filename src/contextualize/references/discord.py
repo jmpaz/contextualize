@@ -1163,7 +1163,7 @@ def _describe_remote_media(
 
     from ..cache.discord import get_cached_media_bytes, store_media_bytes
     from ..render.markitdown import MarkItDownConversionError, convert_path_to_markdown
-    from ..runtime import get_refresh_cache, get_refresh_images
+    from ..runtime import get_refresh_images, get_refresh_media
     from .media import download_cached_media_to_temp
 
     cache_identity = media_cache_identity or url
@@ -1175,7 +1175,7 @@ def _describe_remote_media(
         cache_identity=cache_identity,
         get_cached_media_bytes=get_cached_media_bytes,
         store_media_bytes=store_media_bytes,
-        refresh_cache=get_refresh_cache(),
+        refresh_cache=get_refresh_media(),
         on_cache_hit=lambda _identity: _log(
             f"  discord media cache hit: {cache_label}"
         ),
@@ -2727,11 +2727,15 @@ def resolve_discord_url(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
 ) -> list[DiscordDocument]:
+    from ..runtime import get_refresh_media
+
     warmup_discord_network_stack()
 
     _log(f"Resolving Discord URL: {url}")
     cache_mode = "refresh" if refresh_cache else "reuse"
     _log(f"  Cache mode: enabled={use_cache}, mode={cache_mode}")
+    media_mode = "refresh" if get_refresh_media() else "reuse"
+    _log(f"  Media cache mode: {media_mode}")
     parsed = parse_discord_url(url)
     if not parsed:
         raise ValueError(f"Not a Discord URL: {url}")

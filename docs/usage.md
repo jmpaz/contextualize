@@ -51,6 +51,7 @@ Brace expressions and glob patterns in those paths are expanded after cloning.
 The `.git` suffix is optional and the repo will be cloned to `~/.local/share/contextualize/cache/git/` on first use.
 
 Non-text files supported by [markitdown](https://github.com/microsoft/markitdown) are automatically converted to text.
+For Are.na and Discord media descriptions, source media bytes are cached locally; use `--refresh-media` to force a re-fetch.
 
 | option | description |
 |--------|-------------|
