@@ -29,7 +29,7 @@ _DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
 _NON_SYSTEM_MESSAGE_TYPES = frozenset({0, 19, 20, 21})
 _DISCORD_THREAD_STARTER_MESSAGE_TYPE = 21
 _REPLY_QUOTE_MAX_CHARS = 600
-_VALID_FORMATS = frozenset({"idiomatic", "yaml"})
+_VALID_FORMATS = frozenset({"transcript", "yaml"})
 _MEDIA_IMAGE_SUFFIXES = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif"}
 )
@@ -353,7 +353,7 @@ def _normalize_datetime(value: datetime | None) -> datetime | None:
 
 @dataclass(frozen=True)
 class DiscordSettings:
-    format: str = "idiomatic"
+    format: str = "transcript"
     include_system: bool = True
     include_thread_starters: bool = True
     expand_threads: bool = False
@@ -417,6 +417,154 @@ class DiscordDocument:
     rendered: str
     guild_name: str | None = None
     parent_channel_name: str | None = None
+
+
+def discord_scope_url(document: DiscordDocument) -> str:
+    if document.thread_id:
+        parent = document.parent_channel_id or document.channel_id
+        return f"https://discord.com/channels/{document.guild_id}/{parent}/{document.thread_id}"
+    return f"https://discord.com/channels/{document.guild_id}/{document.channel_id}"
+
+
+def discord_scope_title(document: DiscordDocument) -> str:
+    return _format_scope_header(document)
+
+
+def discord_document_timestamps(
+    document: DiscordDocument,
+) -> tuple[str | None, str | None]:
+    parsed: list[datetime] = []
+    for message in document.messages:
+        if not isinstance(message, dict):
+            continue
+        raw = message.get("timestamp")
+        if not isinstance(raw, str) or not raw:
+            continue
+        timestamp = _parse_iso_datetime(raw)
+        if timestamp is None:
+            continue
+        parsed.append(timestamp)
+    if not parsed:
+        return None, None
+    first = min(parsed).astimezone(timezone.utc)
+    last = max(parsed).astimezone(timezone.utc)
+    return (
+        first.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        last.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    )
+
+
+def discord_anchor_message_url(source_url: str | None) -> str | None:
+    if not source_url:
+        return None
+    parsed = parse_discord_url(source_url)
+    if not parsed or parsed.get("kind") != "message":
+        return None
+    guild_id = parsed.get("guild_id")
+    channel_id = parsed.get("channel_id")
+    message_id = parsed.get("message_id")
+    if not guild_id or not channel_id or not message_id:
+        return None
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+def discord_document_metadata(
+    document: DiscordDocument,
+    *,
+    source_url: str | None = None,
+    first_message: str | None = None,
+    last_message: str | None = None,
+    include_message_bounds: bool = True,
+) -> dict[str, str]:
+    resolved_first = first_message
+    resolved_last = last_message
+    if resolved_first is None or resolved_last is None:
+        doc_first, doc_last = discord_document_timestamps(document)
+        if resolved_first is None:
+            resolved_first = doc_first
+        if resolved_last is None:
+            resolved_last = doc_last
+    metadata: dict[str, str] = {
+        "title": discord_scope_title(document),
+        "url": discord_scope_url(document),
+        "kind": document.kind,
+    }
+    if include_message_bounds:
+        if resolved_first:
+            metadata["first_message"] = resolved_first
+        if resolved_last:
+            metadata["last_message"] = resolved_last
+    anchor_message_url = discord_anchor_message_url(source_url)
+    if anchor_message_url:
+        metadata["anchor_message_url"] = anchor_message_url
+    return metadata
+
+
+def _render_markdown_frontmatter(content: str, metadata: dict[str, str]) -> str:
+    import yaml
+
+    frontmatter = yaml.safe_dump(
+        metadata,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+    ).strip()
+    return f"---\n{frontmatter}\n---\n\n{content.lstrip()}"
+
+
+def _render_yaml_with_metadata(content: str, metadata: dict[str, str]) -> str:
+    import yaml
+
+    metadata_text = yaml.safe_dump(
+        {"metadata": metadata},
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+    )
+    return metadata_text + content.lstrip()
+
+
+def render_discord_document_with_metadata(
+    document: DiscordDocument,
+    *,
+    settings: DiscordSettings,
+    source_url: str | None = None,
+    first_message: str | None = None,
+    last_message: str | None = None,
+    include_message_bounds: bool = True,
+) -> str:
+    metadata = discord_document_metadata(
+        document,
+        source_url=source_url,
+        first_message=first_message,
+        last_message=last_message,
+        include_message_bounds=include_message_bounds,
+    )
+    if settings.format == "yaml":
+        return _render_yaml_with_metadata(document.rendered, metadata)
+    return _render_markdown_frontmatter(document.rendered, metadata)
+
+
+def with_discord_document_rendered(
+    document: DiscordDocument, *, rendered: str
+) -> DiscordDocument:
+    return DiscordDocument(
+        source_url=document.source_url,
+        label=document.label,
+        trace_path=document.trace_path,
+        guild_id=document.guild_id,
+        channel_id=document.channel_id,
+        channel_name=document.channel_name,
+        channel_type=document.channel_type,
+        thread_id=document.thread_id,
+        thread_name=document.thread_name,
+        parent_channel_id=document.parent_channel_id,
+        kind=document.kind,
+        messages=document.messages,
+        rendered=rendered,
+        guild_name=document.guild_name,
+        parent_channel_name=document.parent_channel_name,
+    )
 
 
 @dataclass
@@ -489,8 +637,8 @@ class DiscordReference:
 def _discord_settings_from_env() -> DiscordSettings:
     _load_dotenv()
 
-    raw_format = (os.environ.get("DISCORD_FORMAT") or "idiomatic").strip().lower()
-    out_format = raw_format if raw_format in _VALID_FORMATS else "idiomatic"
+    raw_format = (os.environ.get("DISCORD_FORMAT") or "transcript").strip().lower()
+    out_format = raw_format if raw_format in _VALID_FORMATS else "transcript"
 
     include_system = _parse_bool(
         os.environ.get("DISCORD_INCLUDE_SYSTEM", "1"), default=True
@@ -2034,8 +2182,6 @@ def _format_reply_quote(content: str) -> list[str]:
 
 def _render_idiomatic(document: DiscordDocument, settings: DiscordSettings) -> str:
     lines: list[str] = []
-    lines.append(_format_scope_header(document))
-    lines.append("---")
 
     previous_date: str | None = None
     previous_dt: datetime | None = None
@@ -2221,6 +2367,68 @@ def _render_document(document: DiscordDocument, settings: DiscordSettings) -> st
     if settings.format == "yaml":
         return _render_yaml(document, settings)
     return _render_idiomatic(document, settings)
+
+
+def split_discord_document_by_utc_day(
+    document: DiscordDocument,
+    *,
+    settings: DiscordSettings,
+) -> list[DiscordDocument]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for message in document.messages:
+        if not isinstance(message, dict):
+            continue
+        timestamp_raw = message.get("timestamp")
+        timestamp = _parse_iso_datetime(str(timestamp_raw or ""))
+        if timestamp is None:
+            continue
+        day_key = timestamp.date().isoformat()
+        grouped.setdefault(day_key, []).append(message)
+
+    if not grouped:
+        return [document]
+
+    out: list[DiscordDocument] = []
+    for day_key in sorted(grouped.keys()):
+        day_messages = grouped[day_key]
+        base = DiscordDocument(
+            source_url=document.source_url,
+            label=document.label,
+            trace_path=document.trace_path,
+            guild_id=document.guild_id,
+            channel_id=document.channel_id,
+            channel_name=document.channel_name,
+            channel_type=document.channel_type,
+            thread_id=document.thread_id,
+            thread_name=document.thread_name,
+            parent_channel_id=document.parent_channel_id,
+            kind=document.kind,
+            messages=day_messages,
+            rendered="",
+            guild_name=document.guild_name,
+            parent_channel_name=document.parent_channel_name,
+        )
+        rendered = _render_document(base, settings)
+        out.append(
+            DiscordDocument(
+                source_url=base.source_url,
+                label=base.label,
+                trace_path=base.trace_path,
+                guild_id=base.guild_id,
+                channel_id=base.channel_id,
+                channel_name=base.channel_name,
+                channel_type=base.channel_type,
+                thread_id=base.thread_id,
+                thread_name=base.thread_name,
+                parent_channel_id=base.parent_channel_id,
+                kind=base.kind,
+                messages=base.messages,
+                rendered=rendered,
+                guild_name=base.guild_name,
+                parent_channel_name=base.parent_channel_name,
+            )
+        )
+    return out
 
 
 def _document_label(

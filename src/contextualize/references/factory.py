@@ -21,7 +21,15 @@ from .helpers import (
 )
 from .url import URLReference
 from .arena import ArenaReference, is_arena_channel_url, is_arena_block_url
-from .discord import DiscordReference, is_discord_url, resolve_discord_url
+from .discord import (
+    DiscordReference,
+    build_discord_settings,
+    is_discord_url,
+    render_discord_document_with_metadata,
+    resolve_discord_url,
+    split_discord_document_by_utc_day,
+    with_discord_document_rendered,
+)
 from .youtube import YouTubeReference, is_youtube_url
 
 
@@ -202,13 +210,30 @@ def create_file_references(
                 continue
 
         if is_discord_url(target):
+            discord_settings = build_discord_settings()
             discord_docs = resolve_discord_url(
                 target,
+                settings=discord_settings,
                 use_cache=use_cache,
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
             )
+            prepared_docs = []
             for document in discord_docs:
+                day_docs = split_discord_document_by_utc_day(
+                    document, settings=discord_settings
+                )
+                for day_doc in day_docs:
+                    rendered = render_discord_document_with_metadata(
+                        day_doc,
+                        settings=discord_settings,
+                        source_url=target,
+                        include_message_bounds=False,
+                    )
+                    prepared_docs.append(
+                        with_discord_document_rendered(day_doc, rendered=rendered)
+                    )
+            for document in prepared_docs:
                 file_references.append(
                     DiscordReference(
                         target,

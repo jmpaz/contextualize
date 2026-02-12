@@ -20,6 +20,8 @@ from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_channel_url, is_arena_url
 from ..references.discord import (
     build_discord_settings,
+    discord_document_timestamps,
+    render_discord_document_with_metadata,
     discord_overrides_cache_key,
     discord_settings_cache_key,
     is_discord_url,
@@ -27,6 +29,7 @@ from ..references.discord import (
     parse_discord_url,
     parse_discord_config_mapping,
     resolve_discord_url,
+    split_discord_document_by_utc_day,
 )
 from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..references.helpers import (
@@ -1940,9 +1943,109 @@ def _resolve_arena_items(
 
 
 def _sanitize_discord_segment(value: str, fallback: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip().lower())
     cleaned = cleaned.strip("-._")
     return cleaned or fallback
+
+
+def _discord_scope_parts(
+    documents: list[Any],
+    *,
+    alias: Any | None,
+    ext: str,
+) -> dict[int, list[str]]:
+    alias_prefix: str | None = None
+    if isinstance(alias, str) and alias.strip():
+        alias_raw = alias.strip()
+        if alias_raw.endswith(ext):
+            alias_raw = alias_raw[: -len(ext)]
+        alias_prefix = _sanitize_discord_segment(alias_raw, "discord")
+
+    channel_index = next(
+        (idx for idx, document in enumerate(documents) if document.kind == "channel"),
+        None,
+    )
+    channel_doc = documents[channel_index] if channel_index is not None else None
+    channel_slug = (
+        _sanitize_discord_segment(
+            str(channel_doc.channel_name or channel_doc.channel_id),
+            "channel",
+        )
+        if channel_doc is not None
+        else None
+    )
+
+    candidates: list[dict[str, Any]] = []
+    for index, document in enumerate(documents):
+        if channel_doc is not None and index == channel_index:
+            parts = [channel_slug or "channel"]
+        elif (
+            channel_doc is not None
+            and document.thread_id
+            and document.parent_channel_id == channel_doc.channel_id
+        ):
+            parts = [
+                channel_slug or "channel",
+                _sanitize_discord_segment(
+                    str(document.thread_name or document.thread_id),
+                    "thread",
+                ),
+            ]
+        elif document.thread_id:
+            parts = [
+                _sanitize_discord_segment(
+                    str(document.thread_name or document.thread_id),
+                    "thread",
+                )
+            ]
+        else:
+            parts = [
+                _sanitize_discord_segment(
+                    str(document.channel_name or document.channel_id),
+                    "channel",
+                )
+            ]
+
+        if alias_prefix:
+            parts = [alias_prefix, *parts]
+
+        candidates.append(
+            {
+                "index": index,
+                "parts": parts,
+                "fallback_id": str(document.thread_id or document.channel_id or index),
+            }
+        )
+
+    counts: dict[tuple[tuple[str, ...], str], int] = {}
+    for candidate in candidates:
+        parent = tuple(candidate["parts"][:-1])
+        slug = candidate["parts"][-1]
+        key = (parent, slug)
+        counts[key] = counts.get(key, 0) + 1
+
+    used: dict[tuple[str, ...], set[str]] = {}
+    resolved: dict[int, list[str]] = {}
+    for candidate in candidates:
+        base_parts = list(candidate["parts"])
+        parent = tuple(base_parts[:-1])
+        slug = base_parts[-1]
+        key = (parent, slug)
+        if counts.get(key, 0) > 1:
+            slug = _sanitize_discord_segment(
+                f"{slug}-{candidate['fallback_id']}",
+                slug,
+            )
+        parent_used = used.setdefault(parent, set())
+        chosen = slug
+        counter = 2
+        while chosen in parent_used:
+            chosen = f"{slug}__{counter}"
+            counter += 1
+        parent_used.add(chosen)
+        resolved[int(candidate["index"])] = [*base_parts[:-1], chosen]
+
+    return resolved
 
 
 def _resolve_discord_items(
@@ -1980,70 +2083,54 @@ def _resolve_discord_items(
     target_message_id = (
         parsed.get("message_id") if parsed and parsed.get("kind") == "message" else None
     )
+    scope_paths = _discord_scope_parts(documents, alias=alias, ext=ext)
 
-    if alias and isinstance(alias, str):
-        alias_name = alias
-    else:
-        if parsed:
-            alias_name = f"discord-{parsed['guild_id']}-{parsed['channel_id']}"
-        else:
-            alias_name = "discord"
-    safe_root = _sanitize_discord_segment(alias_name, "discord")
-    multi = len(documents) > 1
+    for index, document in enumerate(documents):
+        day_documents = split_discord_document_by_utc_day(document, settings=settings)
+        scope_parts = scope_paths.get(index) or ["discord"]
+        scope_path = "/".join(scope_parts)
 
-    for index, document in enumerate(documents, 1):
-        if multi:
-            if document.kind == "thread" and document.thread_id:
-                stem = f"thread-{document.thread_id}"
-            else:
-                stem = f"{document.kind}-{index}"
-            context_subpath = (
-                f"{safe_root}/{_sanitize_discord_segment(stem, 'item')}{ext}"
+        for day_document in day_documents:
+            source_created, source_modified = discord_document_timestamps(day_document)
+            date_utc = source_created[:10] if source_created else None
+            day_slug = date_utc or "undated"
+            context_subpath = f"{scope_path}/{day_slug}{ext}"
+
+            source_path_parts = [day_document.guild_id, day_document.channel_id]
+            if day_document.thread_id:
+                source_path_parts.append(day_document.thread_id)
+            if target_message_id:
+                source_path_parts.append(f"message-{target_message_id}")
+            source_path_parts.append(f"day-{day_slug}")
+            source_path = "/".join(source_path_parts)
+
+            content = render_discord_document_with_metadata(
+                day_document,
+                settings=settings,
+                source_url=url,
             )
-        else:
-            if alias and isinstance(alias, str):
-                context_subpath = alias if alias.endswith(ext) else f"{alias}{ext}"
-            elif document.kind == "thread" and document.thread_id:
-                context_subpath = f"{safe_root}/thread-{document.thread_id}{ext}"
-            else:
-                context_subpath = f"{safe_root}/{document.kind}{ext}"
 
-        source_path_parts = [document.guild_id, document.channel_id]
-        if document.thread_id:
-            source_path_parts.append(document.thread_id)
-        if target_message_id:
-            source_path_parts.append(f"message-{target_message_id}")
-        source_path = "/".join(source_path_parts)
+            scope_id = day_document.thread_id or day_document.channel_id
+            depth = 1 if day_document.thread_id else 0
 
-        timestamps = [
-            message.get("timestamp")
-            for message in document.messages
-            if isinstance(message, dict) and isinstance(message.get("timestamp"), str)
-        ]
-        source_created = min(timestamps) if timestamps else None
-        source_modified = max(timestamps) if timestamps else None
-
-        scope_id = document.thread_id or document.channel_id
-        depth = 1 if document.thread_id else 0
-
-        items.append(
-            ResolvedItem(
-                source_type="discord",
-                source_ref="discord.com",
-                source_rev=None,
-                source_path=source_path,
-                context_subpath=context_subpath,
-                content=document.rendered,
-                manifest_spec=url,
-                alias=alias if isinstance(alias, str) else None,
-                source_created=source_created,
-                source_modified=source_modified,
-                discord_kind=document.kind,
-                discord_scope_id=scope_id,
-                discord_depth=depth,
-                discord_settings_key=settings_key,
+            items.append(
+                ResolvedItem(
+                    source_type="discord",
+                    source_ref="discord.com",
+                    source_rev=None,
+                    source_path=source_path,
+                    context_subpath=context_subpath,
+                    content=content,
+                    manifest_spec=url,
+                    alias=alias if isinstance(alias, str) else None,
+                    source_created=source_created,
+                    source_modified=source_modified,
+                    discord_kind=day_document.kind,
+                    discord_scope_id=scope_id,
+                    discord_depth=depth,
+                    discord_settings_key=settings_key,
+                )
             )
-        )
 
     return items
 

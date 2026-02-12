@@ -26,7 +26,10 @@ from ..references.discord import (
     DiscordReference,
     build_discord_settings,
     is_discord_url,
+    render_discord_document_with_metadata,
     resolve_discord_url,
+    split_discord_document_by_utc_day,
+    with_discord_document_rendered,
 )
 from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
 from ..references.youtube import is_youtube_url
@@ -482,29 +485,43 @@ def _wrapped_discord_references(
     trace_items: list[tuple[str, str, int]] = []
 
     for document in documents:
-        discord_ref = DiscordReference(
-            url,
-            document=document,
-            format="raw",
-            inject=inject,
-            depth=depth,
-        )
-        label = filename or discord_ref.get_label()
-        if label_suffix:
-            label = f"{label} {label_suffix}"
-        wrapped = wrap_text(discord_ref.output, wrap or "md", label)
-        simple_ref = _SimpleReference(
-            wrapped,
-            path=discord_ref.path,
-            trace_path=discord_ref.trace_path,
-            content=discord_ref.file_content,
-        )
-        refs.append(simple_ref)
-        trace_inputs.append(simple_ref)
+        day_documents = split_discord_document_by_utc_day(document, settings=settings)
+        prepared_documents = [
+            with_discord_document_rendered(
+                day_document,
+                rendered=render_discord_document_with_metadata(
+                    day_document,
+                    settings=settings,
+                    source_url=url,
+                    include_message_bounds=False,
+                ),
+            )
+            for day_document in day_documents
+        ]
+        for prepared_document in prepared_documents:
+            discord_ref = DiscordReference(
+                url,
+                document=prepared_document,
+                format="raw",
+                inject=inject,
+                depth=depth,
+            )
+            label = filename or discord_ref.get_label()
+            if label_suffix:
+                label = f"{label} {label_suffix}"
+            wrapped = wrap_text(discord_ref.output, wrap or "md", label)
+            simple_ref = _SimpleReference(
+                wrapped,
+                path=discord_ref.path,
+                trace_path=discord_ref.trace_path,
+                content=discord_ref.file_content,
+            )
+            refs.append(simple_ref)
+            trace_inputs.append(simple_ref)
 
-        if document.thread_id and document.parent_channel_id:
-            parent_trace = f"discord/{document.guild_id}/{document.parent_channel_id}"
-            trace_items.append((discord_ref.trace_path, parent_trace, 1))
+            if prepared_document.thread_id and prepared_document.parent_channel_id:
+                parent_trace = f"discord/{prepared_document.guild_id}/{prepared_document.parent_channel_id}"
+                trace_items.append((discord_ref.trace_path, parent_trace, 1))
 
     return refs, trace_inputs, trace_items
 
