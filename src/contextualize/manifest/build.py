@@ -23,6 +23,7 @@ from .manifest import coerce_file_spec, component_selectors
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_url
 from ..references.discord import (
+    DiscordResolutionError,
     DiscordReference,
     build_discord_settings,
     is_discord_url,
@@ -471,9 +472,9 @@ def _wrapped_discord_references(
             refresh_cache=refresh_cache,
         )
     except ValueError as exc:
-        if str(exc).startswith("Discord resource not found:"):
+        if isinstance(exc, DiscordResolutionError) and exc.is_skippable:
             print(
-                f"Warning: skipping unavailable Discord URL: {url} ({exc})",
+                f"Warning: skipping Discord URL: {url} ({exc})",
                 file=sys.stderr,
                 flush=True,
             )

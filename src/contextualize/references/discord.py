@@ -45,6 +45,30 @@ _MEDIA_DOWNLOAD_HEADERS = {
     "Accept": "image/*,video/*,audio/*,application/pdf,application/octet-stream",
 }
 
+_SKIPPABLE_DISCORD_RESOLUTION_REASONS = frozenset(
+    {"not_found", "unauthorized", "forbidden", "dm_scope"}
+)
+
+
+class DiscordResolutionError(ValueError):
+    def __init__(self, reason: str, *, path: str | None = None):
+        self.reason = reason
+        self.path = path
+        message_by_reason = {
+            "not_found": "Discord resource not found",
+            "unauthorized": "Discord API authorization failed",
+            "forbidden": "Discord API forbidden (guild-only mode or insufficient permissions)",
+            "dm_scope": "Discord DM URLs are out of scope in guild-only mode",
+        }
+        message = message_by_reason.get(reason, "Discord resolution failed")
+        if path:
+            message = f"{message}: {path}"
+        super().__init__(message)
+
+    @property
+    def is_skippable(self) -> bool:
+        return self.reason in _SKIPPABLE_DISCORD_RESOLUTION_REASONS
+
 
 def _log(message: str) -> None:
     from ..runtime import get_verbose_logging
@@ -962,12 +986,11 @@ def _api_get(
             continue
 
         if response.status_code == 404:
-            raise ValueError(f"Discord resource not found: {path}")
+            raise DiscordResolutionError("not_found", path=path)
         if response.status_code in {401, 403}:
-            message = "Discord API authorization failed"
             if response.status_code == 403:
-                message = "Discord API forbidden (guild-only mode or insufficient permissions)"
-            raise ValueError(f"{message}: {path}")
+                raise DiscordResolutionError("forbidden", path=path)
+            raise DiscordResolutionError("unauthorized", path=path)
 
         if response.status_code in transient_statuses and attempt < max_attempts:
             wait = _retry_after_seconds(response, attempt)
@@ -2465,7 +2488,7 @@ def _document_trace_path(
 
 def _validate_guild_scope(guild_id: str) -> None:
     if guild_id == "@me":
-        raise ValueError("Discord DM URLs are out of scope in guild-only mode")
+        raise DiscordResolutionError("dm_scope")
 
 
 def _resolve_message_url(

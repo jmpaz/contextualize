@@ -19,15 +19,16 @@ from ..git.rev import get_repo_root, read_gitignore_patterns
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_channel_url, is_arena_url
 from ..references.discord import (
+    DiscordResolutionError,
     build_discord_settings,
     discord_document_timestamps,
-    render_discord_document_with_metadata,
     discord_overrides_cache_key,
     discord_settings_cache_key,
     is_discord_url,
     merge_discord_overrides,
     parse_discord_url,
     parse_discord_config_mapping,
+    render_discord_document_with_metadata,
     resolve_discord_url,
     split_discord_document_by_utc_day,
 )
@@ -2068,9 +2069,9 @@ def _resolve_discord_items(
             refresh_cache=refresh_cache,
         )
     except ValueError as exc:
-        if str(exc).startswith("Discord resource not found:"):
+        if isinstance(exc, DiscordResolutionError) and exc.is_skippable:
             print(
-                f"Warning: skipping unavailable Discord URL: {url} ({exc})",
+                f"Warning: skipping Discord URL: {url} ({exc})",
                 file=sys.stderr,
                 flush=True,
             )

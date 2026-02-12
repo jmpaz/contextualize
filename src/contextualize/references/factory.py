@@ -22,6 +22,7 @@ from .helpers import (
 from .url import URLReference
 from .arena import ArenaReference, is_arena_channel_url, is_arena_block_url
 from .discord import (
+    DiscordResolutionError,
     DiscordReference,
     build_discord_settings,
     is_discord_url,
@@ -211,13 +212,23 @@ def create_file_references(
 
         if is_discord_url(target):
             discord_settings = build_discord_settings()
-            discord_docs = resolve_discord_url(
-                target,
-                settings=discord_settings,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-            )
+            try:
+                discord_docs = resolve_discord_url(
+                    target,
+                    settings=discord_settings,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                )
+            except ValueError as exc:
+                if isinstance(exc, DiscordResolutionError) and exc.is_skippable:
+                    print(
+                        f"Warning: skipping Discord URL: {target} ({exc})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    continue
+                raise
             prepared_docs = []
             for document in discord_docs:
                 day_docs = split_discord_document_by_utc_day(
