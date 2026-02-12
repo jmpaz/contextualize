@@ -4,7 +4,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 from functools import lru_cache
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -527,34 +526,20 @@ _DOWNLOAD_HEADERS = {
 def _download_to_temp(
     url: str, suffix: str = "", *, media_cache_identity: str | None = None
 ) -> Path | None:
-    import requests
     from ..cache.arena import get_cached_media_bytes, store_media_bytes
+    from .media import download_cached_media_to_temp
     from ..runtime import get_refresh_cache
 
     cache_identity = media_cache_identity or url
-    cached = None if get_refresh_cache() else get_cached_media_bytes(cache_identity)
-    if cached:
-        fd, path = tempfile.mkstemp(suffix=suffix)
-        try:
-            os.write(fd, cached)
-        finally:
-            os.close(fd)
-        return Path(path)
-
-    try:
-        resp = requests.get(url, headers=_DOWNLOAD_HEADERS, timeout=30)
-        resp.raise_for_status()
-    except requests.exceptions.RequestException:
-        return None
-    if not resp.content:
-        return None
-    store_media_bytes(cache_identity, resp.content)
-    fd, path = tempfile.mkstemp(suffix=suffix)
-    try:
-        os.write(fd, resp.content)
-    finally:
-        os.close(fd)
-    return Path(path)
+    return download_cached_media_to_temp(
+        url,
+        suffix=suffix,
+        headers=_DOWNLOAD_HEADERS,
+        cache_identity=cache_identity,
+        get_cached_media_bytes=get_cached_media_bytes,
+        store_media_bytes=store_media_bytes,
+        refresh_cache=get_refresh_cache(),
+    )
 
 
 def _render_block_binary(

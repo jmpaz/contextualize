@@ -40,6 +40,10 @@ _MEDIA_AUDIO_SUFFIXES = frozenset(
     {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".aiff"}
 )
 _MARKDOWN_ESCAPED_PUNCT_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|])")
+_MEDIA_DOWNLOAD_HEADERS = {
+    "User-Agent": "contextualize/discord",
+    "Accept": "image/*,video/*,audio/*,application/pdf,application/octet-stream",
+}
 
 
 def _log(message: str) -> None:
@@ -221,6 +225,82 @@ def _parse_media_kind(*, filename: str, content_type: str) -> str:
     if suffix in _MEDIA_AUDIO_SUFFIXES:
         return "audio"
     return "file"
+
+
+def _suffix_from_media_kind(kind: str) -> str:
+    if kind == "image":
+        return ".jpg"
+    if kind == "video":
+        return ".mp4"
+    if kind == "audio":
+        return ".wav"
+    return ".bin"
+
+
+def _suffix_from_content_type(content_type: str) -> str | None:
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    if not ctype:
+        return None
+    if ctype.startswith("image/"):
+        subtype = ctype.removeprefix("image/")
+        if subtype in {"jpeg", "pjpeg"}:
+            return ".jpg"
+        if subtype:
+            return f".{subtype}"
+    if ctype.startswith("video/"):
+        subtype = ctype.removeprefix("video/")
+        return f".{subtype}" if subtype else ".mp4"
+    if ctype.startswith("audio/"):
+        subtype = ctype.removeprefix("audio/")
+        return f".{subtype}" if subtype else ".wav"
+    if ctype == "application/pdf":
+        return ".pdf"
+    return None
+
+
+def _media_suffix(
+    *,
+    filename: str,
+    content_type: str,
+    kind: str,
+    url: str | None = None,
+) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix:
+        return suffix
+    if url:
+        url_suffix = Path(url.split("?", 1)[0]).suffix.lower()
+        if url_suffix:
+            return url_suffix
+    content_type_suffix = _suffix_from_content_type(content_type)
+    if content_type_suffix:
+        return content_type_suffix
+    return _suffix_from_media_kind(kind)
+
+
+def _attachment_media_cache_identity(
+    *,
+    message_id: str | None,
+    attachment_id: str | None,
+    filename: str,
+    url: str,
+) -> str:
+    if not message_id:
+        return url
+    attachment_key = attachment_id or filename or "attachment"
+    return f"discord:message:{message_id}:attachment:{attachment_key}:{url}"
+
+
+def _embed_media_cache_identity(
+    *,
+    message_id: str | None,
+    embed_index: int,
+    role: str,
+    url: str,
+) -> str:
+    if not message_id:
+        return url
+    return f"discord:message:{message_id}:embed:{embed_index}:{role}:{url}"
 
 
 def _normalize_datetime(value: datetime | None) -> datetime | None:
@@ -1070,31 +1150,53 @@ def _media_prompt_append_from_embed(embed: dict[str, Any]) -> str | None:
     return f"\n\nEmbed context:\n```text\n{blob}\n```"
 
 
-def _describe_remote_media(url: str, *, prompt_append: str | None = None) -> str | None:
+def _describe_remote_media(
+    url: str,
+    *,
+    prompt_append: str | None = None,
+    media_cache_identity: str | None = None,
+    suffix: str = "",
+    send_label: str | None = None,
+) -> str | None:
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):
         return None
 
-    import requests
+    from ..cache.discord import get_cached_media_bytes, store_media_bytes
+    from ..render.markitdown import MarkItDownConversionError, convert_path_to_markdown
+    from ..runtime import get_refresh_cache, get_refresh_images
+    from .media import download_cached_media_to_temp
 
-    from ..render.markitdown import (
-        MarkItDownConversionError,
-        convert_response_to_markdown,
+    cache_identity = media_cache_identity or url
+    cache_label = send_label or cache_identity
+    tmp = download_cached_media_to_temp(
+        url,
+        suffix=suffix,
+        headers=_MEDIA_DOWNLOAD_HEADERS,
+        cache_identity=cache_identity,
+        get_cached_media_bytes=get_cached_media_bytes,
+        store_media_bytes=store_media_bytes,
+        refresh_cache=get_refresh_cache(),
+        on_cache_hit=lambda _identity: _log(
+            f"  discord media cache hit: {cache_label}"
+        ),
+        on_cache_miss=lambda _identity: _log(
+            f"  discord media cache miss: {cache_label}"
+        ),
     )
-
-    headers = {
-        "User-Agent": "contextualize/discord",
-        "Accept": "image/*,video/*,audio/*,application/pdf,application/octet-stream",
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-    except requests.exceptions.RequestException:
+    if tmp is None:
         return None
 
     try:
-        result = convert_response_to_markdown(response, prompt_append=prompt_append)
+        refresh_images = get_refresh_images()
+        result = convert_path_to_markdown(
+            str(tmp),
+            refresh_images=refresh_images,
+            prompt_append=prompt_append,
+        )
     except MarkItDownConversionError:
         return None
+    finally:
+        tmp.unlink(missing_ok=True)
 
     markdown = (result.markdown or "").strip()
     if not markdown:
@@ -1109,6 +1211,8 @@ def _normalize_attachment_nodes(
     include_embed_media_descriptions: bool,
 ) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
+    message_id_raw = message.get("id")
+    message_id = str(message_id_raw) if message_id_raw is not None else None
 
     attachments = (
         message.get("attachments")
@@ -1121,10 +1225,11 @@ def _normalize_attachment_nodes(
         filename = str(attachment.get("filename") or "")
         content_type = str(attachment.get("content_type") or "")
         kind = _parse_media_kind(filename=filename, content_type=content_type)
+        attachment_url = str(attachment.get("url") or "")
         node: dict[str, Any] = {
             "type": kind,
             "filename": filename,
-            "url": attachment.get("url"),
+            "url": attachment_url or None,
             "content_type": content_type or None,
             "size": attachment.get("size"),
             "width": attachment.get("width"),
@@ -1132,14 +1237,36 @@ def _normalize_attachment_nodes(
             "description": attachment.get("description"),
         }
         if include_media_descriptions and kind in {"image", "video", "audio", "file"}:
-            media_desc = _describe_remote_media(str(attachment.get("url") or ""))
+            attachment_id_raw = attachment.get("id")
+            attachment_id = (
+                str(attachment_id_raw) if attachment_id_raw is not None else None
+            )
+            media_cache_identity = _attachment_media_cache_identity(
+                message_id=message_id,
+                attachment_id=attachment_id,
+                filename=filename,
+                url=attachment_url,
+            )
+            media_desc = _describe_remote_media(
+                attachment_url,
+                media_cache_identity=media_cache_identity,
+                suffix=_media_suffix(
+                    filename=filename,
+                    content_type=content_type,
+                    kind=kind,
+                    url=attachment_url,
+                ),
+                send_label=(
+                    f"msg:{message_id or 'unknown'}:attachment:{attachment_id or filename or kind}"
+                ),
+            )
             if media_desc:
                 node["media_description"] = media_desc
         cleaned = {k: v for k, v in node.items() if v not in (None, "", [])}
         nodes.append(cleaned)
 
     embeds = message.get("embeds") if isinstance(message.get("embeds"), list) else []
-    for embed in embeds:
+    for embed_index, embed in enumerate(embeds):
         if not isinstance(embed, dict):
             continue
         embed_node: dict[str, Any] = {
@@ -1151,7 +1278,7 @@ def _normalize_attachment_nodes(
             "timestamp": embed.get("timestamp"),
         }
         media_entries: list[dict[str, Any]] = []
-        prompt_append = _media_prompt_append_from_embed(embed)
+        embed_prompt_append = _media_prompt_append_from_embed(embed)
 
         for key, media_kind in (
             ("image", "image"),
@@ -1172,8 +1299,25 @@ def _normalize_attachment_nodes(
                 "height": media_obj.get("height"),
             }
             if include_media_descriptions and include_embed_media_descriptions:
+                media_cache_identity = _embed_media_cache_identity(
+                    message_id=message_id,
+                    embed_index=embed_index,
+                    role=key,
+                    url=media_url,
+                )
                 media_desc = _describe_remote_media(
-                    media_url, prompt_append=prompt_append
+                    media_url,
+                    prompt_append=embed_prompt_append,
+                    media_cache_identity=media_cache_identity,
+                    suffix=_media_suffix(
+                        filename="",
+                        content_type="",
+                        kind=media_kind,
+                        url=media_url,
+                    ),
+                    send_label=(
+                        f"msg:{message_id or 'unknown'}:embed:{embed_index}:{key}"
+                    ),
                 )
                 if media_desc:
                     media_entry["media_description"] = media_desc

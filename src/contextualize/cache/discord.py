@@ -8,6 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .media import (
+    get_cached_media_bytes as _get_cached_media_bytes,
+    store_media_bytes as _store_media_bytes,
+)
+
 DISCORD_CACHE_ROOT = Path(
     os.environ.get(
         "CONTEXTUALIZE_DISCORD_CACHE",
@@ -16,6 +21,7 @@ DISCORD_CACHE_ROOT = Path(
 )
 API_CACHE_ROOT = DISCORD_CACHE_ROOT / "api"
 RENDER_CACHE_ROOT = DISCORD_CACHE_ROOT / "render"
+MEDIA_CACHE_ROOT = DISCORD_CACHE_ROOT / "media"
 DEFAULT_TTL = timedelta(days=3)
 CACHE_VERSION = 1
 
@@ -114,3 +120,11 @@ def store_rendered(identity: str, content: str) -> None:
         size_bytes=len(content.encode("utf-8")),
     )
     meta_path.write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
+
+
+def get_cached_media_bytes(identity: str) -> bytes | None:
+    return _get_cached_media_bytes(MEDIA_CACHE_ROOT, identity)
+
+
+def store_media_bytes(identity: str, content: bytes) -> None:
+    _store_media_bytes(MEDIA_CACHE_ROOT, identity, content)

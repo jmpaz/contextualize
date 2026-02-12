@@ -7,6 +7,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .media import (
+    get_cached_media_bytes as _get_cached_media_bytes,
+    store_media_bytes as _store_media_bytes,
+)
+
 ARENA_CACHE_ROOT = Path(
     os.environ.get(
         "CONTEXTUALIZE_ARENA_CACHE",
@@ -173,25 +178,9 @@ def store_block_comments(block_id: int, rendered: str) -> None:
     path.write_text(rendered, encoding="utf-8")
 
 
-def _media_cache_key(identity: str) -> str:
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
-
-
 def get_cached_media_bytes(identity: str) -> bytes | None:
-    key = _media_cache_key(identity)
-    path = MEDIA_CACHE_ROOT / f"{key}.bin"
-    if not path.exists():
-        return None
-    try:
-        return path.read_bytes()
-    except OSError:
-        return None
+    return _get_cached_media_bytes(MEDIA_CACHE_ROOT, identity)
 
 
 def store_media_bytes(identity: str, content: bytes) -> None:
-    if not content:
-        return
-    MEDIA_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    key = _media_cache_key(identity)
-    path = MEDIA_CACHE_ROOT / f"{key}.bin"
-    path.write_bytes(content)
+    _store_media_bytes(MEDIA_CACHE_ROOT, identity, content)
