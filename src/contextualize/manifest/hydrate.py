@@ -14,7 +14,8 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from ..concurrency import run_indexed_tasks_fail_fast
-from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
+from ..git.cache import ensure_repo, expand_git_paths
+from ..git.target import parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_channel_url, is_arena_url

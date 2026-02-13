@@ -4,7 +4,8 @@ import os
 import re
 from typing import Any, Optional
 
-from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
+from ..git.cache import ensure_repo, expand_git_paths
+from ..git.target import parse_git_target
 from ..references import URLReference, create_file_references
 from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
 from ..utils import count_tokens, wrap_text

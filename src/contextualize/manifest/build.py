@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional
 from threading import Lock
 
 from ..concurrency import run_indexed_tasks_fail_fast
-from ..git.cache import ensure_repo, expand_git_paths, parse_git_target
+from ..git.cache import ensure_repo, expand_git_paths
+from ..git.target import parse_git_target
 from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..render.links import add_markdown_link_refs
 from .hydrate import (

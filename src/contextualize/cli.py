@@ -1619,7 +1619,8 @@ def cat_cmd(
         create_file_references,
         split_path_and_symbols,
     )
-    from .git.cache import ensure_repo, expand_git_paths, parse_git_target
+    from .git.cache import ensure_repo, expand_git_paths
+    from .git.target import parse_git_target
 
     injection_trace_items = [] if inject and trace else None
     ignored_files = []
@@ -2039,7 +2040,8 @@ def map_cmd(
         generate_repo_map_data,
         generate_repo_map_data_from_git,
     )
-    from .git.cache import ensure_repo, expand_git_paths, parse_git_target
+    from .git.cache import ensure_repo, expand_git_paths
+    from .git.target import parse_git_target
 
     token_target = ctx.obj.get("token_target", "cl100k_base")
 

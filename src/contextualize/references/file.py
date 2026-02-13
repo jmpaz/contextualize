@@ -130,7 +130,7 @@ class FileReference:
     def get_label(self):
         """Compute the label based on label style."""
         if self._label_style == "relative":
-            from ..git.cache import CACHE_ROOT
+            from ..git.target import CACHE_ROOT
 
             cache_root = os.path.join(CACHE_ROOT, "")
             if self.path.startswith(cache_root):

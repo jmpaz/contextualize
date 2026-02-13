@@ -8,7 +8,7 @@ from typing import Protocol, TYPE_CHECKING, runtime_checkable
 from urllib.parse import unquote, urlparse
 
 if TYPE_CHECKING:
-    from ..git.cache import GitTarget
+    from ..git.target import GitTarget
 
 
 @runtime_checkable
@@ -61,7 +61,7 @@ def looks_like_windows_drive(spec: str) -> bool:
 def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
     if is_http_url(spec) or looks_like_windows_drive(spec):
         return spec, []
-    from ..git.cache import parse_git_target
+    from ..git.target import parse_git_target
 
     if parse_git_target(spec):
         return spec, []
@@ -69,7 +69,7 @@ def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
 
 
 def parse_git_url_target(url: str) -> GitTarget | None:
-    from ..git.cache import parse_git_target
+    from ..git.target import parse_git_target
 
     return parse_git_target(url)
 
