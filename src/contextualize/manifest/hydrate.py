@@ -371,9 +371,6 @@ def build_hydration_plan_data(
     has_arena_channels = _manifest_has_arena_channels(components)
     has_discord_channels = _manifest_has_discord_channels(components)
     use_external_root = context_cfg["path_strategy"] == "on-disk" and has_local_sources
-    flatten_groups: set[tuple[str, ...]] = set()
-    if context_cfg["path_strategy"] == "by-component":
-        flatten_groups = _find_flatten_groups(components)
 
     used_paths: set[str] = set()
     identity_paths: dict[tuple[Any, ...], Path] = {}
@@ -427,7 +424,6 @@ def build_hydration_plan_data(
             comp.get(GROUP_PATH_KEY),
             comp.get(GROUP_BASE_KEY),
             context_cfg["path_strategy"],
-            flatten_groups=flatten_groups,
         )
         component_arena_overrides = _parse_arena_config_mapping(
             comp.get("arena"), prefix=f"component '{comp_name}'.arena"
@@ -1284,91 +1280,6 @@ def _find_global_subpath_prefix(
             except (FileNotFoundError, ValueError):
                 pass
     return _find_common_subpath_prefix(all_subpaths)
-
-
-def _find_flatten_groups(components: list[dict[str, Any]]) -> set[tuple[str, ...]]:
-    grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}
-    for comp in components:
-        group_path = comp.get(GROUP_PATH_KEY)
-        if not group_path:
-            continue
-        grouped.setdefault(tuple(group_path), []).append(comp)
-
-    flatten: set[tuple[str, ...]] = set()
-    for group_path, comps in grouped.items():
-        if len(comps) < 2:
-            continue
-        shared_root: str | None = None
-        for comp in comps:
-            root = _component_external_root(comp)
-            if root is None:
-                shared_root = None
-                break
-            if shared_root is None:
-                shared_root = root
-            elif shared_root != root:
-                shared_root = None
-                break
-        if shared_root is not None:
-            flatten.add(group_path)
-    return flatten
-
-
-def _component_external_root(comp: dict[str, Any]) -> str | None:
-    if comp.get("text") is not None or comp.get("prefix") is not None:
-        return None
-    if comp.get("suffix") is not None:
-        return None
-    files = comp.get("files") or []
-    repos = comp.get("repos") or []
-    all_specs: list[tuple[Any, bool]] = [
-        *((s, False) for s in files),
-        *((s, True) for s, _ in _expand_repo_specs(repos)),
-    ]
-    if not all_specs:
-        return None
-    root: str | None = None
-    for file_spec, force_git in all_specs:
-        raw_spec, _ = coerce_file_spec(file_spec)
-        key = _external_root_key(raw_spec, force_git=force_git)
-        if key is None:
-            return None
-        if root is None:
-            root = key
-        elif root != key:
-            return None
-    return root
-
-
-def _external_root_key(raw_spec: str, *, force_git: bool = False) -> str | None:
-    spec = os.path.expanduser(raw_spec)
-    if is_http_url(spec):
-        opts = parse_target_spec(spec)
-        url = opts.get("target", spec)
-        if force_git:
-            tgt = parse_git_target(url)
-        else:
-            tgt = parse_git_url_target(url)
-        if tgt:
-            rev = tgt.rev or ""
-            return f"git:{tgt.repo_url}@{rev}"
-        if force_git:
-            return None
-        return f"http:{_url_origin(url)}"
-    tgt = parse_git_target(spec)
-    if tgt:
-        rev = tgt.rev or ""
-        return f"git:{tgt.repo_url}@{rev}"
-    return None
-
-
-def _url_origin(url: str) -> str:
-    parsed = urlparse(url)
-    scheme = (parsed.scheme or "https").lower()
-    netloc = parsed.netloc or parsed.hostname or ""
-    if netloc:
-        return f"{scheme}://{netloc}"
-    return url
 
 
 def _manifest_has_local_sources(components: list[dict[str, Any]]) -> bool:
@@ -2228,16 +2139,11 @@ def _build_component_root(
     group_path: Any | None,
     base_name: Any | None,
     path_strategy: str,
-    *,
-    flatten_groups: set[tuple[str, ...]] | None = None,
 ) -> Path | None:
     if path_strategy != "by-component":
         return None
     if group_path:
         parts = [group_path] if isinstance(group_path, str) else list(group_path)
-        group_key = tuple(parts)
-        if flatten_groups and group_key in flatten_groups:
-            return Path(*parts)
         name = base_name if isinstance(base_name, str) and base_name else component_name
         return Path(*parts, name)
     return Path(component_name)
