@@ -570,7 +570,7 @@ def _render_block_binary(
         from ..runtime import get_refresh_images
 
         label = send_label or "arena-media"
-        _log(f"  sending to model: {label} ({url})")
+        _log(f"  processing media: {label} ({url})")
         refresh_images = get_refresh_images()
         result = convert_path_to_markdown(str(tmp), refresh_images=refresh_images)
         return result.markdown
@@ -983,6 +983,19 @@ def _render_block(
             core_output = fallback
 
     elif block_type == "Link":
+        refresh_link = get_refresh_images() or get_refresh_media()
+        if block_id and updated_at and not refresh_link:
+            cached = get_cached_block_render(
+                block_id, updated_at, render_variant=render_variant
+            )
+            if cached is not None:
+                core_output = cached
+        if core_output is not None:
+            comments_section = _block_comments_output(
+                block, include_comments=bool(include_comments)
+            )
+            return _append_comments_section(core_output, comments_section)
+
         source = block.get("source") or {}
         source_url = source.get("url") or ""
         content = _extract_markdown_like_text(block.get("content") or "")
@@ -1002,6 +1015,13 @@ def _render_block(
         core_output = _format_block_output(
             title, description, "\n\n".join(link_parts), date=date
         )
+        if core_output and block_id and updated_at:
+            store_block_render(
+                block_id,
+                updated_at,
+                core_output,
+                render_variant=render_variant,
+            )
 
     elif block_type == "Attachment":
         attachment = block.get("attachment") or {}
