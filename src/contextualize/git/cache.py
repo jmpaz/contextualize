@@ -125,8 +125,38 @@ def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
                 "",
             )
         )
+        repo_url, rev, path = _normalize_github_web_target(repo_url, rev, path)
 
     return repo_url, rev, path
+
+
+def _normalize_github_web_target(
+    repo_url: str, rev: str | None, path: str | None
+) -> tuple[str, str | None, str | None]:
+    parsed = urlparse(repo_url)
+    host = (parsed.hostname or "").lower()
+    if host not in {"github.com", "www.github.com"}:
+        return repo_url, rev, path
+
+    segments = [part for part in parsed.path.split("/") if part]
+    if len(segments) < 4:
+        return repo_url, rev, path
+    if segments[2] not in {"blob", "tree"}:
+        return repo_url, rev, path
+
+    owner, repo = segments[0], segments[1]
+    normalized_repo_url = urlunparse(
+        (parsed.scheme, parsed.netloc, f"/{owner}/{repo}", "", "", "")
+    )
+    if rev and re.fullmatch(r"L\d+(?:-L\d+)?", rev):
+        normalized_rev = segments[3]
+    else:
+        normalized_rev = rev or segments[3]
+    normalized_path = path
+    if normalized_path is None and len(segments) > 4:
+        normalized_path = "/".join(segments[4:])
+
+    return normalized_repo_url, normalized_rev, normalized_path
 
 
 def _is_supported_git_http_url(
