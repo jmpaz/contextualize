@@ -245,7 +245,7 @@ def call_tiktoken(
     else:
         raise ValueError("Must provide an encoding_str or a model_str")
 
-    tokens = encoding.encode(text)
+    tokens = encoding.encode(text, disallowed_special=())
     return {"tokens": tokens, "count": len(tokens), "encoding": encoding.name}
 
 
