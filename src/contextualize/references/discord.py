@@ -403,7 +403,7 @@ def _media_render_cache_identity(
 
 def _resolution_cache_identity(url: str, settings: DiscordSettings) -> str:
     payload = {
-        "v": 1,
+        "v": 2,
         "url": url,
         "settings": discord_settings_cache_key(settings),
     }
@@ -456,6 +456,7 @@ class DiscordSettings:
     around_duration: timedelta | None = None
     include_media_descriptions: bool = True
     include_embed_media_descriptions: bool = True
+    include_file_content: bool = True
     media_mode: str = "describe"
     hard_min_timestamp: datetime | None = None
     hard_max_timestamp: datetime | None = None
@@ -742,6 +743,10 @@ def _discord_settings_from_env() -> DiscordSettings:
         os.environ.get("DISCORD_EMBED_MEDIA_DESC", "1"),
         default=True,
     )
+    include_file_content = _parse_bool(
+        os.environ.get("DISCORD_FILE_CONTENT", "1"),
+        default=True,
+    )
     media_mode = _parse_media_mode(
         os.environ.get("DISCORD_MEDIA_MODE", ""),
         default="describe",
@@ -814,6 +819,7 @@ def _discord_settings_from_env() -> DiscordSettings:
         around_duration=around_duration,
         include_media_descriptions=media_desc,
         include_embed_media_descriptions=embed_media_desc,
+        include_file_content=include_file_content,
         media_mode=media_mode,
         hard_min_timestamp=_normalize_datetime(hard_min_timestamp),
         hard_max_timestamp=_normalize_datetime(hard_max_timestamp),
@@ -865,6 +871,7 @@ def _clamp_settings(settings: DiscordSettings) -> DiscordSettings:
         around_duration=settings.around_duration,
         include_media_descriptions=settings.include_media_descriptions,
         include_embed_media_descriptions=settings.include_embed_media_descriptions,
+        include_file_content=settings.include_file_content,
         media_mode=settings.media_mode,
         hard_min_timestamp=hard_min,
         hard_max_timestamp=hard_max,
@@ -893,6 +900,9 @@ def build_discord_settings(overrides: dict[str, Any] | None = None) -> DiscordSe
             "include_embed_media_descriptions",
             env.include_embed_media_descriptions,
         )
+    )
+    include_file_content = bool(
+        overrides.get("include_file_content", env.include_file_content)
     )
     media_mode = _parse_media_mode(
         str(overrides.get("media_mode", env.media_mode) or ""),
@@ -960,6 +970,7 @@ def build_discord_settings(overrides: dict[str, Any] | None = None) -> DiscordSe
         around_duration=around_duration,
         include_media_descriptions=include_media_descriptions,
         include_embed_media_descriptions=include_embed_media_descriptions,
+        include_file_content=include_file_content,
         media_mode=media_mode,
         hard_min_timestamp=env.hard_min_timestamp,
         hard_max_timestamp=env.hard_max_timestamp,
@@ -1339,19 +1350,26 @@ def _fetch_messages_between(
     start: datetime | None,
     end: datetime | None,
     *,
-    max_messages: int,
+    max_messages: int | None,
     use_cache: bool,
     cache_ttl: timedelta | None,
     refresh_cache: bool,
 ) -> list[dict[str, Any]]:
-    target_cap = max(1, max_messages)
+    if max_messages is not None and max_messages <= 0:
+        return []
     out: list[dict[str, Any]] = []
     before: str | None = None
 
-    while len(out) < target_cap:
+    while True:
+        page_limit = 100
+        if max_messages is not None:
+            remaining = max_messages - len(out)
+            if remaining <= 0:
+                break
+            page_limit = min(100, remaining)
         page = _fetch_messages_page(
             channel_id,
-            limit=min(100, target_cap - len(out)),
+            limit=page_limit,
             before=before,
             after=None,
             around=None,
@@ -1373,10 +1391,10 @@ def _fetch_messages_between(
                 should_stop = True
                 continue
             out.append(message)
-            if len(out) >= target_cap:
+            if max_messages is not None and len(out) >= max_messages:
                 break
 
-        if len(out) >= target_cap:
+        if max_messages is not None and len(out) >= max_messages:
             break
 
         oldest = page[-1]
@@ -1724,6 +1742,7 @@ def _normalize_attachment_nodes(
     *,
     include_media_descriptions: bool,
     include_embed_media_descriptions: bool,
+    include_file_content: bool,
     media_mode: str,
 ) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
@@ -1771,7 +1790,7 @@ def _normalize_attachment_nodes(
                 filename=filename,
                 url=attachment_url,
             )
-            if kind == "file":
+            if kind == "file" and include_file_content:
                 text_content = _extract_utf8_remote_media(
                     attachment_url,
                     media_cache_identity=media_cache_identity,
@@ -1783,7 +1802,8 @@ def _normalize_attachment_nodes(
             has_text_content = isinstance(node.get("text_content"), str) and bool(
                 str(node.get("text_content")).strip()
             )
-            if not (kind == "file" and has_text_content):
+            should_describe = not (kind == "file" and not include_file_content)
+            if should_describe and not (kind == "file" and has_text_content):
                 media_desc = _describe_remote_media(
                     attachment_url,
                     media_cache_identity=media_cache_identity,
@@ -2142,6 +2162,7 @@ def _normalize_message(
     thread_id: str | None,
     include_media_descriptions: bool,
     include_embed_media_descriptions: bool,
+    include_file_content: bool,
     media_mode: str,
     message_lookup: dict[str, dict[str, Any]] | None = None,
     forward_source_lookup: dict[tuple[str, str], str] | None = None,
@@ -2166,6 +2187,7 @@ def _normalize_message(
         message_with_media,
         include_media_descriptions=include_media_descriptions,
         include_embed_media_descriptions=include_embed_media_descriptions,
+        include_file_content=include_file_content,
         media_mode=media_mode,
     )
 
@@ -2215,12 +2237,24 @@ def _is_system_message(message: dict[str, Any]) -> bool:
 
 
 def _filter_messages(
-    messages: list[dict[str, Any]], *, settings: DiscordSettings
+    messages: list[dict[str, Any]],
+    *,
+    settings: DiscordSettings,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[dict[str, Any]]:
     start_message_id = _message_id_to_int(settings.start_message_id)
     end_message_id = _message_id_to_int(settings.end_message_id)
     out: list[dict[str, Any]] = []
     for message in messages:
+        if start is not None or end is not None:
+            ts = _message_datetime(message)
+            if ts is None:
+                continue
+            if start is not None and ts < start:
+                continue
+            if end is not None and ts > end:
+                continue
         if start_message_id is not None or end_message_id is not None:
             message_id = _message_id_to_int(str(message.get("id") or ""))
             if message_id is None:
@@ -2871,14 +2905,26 @@ def _resolve_message_url(
     if target_ts is None:
         raise ValueError(f"Missing timestamp for Discord message {message_id}")
 
+    window_start: datetime | None = None
+    window_end: datetime | None = None
     if _time_window_enabled(settings):
-        _log("  Fetching message context via configured time window")
         start, end = _window_bounds_for_target(target_ts, settings)
+        window_start, window_end = start, end
+        bounded_window = start is not None and end is not None
+        max_messages = None if bounded_window else max(200, settings.channel_limit * 2)
+        if bounded_window:
+            _log(
+                "  Fetching message context via configured bounded time window (channel-limit ignored)"
+            )
+        else:
+            _log(
+                f"  Fetching message context via configured unbounded window (cap={max_messages})"
+            )
         fetched = _fetch_messages_between(
             channel_id,
             start,
             end,
-            max_messages=max(200, settings.channel_limit * 2),
+            max_messages=max_messages,
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
@@ -2911,7 +2957,12 @@ def _resolve_message_url(
         messages = _sort_messages([*previous, target, *following])
 
     _log(f"  Retrieved {len(messages)} context message(s) before filtering")
-    filtered = _filter_messages(messages, settings=settings)
+    filtered = _filter_messages(
+        messages,
+        settings=settings,
+        start=window_start,
+        end=window_end,
+    )
     _log(f"  Kept {len(filtered)} context message(s) after filtering")
 
     thread_id: str | None = None
@@ -2954,6 +3005,7 @@ def _resolve_message_url(
             thread_id=thread_id,
             include_media_descriptions=settings.include_media_descriptions,
             include_embed_media_descriptions=settings.include_embed_media_descriptions,
+            include_file_content=settings.include_file_content,
             media_mode=settings.media_mode,
             message_lookup=message_lookup,
             forward_source_lookup=forward_source_lookup,
@@ -3029,16 +3081,22 @@ def _resolve_channel_messages(
     refresh_cache: bool,
 ) -> list[dict[str, Any]]:
     if _time_window_enabled(settings):
-        target_cap = max(200, settings.channel_limit)
-        _log(
-            f"    Fetching channel {channel_id} messages via time window (cap={target_cap})"
-        )
         start, end = _window_bounds_no_target(settings)
+        bounded_window = start is not None and end is not None
+        max_messages = None if bounded_window else max(200, settings.channel_limit)
+        if bounded_window:
+            _log(
+                f"    Fetching channel {channel_id} messages via bounded time window (channel-limit ignored)"
+            )
+        else:
+            _log(
+                f"    Fetching channel {channel_id} messages via unbounded window (cap={max_messages})"
+            )
         messages = _fetch_messages_between(
             channel_id,
             start,
             end,
-            max_messages=target_cap,
+            max_messages=max_messages,
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
@@ -3121,6 +3179,7 @@ def _build_document(
             thread_id=thread_id,
             include_media_descriptions=settings.include_media_descriptions,
             include_embed_media_descriptions=settings.include_embed_media_descriptions,
+            include_file_content=settings.include_file_content,
             media_mode=settings.media_mode,
             message_lookup=message_lookup,
             forward_source_lookup=forward_source_lookup,
@@ -3224,6 +3283,11 @@ def _resolve_channel_or_thread_url(
     channel_type_raw = channel.get("type")
     channel_type = int(channel_type_raw) if isinstance(channel_type_raw, int) else None
 
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    if _time_window_enabled(settings):
+        window_start, window_end = _window_bounds_no_target(settings)
+
     messages = _resolve_channel_messages(
         channel_id,
         settings=settings,
@@ -3232,10 +3296,15 @@ def _resolve_channel_or_thread_url(
         refresh_cache=refresh_cache,
     )
     fetched_count = len(messages)
+    messages = _filter_messages(
+        messages,
+        settings=settings,
+        start=window_start,
+        end=window_end,
+    )
     thread_targets = (
         _thread_ids_from_messages(messages) if settings.expand_threads else []
     )
-    messages = _filter_messages(messages, settings=settings)
     _log(
         f"  Channel summary: fetched={fetched_count}, kept={len(messages)}, discovered_threads={len(thread_targets)}"
     )
@@ -3327,7 +3396,12 @@ def _resolve_channel_or_thread_url(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
         )
-        thread_messages = _filter_messages(thread_messages, settings=settings)
+        thread_messages = _filter_messages(
+            thread_messages,
+            settings=settings,
+            start=window_start,
+            end=window_end,
+        )
         _log(f"    Thread {thread_id} kept {len(thread_messages)} message(s)")
 
         thread_doc = _build_document(
@@ -3564,7 +3638,12 @@ def parse_discord_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | N
     if media is not None:
         if not isinstance(media, dict):
             raise ValueError(f"{prefix}.media must be a mapping")
-        allowed_media = {"describe", "embed-media-describe", "mode"}
+        allowed_media = {
+            "describe",
+            "embed-media-describe",
+            "file-content",
+            "mode",
+        }
         unknown_media = sorted(
             str(key) for key in media.keys() if key not in allowed_media
         )
@@ -3586,6 +3665,12 @@ def parse_discord_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | N
                     f"{prefix}.media.embed-media-describe must be a boolean"
                 )
             result["include_embed_media_descriptions"] = embed_describe
+
+        if "file-content" in media:
+            file_content = media.get("file-content")
+            if not isinstance(file_content, bool):
+                raise ValueError(f"{prefix}.media.file-content must be a boolean")
+            result["include_file_content"] = file_content
 
         if "mode" in media:
             mode = media.get("mode")
@@ -3653,6 +3738,7 @@ def discord_settings_cache_key(settings: DiscordSettings) -> tuple[Any, ...]:
         else None,
         settings.include_media_descriptions,
         settings.include_embed_media_descriptions,
+        settings.include_file_content,
         settings.media_mode,
         settings.hard_min_timestamp.isoformat()
         if settings.hard_min_timestamp
