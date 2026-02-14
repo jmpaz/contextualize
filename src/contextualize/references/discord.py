@@ -15,12 +15,12 @@ from ..render.text import process_text
 from ..utils import count_tokens
 
 _DISCORD_MESSAGE_RE = re.compile(
-    r"^https?://(?:ptb\.|canary\.)?discord\.com/channels/"
+    r"^https?://(?:ptb\.|canary\.)?discord(?:app)?\.com/channels/"
     r"(?P<guild_id>[^/]+)/(?P<channel_id>\d+)/(?P<message_id>\d+)"
     r"(?:[/?#].*)?$"
 )
 _DISCORD_CHANNEL_RE = re.compile(
-    r"^https?://(?:ptb\.|canary\.)?discord\.com/channels/"
+    r"^https?://(?:ptb\.|canary\.)?discord(?:app)?\.com/channels/"
     r"(?P<guild_id>[^/]+)/(?P<channel_id>\d+)"
     r"(?:[/?#].*)?$"
 )
