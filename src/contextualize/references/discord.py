@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -31,6 +33,7 @@ _NON_SYSTEM_MESSAGE_TYPES = frozenset({0, 19, 20, 21})
 _DISCORD_THREAD_STARTER_MESSAGE_TYPE = 21
 _REPLY_QUOTE_MAX_CHARS = 600
 _VALID_FORMATS = frozenset({"transcript", "yaml"})
+_VALID_MEDIA_MODES = frozenset({"describe", "transcribe"})
 _MEDIA_IMAGE_SUFFIXES = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif"}
 )
@@ -151,6 +154,15 @@ def _parse_optional_int(value: str) -> int | None:
     if parsed < 0:
         return None
     return parsed
+
+
+def _parse_media_mode(value: str, *, default: str) -> str:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return default
+    if cleaned in _VALID_MEDIA_MODES:
+        return cleaned
+    return default
 
 
 def _parse_message_id(value: str) -> str | None:
@@ -370,12 +382,19 @@ def _embed_media_cache_identity(
 
 
 def _media_render_cache_identity(
-    *, media_cache_identity: str, prompt_append: str | None, suffix: str
+    *,
+    media_cache_identity: str,
+    prompt_append: str | None,
+    suffix: str,
+    mode: str,
+    media_kind: str,
 ) -> str:
     payload = {
         "media_cache_identity": media_cache_identity,
         "prompt_append": prompt_append or "",
         "suffix": suffix,
+        "mode": mode,
+        "media_kind": media_kind,
     }
     return "discord-media-render:" + json.dumps(
         payload, sort_keys=True, separators=(",", ":")
@@ -437,6 +456,7 @@ class DiscordSettings:
     around_duration: timedelta | None = None
     include_media_descriptions: bool = True
     include_embed_media_descriptions: bool = True
+    media_mode: str = "describe"
     hard_min_timestamp: datetime | None = None
     hard_max_timestamp: datetime | None = None
 
@@ -722,6 +742,10 @@ def _discord_settings_from_env() -> DiscordSettings:
         os.environ.get("DISCORD_EMBED_MEDIA_DESC", "1"),
         default=True,
     )
+    media_mode = _parse_media_mode(
+        os.environ.get("DISCORD_MEDIA_MODE", ""),
+        default="describe",
+    )
 
     around_messages = _parse_optional_int(os.environ.get("DISCORD_AROUND_MESSAGES", ""))
     before_messages = _parse_optional_int(os.environ.get("DISCORD_BEFORE_MESSAGES", ""))
@@ -790,6 +814,7 @@ def _discord_settings_from_env() -> DiscordSettings:
         around_duration=around_duration,
         include_media_descriptions=media_desc,
         include_embed_media_descriptions=embed_media_desc,
+        media_mode=media_mode,
         hard_min_timestamp=_normalize_datetime(hard_min_timestamp),
         hard_max_timestamp=_normalize_datetime(hard_max_timestamp),
     )
@@ -840,6 +865,7 @@ def _clamp_settings(settings: DiscordSettings) -> DiscordSettings:
         around_duration=settings.around_duration,
         include_media_descriptions=settings.include_media_descriptions,
         include_embed_media_descriptions=settings.include_embed_media_descriptions,
+        media_mode=settings.media_mode,
         hard_min_timestamp=hard_min,
         hard_max_timestamp=hard_max,
     )
@@ -867,6 +893,10 @@ def build_discord_settings(overrides: dict[str, Any] | None = None) -> DiscordSe
             "include_embed_media_descriptions",
             env.include_embed_media_descriptions,
         )
+    )
+    media_mode = _parse_media_mode(
+        str(overrides.get("media_mode", env.media_mode) or ""),
+        default=env.media_mode,
     )
 
     before_messages = overrides.get("before_messages", env.before_messages)
@@ -930,6 +960,7 @@ def build_discord_settings(overrides: dict[str, Any] | None = None) -> DiscordSe
         around_duration=around_duration,
         include_media_descriptions=include_media_descriptions,
         include_embed_media_descriptions=include_embed_media_descriptions,
+        media_mode=media_mode,
         hard_min_timestamp=env.hard_min_timestamp,
         hard_max_timestamp=env.hard_max_timestamp,
     )
@@ -1446,10 +1477,39 @@ def _media_prompt_append_from_embed(embed: dict[str, Any]) -> str | None:
     return f"\n\nEmbed context:\n```text\n{blob}\n```"
 
 
-def _describe_remote_media(
+def _ffmpeg_path() -> str | None:
+    configured = (os.getenv("FFMPEG_PATH") or "").strip()
+    if configured:
+        return configured
+    try:
+        import shutil
+    except Exception:
+        return None
+    return shutil.which("ffmpeg")
+
+
+def _extract_utf8_text(path: Path) -> str | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not data:
+        return None
+    if b"\x00" in data:
+        return None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    sanitized = _sanitize_text(text)
+    if not sanitized.strip():
+        return None
+    return sanitized
+
+
+def _extract_utf8_remote_media(
     url: str,
     *,
-    prompt_append: str | None = None,
     media_cache_identity: str | None = None,
     suffix: str = "",
     send_label: str | None = None,
@@ -1463,8 +1523,136 @@ def _describe_remote_media(
         store_media_bytes,
         store_rendered,
     )
-    from ..render.markitdown import MarkItDownConversionError, convert_path_to_markdown
-    from ..runtime import get_refresh_images, get_refresh_media
+    from ..runtime import get_refresh_media
+    from .media import download_cached_media_to_temp
+
+    cache_identity = media_cache_identity or url
+    render_identity = _media_render_cache_identity(
+        media_cache_identity=cache_identity,
+        prompt_append=None,
+        suffix=suffix,
+        mode="file-text",
+        media_kind="file",
+    )
+    cache_label = send_label or cache_identity
+    refresh_media = get_refresh_media()
+    if not refresh_media:
+        cached_render = get_cached_rendered(render_identity)
+        if cached_render and cached_render.strip():
+            _log(f"  discord media render cache hit: {cache_label}")
+            return cached_render
+    tmp = download_cached_media_to_temp(
+        url,
+        suffix=suffix,
+        headers=_MEDIA_DOWNLOAD_HEADERS,
+        cache_identity=cache_identity,
+        get_cached_media_bytes=get_cached_media_bytes,
+        store_media_bytes=store_media_bytes,
+        refresh_cache=refresh_media,
+        on_cache_hit=lambda _identity: _log(
+            f"  discord media cache hit: {cache_label}"
+        ),
+        on_cache_miss=lambda _identity: _log(
+            f"  discord media cache miss: {cache_label}"
+        ),
+    )
+    if tmp is None:
+        return None
+    try:
+        text = _extract_utf8_text(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+    if text is None:
+        return None
+    store_rendered(render_identity, text)
+    return text
+
+
+def _transcribe_media_path(
+    path: Path,
+    *,
+    kind: str,
+    filename: str,
+    content_type: str,
+) -> str | None:
+    from .audio_transcription import transcribe_audio_bytes, transcribe_audio_file
+
+    if kind == "audio":
+        try:
+            transcript = transcribe_audio_bytes(
+                path.read_bytes(),
+                filename=filename or (path.name or "audio.mp3"),
+                content_type=content_type or None,
+            )
+        except Exception:
+            return None
+        cleaned = transcript.strip()
+        return cleaned or None
+
+    if kind != "video":
+        return None
+
+    ffmpeg = _ffmpeg_path()
+    if ffmpeg is None:
+        return None
+
+    fd, extracted_path_raw = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    extracted_path = Path(extracted_path_raw)
+    cmd = [
+        ffmpeg,
+        "-nostdin",
+        "-y",
+        "-i",
+        str(path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(extracted_path),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0 or not extracted_path.exists():
+            return None
+        transcript = transcribe_audio_file(extracted_path)
+    except Exception:
+        return None
+    finally:
+        extracted_path.unlink(missing_ok=True)
+
+    cleaned = transcript.strip()
+    return cleaned or None
+
+
+def _describe_remote_media(
+    url: str,
+    *,
+    prompt_append: str | None = None,
+    media_cache_identity: str | None = None,
+    suffix: str = "",
+    send_label: str | None = None,
+    mode: str = "describe",
+    media_kind: str = "",
+    filename: str = "",
+    content_type: str = "",
+) -> str | None:
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return None
+
+    from ..cache.discord import (
+        get_cached_media_bytes,
+        get_cached_rendered,
+        store_media_bytes,
+        store_rendered,
+    )
+    from ..runtime import get_refresh_media
     from .media import download_cached_media_to_temp
 
     cache_identity = media_cache_identity or url
@@ -1472,6 +1660,8 @@ def _describe_remote_media(
         media_cache_identity=cache_identity,
         prompt_append=prompt_append,
         suffix=suffix,
+        mode=mode,
+        media_kind=media_kind,
     )
     cache_label = send_label or cache_identity
     refresh_media = get_refresh_media()
@@ -1499,18 +1689,30 @@ def _describe_remote_media(
         return None
 
     try:
-        refresh_images = get_refresh_images()
-        result = convert_path_to_markdown(
-            str(tmp),
-            refresh_images=refresh_images,
-            prompt_append=prompt_append,
-        )
-    except MarkItDownConversionError:
+        if mode == "transcribe" and media_kind in {"audio", "video"}:
+            markdown = _transcribe_media_path(
+                tmp,
+                kind=media_kind,
+                filename=filename,
+                content_type=content_type,
+            )
+        else:
+            from ..render.markitdown import convert_path_to_markdown
+            from ..runtime import get_refresh_images
+
+            refresh_images = get_refresh_images()
+            result = convert_path_to_markdown(
+                str(tmp),
+                refresh_images=refresh_images,
+                prompt_append=prompt_append,
+            )
+            markdown = result.markdown
+    except Exception:
         return None
     finally:
         tmp.unlink(missing_ok=True)
 
-    markdown = (result.markdown or "").strip()
+    markdown = (markdown or "").strip()
     if not markdown:
         return None
     store_rendered(render_identity, markdown)
@@ -1522,6 +1724,7 @@ def _normalize_attachment_nodes(
     *,
     include_media_descriptions: bool,
     include_embed_media_descriptions: bool,
+    media_mode: str,
 ) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
     message_id_raw = message.get("id")
@@ -1554,6 +1757,13 @@ def _normalize_attachment_nodes(
             attachment_id = (
                 str(attachment_id_raw) if attachment_id_raw is not None else None
             )
+            attachment_label = f"msg:{message_id or 'unknown'}:attachment:{attachment_id or filename or kind}"
+            attachment_suffix = _media_suffix(
+                filename=filename,
+                content_type=content_type,
+                kind=kind,
+                url=attachment_url,
+            )
             media_cache_identity = _attachment_media_cache_identity(
                 message_id=message_id,
                 attachment_id=attachment_id,
@@ -1561,21 +1771,31 @@ def _normalize_attachment_nodes(
                 filename=filename,
                 url=attachment_url,
             )
-            media_desc = _describe_remote_media(
-                attachment_url,
-                media_cache_identity=media_cache_identity,
-                suffix=_media_suffix(
+            if kind == "file":
+                text_content = _extract_utf8_remote_media(
+                    attachment_url,
+                    media_cache_identity=media_cache_identity,
+                    suffix=attachment_suffix,
+                    send_label=attachment_label,
+                )
+                if text_content:
+                    node["text_content"] = text_content
+            has_text_content = isinstance(node.get("text_content"), str) and bool(
+                str(node.get("text_content")).strip()
+            )
+            if not (kind == "file" and has_text_content):
+                media_desc = _describe_remote_media(
+                    attachment_url,
+                    media_cache_identity=media_cache_identity,
+                    suffix=attachment_suffix,
+                    send_label=attachment_label,
+                    mode=media_mode if kind in {"audio", "video"} else "describe",
+                    media_kind=kind,
                     filename=filename,
                     content_type=content_type,
-                    kind=kind,
-                    url=attachment_url,
-                ),
-                send_label=(
-                    f"msg:{message_id or 'unknown'}:attachment:{attachment_id or filename or kind}"
-                ),
-            )
-            if media_desc:
-                node["media_description"] = media_desc
+                )
+                if media_desc:
+                    node["media_description"] = media_desc
         cleaned = {k: v for k, v in node.items() if v not in (None, "", [])}
         nodes.append(cleaned)
 
@@ -1922,6 +2142,7 @@ def _normalize_message(
     thread_id: str | None,
     include_media_descriptions: bool,
     include_embed_media_descriptions: bool,
+    media_mode: str,
     message_lookup: dict[str, dict[str, Any]] | None = None,
     forward_source_lookup: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, Any] | None:
@@ -1945,6 +2166,7 @@ def _normalize_message(
         message_with_media,
         include_media_descriptions=include_media_descriptions,
         include_embed_media_descriptions=include_embed_media_descriptions,
+        media_mode=media_mode,
     )
 
     reply_to_id = _reply_to_id(message)
@@ -2266,11 +2488,20 @@ def _format_attachment_idiomatic(
     filename = str(node.get("filename") or "")
     dimensions = _format_dimensions(node)
     media_desc = node.get("media_description")
+    text_content = node.get("text_content")
     normalized_desc = (
         _normalize_media_description(media_desc)
         if isinstance(media_desc, str) and media_desc.strip()
         else ""
     )
+    if node_type == "file" and isinstance(text_content, str) and text_content.strip():
+        name_attr = f' name="{_escape_xml_attr(filename)}"' if filename else ""
+        lines.append(f"{indent}<file{name_attr}>")
+        lines.extend(
+            f"{indent}{line}" for line in _sanitize_text(text_content).splitlines()
+        )
+        lines.append(f"{indent}</file>")
+        return lines
 
     attrs = [f'type="{_escape_xml_attr(node_type)}"']
     if node_type != "image" or not normalized_desc:
@@ -2723,6 +2954,7 @@ def _resolve_message_url(
             thread_id=thread_id,
             include_media_descriptions=settings.include_media_descriptions,
             include_embed_media_descriptions=settings.include_embed_media_descriptions,
+            media_mode=settings.media_mode,
             message_lookup=message_lookup,
             forward_source_lookup=forward_source_lookup,
         )
@@ -2889,6 +3121,7 @@ def _build_document(
             thread_id=thread_id,
             include_media_descriptions=settings.include_media_descriptions,
             include_embed_media_descriptions=settings.include_embed_media_descriptions,
+            media_mode=settings.media_mode,
             message_lookup=message_lookup,
             forward_source_lookup=forward_source_lookup,
         )
@@ -3331,7 +3564,7 @@ def parse_discord_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | N
     if media is not None:
         if not isinstance(media, dict):
             raise ValueError(f"{prefix}.media must be a mapping")
-        allowed_media = {"describe", "embed-media-describe"}
+        allowed_media = {"describe", "embed-media-describe", "mode"}
         unknown_media = sorted(
             str(key) for key in media.keys() if key not in allowed_media
         )
@@ -3353,6 +3586,17 @@ def parse_discord_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | N
                     f"{prefix}.media.embed-media-describe must be a boolean"
                 )
             result["include_embed_media_descriptions"] = embed_describe
+
+        if "mode" in media:
+            mode = media.get("mode")
+            if (
+                not isinstance(mode, str)
+                or mode.strip().lower() not in _VALID_MEDIA_MODES
+            ):
+                raise ValueError(
+                    f"{prefix}.media.mode must be one of: {', '.join(sorted(_VALID_MEDIA_MODES))}"
+                )
+            result["media_mode"] = mode.strip().lower()
 
     return result or None
 
@@ -3409,6 +3653,7 @@ def discord_settings_cache_key(settings: DiscordSettings) -> tuple[Any, ...]:
         else None,
         settings.include_media_descriptions,
         settings.include_embed_media_descriptions,
+        settings.media_mode,
         settings.hard_min_timestamp.isoformat()
         if settings.hard_min_timestamp
         else None,

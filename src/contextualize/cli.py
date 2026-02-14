@@ -1604,9 +1604,43 @@ def cat_cmd(
     set_refresh_videos(refresh_videos)
     set_refresh_audio(refresh_audio)
 
+    def _discord_scope_from_range_env() -> str | None:
+        from .references.discord import parse_discord_url
+
+        candidates: list[tuple[str, dict[str, str]]] = []
+        for env_key in ("DISCORD_START_MESSAGE", "DISCORD_END_MESSAGE"):
+            raw = (os.environ.get(env_key) or "").strip()
+            if not raw:
+                continue
+            parsed = parse_discord_url(raw)
+            if not parsed or parsed.get("kind") != "message":
+                raise click.ClickException(
+                    f"{env_key} must be a Discord message URL when using `contextualize cat -`."
+                )
+            candidates.append((env_key, parsed))
+        if not candidates:
+            return None
+
+        first = candidates[0][1]
+        guild_id = first["guild_id"]
+        channel_id = first["channel_id"]
+        for env_key, parsed in candidates[1:]:
+            if parsed["guild_id"] != guild_id or parsed["channel_id"] != channel_id:
+                raise click.ClickException(
+                    f"{env_key} must reference the same Discord channel as DISCORD_START_MESSAGE."
+                )
+        return f"https://discord.com/channels/{guild_id}/{channel_id}"
+
+    if len(paths) == 1 and paths[0] == "-":
+        paths = ()
+
     if not paths:
-        click.echo(ctx.get_help())
-        ctx.exit()
+        discord_scope = _discord_scope_from_range_env()
+        if discord_scope:
+            paths = (discord_scope,)
+        else:
+            click.echo(ctx.get_help())
+            ctx.exit()
 
     ctx.obj["format"] = format  # for segmentation
 

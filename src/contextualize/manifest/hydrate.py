@@ -2652,6 +2652,7 @@ def _build_normalized_config(
         media["embed-media-describe"] = (
             discord_settings.include_embed_media_descriptions
         )
+        media["mode"] = discord_settings.media_mode
         discord["media"] = media
         normalized["discord"] = discord
     return normalized
