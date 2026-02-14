@@ -10,6 +10,7 @@ from .helpers import (
     MARKITDOWN_PREFERRED_EXTENSIONS,
     resolve_symbol_ranges,
 )
+from .audio_transcription import is_audio_suffix, transcribe_audio_file
 
 
 class FileReference:
@@ -73,6 +74,31 @@ class FileReference:
         suffix = Path(self.path).suffix.lower()
         if suffix in DISALLOWED_EXTENSIONS:
             raise ValueError(f"Unsupported file type: {self.path}")
+        if is_audio_suffix(suffix):
+            try:
+                transcript = transcribe_audio_file(self.path)
+            except Exception as e:
+                raise ValueError(
+                    f"Audio transcription failed for {self.path}: {e}"
+                ) from e
+            self.file_content = self.original_file_content = transcript
+            if self.inject:
+                from ..render.inject import inject_content_in_text
+
+                self.file_content = inject_content_in_text(
+                    self.file_content, self.depth, self.trace_collector, self.path
+                )
+            return process_text(
+                self.file_content,
+                self.clean_contents,
+                ranges=self.ranges,
+                format=self.format,
+                label=self.get_label(),
+                label_suffix=self.label_suffix,
+                token_target=self.token_target,
+                include_token_count=self.include_token_count,
+                symbols=self.symbols,
+            )
         prefer_markitdown = suffix in MARKITDOWN_PREFERRED_EXTENSIONS
         if not prefer_markitdown:
             try:

@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..render.text import process_text
 from ..utils import count_tokens
+from .audio_transcription import transcribe_audio_file
 
 _YOUTUBE_URL_RE = re.compile(
     r"^https?://(?:www\.|m\.)?(?:"
@@ -248,38 +249,6 @@ class YouTubeReference:
 
         return Path(output_path)
 
-    def _transcribe_audio(self, audio_path: Path) -> str:
-        import httpx
-
-        api_base = os.environ.get("WHISPER_API_BASE", "https://api.openai.com/v1")
-        api_key = os.environ.get("WHISPER_API_KEY")
-        model = os.environ.get("WHISPER_MODEL", "whisper-1")
-        endpoint = f"{api_base.rstrip('/')}/audio/transcriptions"
-
-        headers = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        with open(audio_path, "rb") as f:
-            response = httpx.post(
-                endpoint,
-                headers=headers,
-                files={"file": (audio_path.name, f, "audio/mpeg")},
-                data={"model": model, "response_format": "verbose_json"},
-                timeout=600,
-            )
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"Whisper API error: {response.status_code} {response.text}"
-            )
-
-        data = response.json()
-        segments = data.get("segments", [])
-        if segments:
-            return "\n\n".join(seg.get("text", "").strip() for seg in segments)
-        return data.get("text", "").strip()
-
     def _get_transcript(self, duration: int) -> tuple[str, str]:
         whisper_configured = bool(os.environ.get("WHISPER_API_BASE"))
 
@@ -287,7 +256,7 @@ class YouTubeReference:
             audio_path = None
             try:
                 audio_path = self._extract_audio()
-                transcript = self._transcribe_audio(audio_path)
+                transcript = transcribe_audio_file(audio_path)
                 return transcript, "whisper"
             finally:
                 if audio_path and audio_path.exists():

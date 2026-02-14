@@ -7,6 +7,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from ..render.text import process_text
 from ..utils import count_tokens
+from .audio_transcription import is_audio_suffix, transcribe_audio_bytes
 from .helpers import (
     DISALLOWED_CONTENT_TYPES,
     DISALLOWED_EXTENSIONS,
@@ -281,6 +282,35 @@ class URLReference:
             raise ValueError(f"Unsupported file type: {self.url}")
 
         data = r.content
+        is_audio = bool(suffix and is_audio_suffix(suffix)) or content_type.startswith(
+            "audio/"
+        )
+        if is_audio:
+            audio_name = os.path.basename(urlparse(self.url).path) or "audio"
+            if "." not in audio_name and suffix:
+                audio_name = f"{audio_name}{suffix}"
+            elif "." not in audio_name:
+                audio_name = f"{audio_name}.mp3"
+            try:
+                text = transcribe_audio_bytes(
+                    data,
+                    filename=audio_name,
+                    content_type=content_type or None,
+                )
+            except RuntimeError as exc:
+                raise ValueError(
+                    f"Audio transcription failed for {self.url}: {exc}"
+                ) from exc
+            self.original_file_content = text
+            self.file_content = text
+            if self.inject:
+                from ..render.inject import inject_content_in_text
+
+                text = inject_content_in_text(
+                    text, self.depth, self.trace_collector, self.url
+                )
+            self.file_content = text
+            return text
         prefer_markitdown = bool(suffix and suffix in MARKITDOWN_PREFERRED_EXTENSIONS)
         is_text = looks_like_text_content_type(content_type)
 
