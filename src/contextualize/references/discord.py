@@ -25,6 +25,7 @@ _DISCORD_CHANNEL_RE = re.compile(
     r"(?:[/?#].*)?$"
 )
 
+_DISCORD_EPOCH_MS = 1420070400000
 _DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
 _NON_SYSTEM_MESSAGE_TYPES = frozenset({0, 19, 20, 21})
 _DISCORD_THREAD_STARTER_MESSAGE_TYPE = 21
@@ -150,6 +151,45 @@ def _parse_optional_int(value: str) -> int | None:
     if parsed < 0:
         return None
     return parsed
+
+
+def _parse_message_id(value: str) -> str | None:
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.isdigit():
+        return cleaned
+    parsed = parse_discord_url(cleaned)
+    if parsed and parsed.get("kind") == "message":
+        return parsed.get("message_id")
+    return None
+
+
+def _normalize_message_id(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if value >= 0 else None
+    if isinstance(value, str):
+        return _parse_message_id(value)
+    return None
+
+
+def _message_id_to_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _message_id_to_datetime(value: str | None) -> datetime | None:
+    parsed = _message_id_to_int(value)
+    if parsed is None:
+        return None
+    ts_ms = (parsed >> 22) + _DISCORD_EPOCH_MS
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
@@ -390,6 +430,8 @@ class DiscordSettings:
     channel_limit: int = 200
     start: datetime | None = None
     end: datetime | None = None
+    start_message_id: str | None = None
+    end_message_id: str | None = None
     before_duration: timedelta | None = None
     after_duration: timedelta | None = None
     around_duration: timedelta | None = None
@@ -697,6 +739,10 @@ def _discord_settings_from_env() -> DiscordSettings:
 
     start = _parse_iso_datetime(os.environ.get("DISCORD_START_TIMESTAMP", ""))
     end = _parse_iso_datetime(os.environ.get("DISCORD_END_TIMESTAMP", ""))
+    raw_start_message = os.environ.get("DISCORD_START_MESSAGE", "")
+    raw_end_message = os.environ.get("DISCORD_END_MESSAGE", "")
+    start_message_id = _parse_message_id(raw_start_message)
+    end_message_id = _parse_message_id(raw_end_message)
     hard_min_timestamp = _parse_iso_datetime(
         os.environ.get("DISCORD_MIN_TIMESTAMP", "")
     )
@@ -737,6 +783,8 @@ def _discord_settings_from_env() -> DiscordSettings:
         channel_limit=channel_limit,
         start=_normalize_datetime(start),
         end=_normalize_datetime(end),
+        start_message_id=start_message_id,
+        end_message_id=end_message_id,
         before_duration=before_duration,
         after_duration=after_duration,
         around_duration=around_duration,
@@ -751,6 +799,8 @@ def _discord_settings_from_env() -> DiscordSettings:
 def _clamp_settings(settings: DiscordSettings) -> DiscordSettings:
     start = settings.start
     end = settings.end
+    start_message_id = settings.start_message_id
+    end_message_id = settings.end_message_id
     hard_min = settings.hard_min_timestamp
     hard_max = settings.hard_max_timestamp
 
@@ -760,6 +810,15 @@ def _clamp_settings(settings: DiscordSettings) -> DiscordSettings:
         end = hard_max
     if start and end and start > end:
         start = end
+
+    start_message_int = _message_id_to_int(start_message_id)
+    end_message_int = _message_id_to_int(end_message_id)
+    if (
+        start_message_int is not None
+        and end_message_int is not None
+        and start_message_int > end_message_int
+    ):
+        start_message_id = end_message_id
 
     return DiscordSettings(
         format=settings.format,
@@ -774,6 +833,8 @@ def _clamp_settings(settings: DiscordSettings) -> DiscordSettings:
         channel_limit=settings.channel_limit,
         start=start,
         end=end,
+        start_message_id=start_message_id,
+        end_message_id=end_message_id,
         before_duration=settings.before_duration,
         after_duration=settings.after_duration,
         around_duration=settings.around_duration,
@@ -838,6 +899,12 @@ def build_discord_settings(overrides: dict[str, Any] | None = None) -> DiscordSe
     end = overrides.get("end", env.end)
     start = _normalize_datetime(start)
     end = _normalize_datetime(end)
+    start_message_id = _normalize_message_id(
+        overrides.get("start_message", env.start_message_id)
+    )
+    end_message_id = _normalize_message_id(
+        overrides.get("end_message", env.end_message_id)
+    )
 
     before_duration = overrides.get("before_duration", env.before_duration)
     after_duration = overrides.get("after_duration", env.after_duration)
@@ -856,6 +923,8 @@ def build_discord_settings(overrides: dict[str, Any] | None = None) -> DiscordSe
         channel_limit=channel_limit_int,
         start=start,
         end=end,
+        start_message_id=start_message_id,
+        end_message_id=end_message_id,
         before_duration=before_duration,
         after_duration=after_duration,
         around_duration=around_duration,
@@ -1926,8 +1995,18 @@ def _is_system_message(message: dict[str, Any]) -> bool:
 def _filter_messages(
     messages: list[dict[str, Any]], *, settings: DiscordSettings
 ) -> list[dict[str, Any]]:
+    start_message_id = _message_id_to_int(settings.start_message_id)
+    end_message_id = _message_id_to_int(settings.end_message_id)
     out: list[dict[str, Any]] = []
     for message in messages:
+        if start_message_id is not None or end_message_id is not None:
+            message_id = _message_id_to_int(str(message.get("id") or ""))
+            if message_id is None:
+                continue
+            if start_message_id is not None and message_id < start_message_id:
+                continue
+            if end_message_id is not None and message_id > end_message_id:
+                continue
         if not settings.include_system and _is_system_message(message):
             continue
         if not settings.include_thread_starters:
@@ -1948,6 +2027,8 @@ def _time_window_enabled(settings: DiscordSettings) -> bool:
         for value in (
             settings.start,
             settings.end,
+            settings.start_message_id,
+            settings.end_message_id,
             settings.before_duration,
             settings.after_duration,
             settings.around_duration,
@@ -1960,6 +2041,8 @@ def _window_bounds_for_target(
 ) -> tuple[datetime | None, datetime | None]:
     start = settings.start
     end = settings.end
+    start_message_ts = _message_id_to_datetime(settings.start_message_id)
+    end_message_ts = _message_id_to_datetime(settings.end_message_id)
 
     if settings.around_duration is not None:
         start = timestamp - settings.around_duration
@@ -1971,6 +2054,11 @@ def _window_bounds_for_target(
         if settings.after_duration is not None:
             candidate = timestamp + settings.after_duration
             end = candidate if end is None or candidate < end else end
+
+    if start_message_ts and (start is None or start_message_ts > start):
+        start = start_message_ts
+    if end_message_ts and (end is None or end_message_ts < end):
+        end = end_message_ts
 
     if settings.hard_min_timestamp and (
         start is None or start < settings.hard_min_timestamp
@@ -1993,6 +2081,8 @@ def _window_bounds_no_target(
     anchor = now
     start = settings.start
     end = settings.end
+    start_message_ts = _message_id_to_datetime(settings.start_message_id)
+    end_message_ts = _message_id_to_datetime(settings.end_message_id)
 
     if settings.around_duration is not None:
         start = anchor - settings.around_duration
@@ -2004,6 +2094,11 @@ def _window_bounds_no_target(
         if settings.after_duration is not None:
             candidate = anchor + settings.after_duration
             end = candidate if end is None or candidate < end else end
+
+    if start_message_ts and (start is None or start_message_ts > start):
+        start = start_message_ts
+    if end_message_ts and (end is None or end_message_ts < end):
+        end = end_message_ts
 
     if settings.hard_min_timestamp and (
         start is None or start < settings.hard_min_timestamp
@@ -3103,6 +3198,8 @@ def _parse_window_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
         "message-context",
         "start",
         "end",
+        "start-message",
+        "end-message",
         "before-duration",
         "after-duration",
         "around-duration",
@@ -3141,6 +3238,19 @@ def _parse_window_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
         parsed = _parse_iso_datetime(value)
         if parsed is None:
             raise ValueError(f"{prefix}.window.{config_key} is not a valid timestamp")
+        result[result_key] = parsed
+
+    for config_key, result_key in (
+        ("start-message", "start_message"),
+        ("end-message", "end_message"),
+    ):
+        if config_key not in raw:
+            continue
+        parsed = _normalize_message_id(raw.get(config_key))
+        if parsed is None:
+            raise ValueError(
+                f"{prefix}.window.{config_key} must be a Discord message snowflake or message URL"
+            )
         result[result_key] = parsed
 
     for config_key, result_key in (
@@ -3286,6 +3396,8 @@ def discord_settings_cache_key(settings: DiscordSettings) -> tuple[Any, ...]:
         settings.channel_limit,
         settings.start.isoformat() if settings.start else None,
         settings.end.isoformat() if settings.end else None,
+        settings.start_message_id,
+        settings.end_message_id,
         int(settings.before_duration.total_seconds())
         if settings.before_duration
         else None,

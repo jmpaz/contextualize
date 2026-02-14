@@ -2630,6 +2630,10 @@ def _build_normalized_config(
             window["start"] = discord_settings.start.isoformat().replace("+00:00", "Z")
         if discord_settings.end:
             window["end"] = discord_settings.end.isoformat().replace("+00:00", "Z")
+        if discord_settings.start_message_id:
+            window["start-message"] = discord_settings.start_message_id
+        if discord_settings.end_message_id:
+            window["end-message"] = discord_settings.end_message_id
         if discord_settings.before_duration:
             window["before-duration"] = _format_duration_for_manifest(
                 discord_settings.before_duration
