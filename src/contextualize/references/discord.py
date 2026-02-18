@@ -44,6 +44,7 @@ _MEDIA_AUDIO_SUFFIXES = frozenset(
     {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".aiff"}
 )
 _MARKDOWN_ESCAPED_PUNCT_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|])")
+_PNG_CHUNK_MARKER_RE = re.compile(r"\bIHDR\b.*\bIDAT\b.*\bIEND\b", flags=re.S)
 _MEDIA_DOWNLOAD_HEADERS = {
     "User-Agent": "contextualize/discord",
     "Accept": "image/*,video/*,audio/*,application/pdf,application/octet-stream",
@@ -1686,8 +1687,11 @@ def _describe_remote_media(
     if not refresh_media:
         cached_render = get_cached_rendered(render_identity)
         if cached_render and cached_render.strip():
-            _log(f"  discord media render cache hit: {cache_label}")
-            return cached_render.strip()
+            cached_markdown = cached_render.strip()
+            if not _is_invalid_media_description(cached_markdown):
+                _log(f"  discord media render cache hit: {cache_label}")
+                return cached_markdown
+            _log(f"  discord media render cache invalid: {cache_label}")
     tmp = download_cached_media_to_temp(
         url,
         suffix=suffix,
@@ -1732,6 +1736,9 @@ def _describe_remote_media(
 
     markdown = (markdown or "").strip()
     if not markdown:
+        return None
+    if _is_invalid_media_description(markdown):
+        _log(f"  discord media render rejected: {cache_label}")
         return None
     store_rendered(render_identity, markdown)
     return markdown
@@ -2423,6 +2430,25 @@ def _normalize_media_description(value: str) -> str:
     while lines and not lines[-1].strip():
         lines.pop()
     return _normalize_display_text("\n".join(lines))
+
+
+def _is_invalid_media_description(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return True
+    replacement_count = text.count("\ufffd")
+    if replacement_count >= 128:
+        return True
+    if replacement_count >= 16 and (replacement_count / max(1, len(text))) >= 0.01:
+        return True
+    if text.startswith("�PNG") and "IHDR" in text:
+        return True
+    if _PNG_CHUNK_MARKER_RE.search(text) and replacement_count >= 2:
+        return True
+    longest_line = max((len(line) for line in text.splitlines()), default=0)
+    if replacement_count >= 8 and longest_line >= 500:
+        return True
+    return False
 
 
 def _format_scope_header(document: DiscordDocument) -> str:
