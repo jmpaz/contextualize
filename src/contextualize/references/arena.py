@@ -316,6 +316,19 @@ def _get_recurse_users() -> set[str] | None:
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
+def _get_max_blocks_per_channel() -> int | None:
+    raw = (os.environ.get("ARENA_MAX_BLOCKS_PER_CHANNEL") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
 VALID_SORT_ORDERS = frozenset(
     {
         "asc",
@@ -333,6 +346,7 @@ VALID_SORT_ORDERS = frozenset(
 class ArenaSettings:
     max_depth: int = 1
     sort_order: str = "desc"
+    max_blocks_per_channel: int | None = None
     include_descriptions: bool = True
     include_comments: bool = True
     include_link_image_descriptions: bool = False
@@ -346,6 +360,7 @@ def _arena_settings_from_env() -> ArenaSettings:
     return ArenaSettings(
         max_depth=_get_max_depth(),
         sort_order=_get_sort_order(),
+        max_blocks_per_channel=_get_max_blocks_per_channel(),
         include_descriptions=_get_include_descriptions(),
         include_comments=_get_include_comments(),
         include_link_image_descriptions=_get_include_link_image_descriptions(),
@@ -373,6 +388,16 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
     else:
         max_depth = overrides.get("max_depth", env.max_depth)
     sort_order = overrides.get("sort_order", env.sort_order)
+    max_blocks_per_channel = overrides.get(
+        "max_blocks_per_channel", env.max_blocks_per_channel
+    )
+    if max_blocks_per_channel is not None:
+        try:
+            max_blocks_per_channel = int(max_blocks_per_channel)
+        except (TypeError, ValueError):
+            max_blocks_per_channel = env.max_blocks_per_channel
+        if max_blocks_per_channel is not None and max_blocks_per_channel <= 0:
+            max_blocks_per_channel = env.max_blocks_per_channel
     include_descriptions = overrides.get(
         "include_descriptions", env.include_descriptions
     )
@@ -389,6 +414,7 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
     return ArenaSettings(
         max_depth=max_depth,
         sort_order=sort_order,
+        max_blocks_per_channel=max_blocks_per_channel,
         include_descriptions=include_descriptions,
         include_comments=include_comments,
         include_link_image_descriptions=include_link_image_descriptions,
@@ -424,6 +450,8 @@ def _fetch_all_channel_contents(
     slug: str,
     *,
     max_depth: int | None = None,
+    sort_order: str | None = None,
+    max_blocks_per_channel: int | None = None,
     _depth: int = 0,
     _visited: set[int] | None = None,
     _root_owner_id: int | None = None,
@@ -431,6 +459,10 @@ def _fetch_all_channel_contents(
 ) -> tuple[dict, list[dict]]:
     if max_depth is None:
         max_depth = _get_max_depth()
+    if sort_order is None:
+        sort_order = _get_sort_order()
+    if max_blocks_per_channel is None:
+        max_blocks_per_channel = _get_max_blocks_per_channel()
     if _recurse_users is ...:
         _recurse_users = _get_recurse_users()
     if _visited is None:
@@ -460,6 +492,10 @@ def _fetch_all_channel_contents(
         page_data = _fetch_channel_page(slug, page)
         all_contents.extend(page_data.get("data", page_data.get("contents", [])))
 
+    if max_blocks_per_channel is not None:
+        all_contents = _sort_channel_contents(all_contents, sort_order)
+        all_contents = all_contents[:max_blocks_per_channel]
+
     if _depth < max_depth:
         expanded: list[dict] = []
         for item in all_contents:
@@ -476,6 +512,8 @@ def _fetch_all_channel_contents(
                     nested_meta, nested_contents = _fetch_all_channel_contents(
                         nested_slug,
                         max_depth=max_depth,
+                        sort_order=sort_order,
+                        max_blocks_per_channel=max_blocks_per_channel,
                         _depth=_depth + 1,
                         _visited=_visited,
                         _root_owner_id=_root_owner_id,
@@ -1269,9 +1307,28 @@ def _sort_blocks(flat: list[tuple[str, dict]], order: str) -> list[tuple[str, di
     use_reverse = order == "date-desc"
     return sorted(
         flat,
-        key=lambda pair: pair[1].get("connected_at") or pair[1].get("created_at") or "",
+        key=lambda pair: _block_chrono_value(pair[1]),
         reverse=use_reverse,
     )
+
+
+def _sort_channel_contents(contents: list[dict], order: str) -> list[dict]:
+    if order == "position-asc" or order == "asc":
+        return contents
+    if order == "position-desc" or order == "desc":
+        return list(reversed(contents))
+    if order == "random":
+        import random
+
+        shuffled = list(contents)
+        random.shuffle(shuffled)
+        return shuffled
+    use_reverse = order == "date-desc"
+    return sorted(contents, key=_block_chrono_value, reverse=use_reverse)
+
+
+def _block_chrono_value(block: dict) -> str:
+    return block.get("connected_at") or block.get("created_at") or ""
 
 
 def resolve_channel(
@@ -1287,8 +1344,12 @@ def resolve_channel(
     max_depth = settings.max_depth
     recurse_users = settings.recurse_users
     sort_order = settings.sort_order
+    max_blocks_per_channel = settings.max_blocks_per_channel
     ru_key = ",".join(sorted(recurse_users)) if recurse_users else "all"
-    cache_key = f"{slug}:d={max_depth}:u={ru_key}:s={sort_order}"
+    mb_key = (
+        str(max_blocks_per_channel) if max_blocks_per_channel is not None else "all"
+    )
+    cache_key = f"{slug}:d={max_depth}:u={ru_key}:s={sort_order}:m={mb_key}"
 
     if use_cache and not refresh_cache:
         from ..cache.arena import get_cached_channel
@@ -1305,6 +1366,8 @@ def resolve_channel(
     metadata, contents = _fetch_all_channel_contents(
         slug,
         max_depth=max_depth,
+        sort_order=sort_order,
+        max_blocks_per_channel=max_blocks_per_channel,
         _recurse_users=recurse_users,
     )
     flat = _flatten_channel_blocks(contents, slug)

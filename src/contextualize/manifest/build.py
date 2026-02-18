@@ -86,6 +86,7 @@ def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
     return (
         settings.max_depth,
         settings.sort_order,
+        settings.max_blocks_per_channel,
         settings.include_descriptions,
         settings.include_comments,
         settings.include_link_image_descriptions,

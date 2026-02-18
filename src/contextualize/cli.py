@@ -1604,6 +1604,21 @@ def cat_cmd(
     set_refresh_videos(refresh_videos)
     set_refresh_audio(refresh_audio)
 
+    def _env_flag(name: str) -> bool:
+        return (os.environ.get(name) or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    arena_global_chrono_merge = _env_flag("ARENA_MERGE_SORT")
+    arena_merge_order = (
+        (os.environ.get("ARENA_BLOCK_SORT") or os.environ.get("ARENA_SORT") or "desc")
+        .strip()
+        .lower()
+    )
+
     def _discord_scope_from_range_env() -> str | None:
         from .references.discord import parse_discord_url
 
@@ -1796,6 +1811,31 @@ def cat_cmd(
                     add_file_refs([path])
             else:
                 add_file_refs([p])
+
+    if arena_global_chrono_merge:
+        from .references.arena import ArenaReference
+
+        arena_slots = [
+            i for i, ref in enumerate(refs) if isinstance(ref, ArenaReference)
+        ]
+        if len(arena_slots) > 1:
+            arena_refs = [refs[i] for i in arena_slots]
+            if arena_merge_order == "random":
+                import random
+
+                random.shuffle(arena_refs)
+            else:
+                reverse = arena_merge_order not in {"date-asc"}
+                arena_refs.sort(
+                    key=lambda ref: (
+                        ref.block.get("connected_at")
+                        or ref.block.get("created_at")
+                        or ""
+                    ),
+                    reverse=reverse,
+                )
+            for idx, ref in zip(arena_slots, arena_refs, strict=False):
+                refs[idx] = ref
 
     skipped_paths = [os.path.abspath(p) for p in link_skip] if link_skip else []
     trace_items = []

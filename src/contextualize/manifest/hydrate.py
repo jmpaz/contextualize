@@ -988,11 +988,24 @@ def _parse_arena_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | No
             )
         result["sort_order"] = block_sort.lower().strip()
 
+    max_blocks_per_channel = raw.get("max-blocks-per-channel")
+    if max_blocks_per_channel is not None:
+        if (
+            not isinstance(max_blocks_per_channel, int)
+            or isinstance(max_blocks_per_channel, bool)
+            or max_blocks_per_channel <= 0
+        ):
+            raise ValueError(
+                f"{prefix}.max-blocks-per-channel must be a positive integer"
+            )
+        result["max_blocks_per_channel"] = max_blocks_per_channel
+
     allowed_keys = {
         "recurse-depth",
         "max-depth",
         "block-sort",
         "sort",
+        "max-blocks-per-channel",
         "recurse-users",
         "block",
     }
@@ -1126,6 +1139,7 @@ def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
     return (
         settings.max_depth,
         settings.sort_order,
+        settings.max_blocks_per_channel,
         settings.include_descriptions,
         settings.include_comments,
         settings.include_link_image_descriptions,
@@ -2606,6 +2620,10 @@ def _build_normalized_config(
         arena.pop("sort", None)
         arena["recurse-depth"] = arena_settings.max_depth
         arena["block-sort"] = arena_settings.sort_order
+        if arena_settings.max_blocks_per_channel is None:
+            arena.pop("max-blocks-per-channel", None)
+        else:
+            arena["max-blocks-per-channel"] = arena_settings.max_blocks_per_channel
         normalized["arena"] = arena
     if include_discord_defaults:
         discord_settings = build_discord_settings(discord_overrides)
