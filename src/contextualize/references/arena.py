@@ -1358,7 +1358,8 @@ def resolve_channel(
         if cached is not None:
             data = json.loads(cached)
             metadata = data["metadata"]
-            flat = [(path, block) for path, block in data["blocks"]]
+            flat_unsorted = [(path, block) for path, block in data["blocks"]]
+            flat = _sort_blocks(flat_unsorted, sort_order)
             channel_title = metadata.get("title") or slug
             _log(f"  using cached channel: {channel_title} ({len(flat)} items)")
             return metadata, flat
@@ -1370,14 +1371,16 @@ def resolve_channel(
         max_blocks_per_channel=max_blocks_per_channel,
         _recurse_users=recurse_users,
     )
-    flat = _flatten_channel_blocks(contents, slug)
-    flat = _sort_blocks(flat, sort_order)
+    flat_unsorted = _flatten_channel_blocks(contents, slug)
+    flat = _sort_blocks(flat_unsorted, sort_order)
 
     if use_cache:
         from ..cache.arena import store_channel
 
-        data = json.dumps({"metadata": metadata, "blocks": flat}, ensure_ascii=False)
-        block_count = len([b for _, b in flat if b.get("type") != "Channel"])
+        data = json.dumps(
+            {"metadata": metadata, "blocks": flat_unsorted}, ensure_ascii=False
+        )
+        block_count = len([b for _, b in flat_unsorted if b.get("type") != "Channel"])
         store_channel(cache_key, data, block_count)
 
     return metadata, flat
