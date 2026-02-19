@@ -20,8 +20,9 @@ from .helpers import (
     strip_content_type,
 )
 
-_JINA_HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+_HTML_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 _MARKDOWN_CONTENT_TYPES = frozenset({"text/markdown", "text/x-markdown"})
+_MARKDOWN_NEW_ENDPOINT = "https://markdown.new/"
 _JINA_ENDPOINT = "https://r.jina.ai/"
 
 
@@ -40,14 +41,14 @@ class URLReference:
     use_cache: bool = True
     cache_ttl: timedelta | None = None
     refresh_cache: bool = False
-    _bypass_jina: bool = field(default=False, init=False, repr=False)
+    _bypass_markdown_converter: bool = field(default=False, init=False, repr=False)
     _gist_filename: str | None = field(default=None, init=False, repr=False)
     _content_type: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.url.startswith(RAW_PREFIX):
             self.url = self.url[len(RAW_PREFIX) :]
-            self._bypass_jina = True
+            self._bypass_markdown_converter = True
         if self.filename_override:
             self._gist_filename = self.filename_override
         else:
@@ -97,37 +98,87 @@ class URLReference:
             return os.path.splitext(path)[1]
         return self.label
 
-    def _fetch_via_jina(self) -> str:
+    def _fetch_via_markdown_converter(self) -> str:
         import requests
 
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-Md-Heading-Style": "atx",
-            "X-Md-Bullet-List-Marker": "-",
-        }
-        api_key = os.environ.get("JINA_API_KEY")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        failures: list[str] = []
 
-        r = requests.post(
-            _JINA_ENDPOINT,
-            json={"url": self.url},
-            headers=headers,
-            timeout=30,
-        )
-        if r.status_code == 429:
-            raise ValueError(
-                f"Jina Reader rate limit exceeded for {self.url}. "
-                "Set JINA_API_KEY for higher limits: https://jina.ai/?sui=apikey"
+        def run_markdown_new() -> str:
+            response = requests.post(
+                _MARKDOWN_NEW_ENDPOINT,
+                json={"url": self.url},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/markdown, text/plain;q=0.9, application/json;q=0.8",
+                    "User-Agent": "contextualize",
+                },
+                timeout=30,
             )
-        r.raise_for_status()
+            response.raise_for_status()
+            content_type = strip_content_type(response.headers.get("Content-Type", ""))
+            if content_type and "json" in content_type:
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("JSON response was not an object")
+                for key in ("markdown", "content", "data"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value
+                raise ValueError("JSON response did not include markdown text")
 
-        data = r.json()
-        if data.get("code") != 200:
-            raise ValueError(f"Jina Reader error for {self.url}: {data}")
+            text = response.text.strip()
+            if not text:
+                raise ValueError("empty markdown response")
+            return text
 
-        return data.get("data", {}).get("content", "")
+        def run_jina() -> str:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-Md-Heading-Style": "atx",
+                "X-Md-Bullet-List-Marker": "-",
+            }
+            api_key = os.environ.get("JINA_API_KEY")
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            response = requests.post(
+                _JINA_ENDPOINT,
+                json={"url": self.url},
+                headers=headers,
+                timeout=30,
+            )
+            if response.status_code == 429:
+                raise ValueError(
+                    "Jina Reader rate limit exceeded. "
+                    "Set JINA_API_KEY for higher limits: https://jina.ai/?sui=apikey"
+                )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("code") != 200:
+                raise ValueError(f"Jina Reader error payload: {payload}")
+            value = payload.get("data", {}).get("content", "")
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("empty markdown response")
+            return value
+
+        providers = (
+            ("markdown.new", run_markdown_new),
+            ("jina", run_jina),
+        )
+        for provider_name, provider in providers:
+            try:
+                converted = provider().strip()
+            except Exception as exc:
+                failures.append(f"{provider_name}: {exc}")
+                continue
+            if not converted:
+                failures.append(f"{provider_name}: empty markdown response")
+                continue
+            return converted
+
+        failure_text = "; ".join(failures) if failures else "no providers configured"
+        raise ValueError(f"Markdown conversion failed for {self.url}: {failure_text}")
 
     def _try_fetch_markdown(self) -> tuple[str, bool]:
         return self._try_fetch_markdown_url(self.url)
@@ -241,8 +292,8 @@ class URLReference:
             head_content_type = ""
 
         self._content_type = head_content_type
-        try_markdown = not self._bypass_jina and (
-            head_content_type in _JINA_HTML_TYPES
+        try_markdown = not self._bypass_markdown_converter and (
+            head_content_type in _HTML_CONTENT_TYPES
             or head_content_type in _MARKDOWN_CONTENT_TYPES
         )
 
@@ -256,8 +307,9 @@ class URLReference:
                     )
             if got_markdown:
                 text = md_content
-            elif head_content_type in _JINA_HTML_TYPES:
-                text = self._fetch_via_jina()
+            elif head_content_type in _HTML_CONTENT_TYPES:
+                text = self._fetch_via_markdown_converter()
+                self._content_type = "text/markdown"
             else:
                 text = md_content
             self.original_file_content = text
@@ -275,8 +327,8 @@ class URLReference:
         try:
             r.raise_for_status()
         except requests.HTTPError:
-            if not self._bypass_jina and r.status_code in {401, 403}:
-                text = self._fetch_via_jina()
+            if not self._bypass_markdown_converter and r.status_code in {401, 403}:
+                text = self._fetch_via_markdown_converter()
                 self._content_type = "text/markdown"
                 self.original_file_content = text
                 self.file_content = text
