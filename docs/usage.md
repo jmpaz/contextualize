@@ -41,7 +41,7 @@ contextualize --prompt "what has changed in this patch?" shell "git diff --stage
 Collect file contents, with optional wrapping and labels.
 
 ```
-contextualize cat PATH [PATH...] [--ignore PATH] [--format md|xml|shell|raw] [--label relative|name|ext] [--tokens] [--git-pull] [--git-reclone]
+contextualize cat [PATH...] [--ignore PATH] [--format md|xml|shell|raw] [--label relative|name|ext] [--tokens] [--git-pull] [--git-reclone]
 ```
 
 `PATH` may also start with a git repo spec such as `github:user/repo` or `https://host/repo.git:path`.
@@ -49,6 +49,7 @@ It can also be an `http(s)` URL pointing to a UTF-8 file.
 Multiple paths can be separated with commas after the colon.
 Brace expressions and glob patterns in those paths are expanded after cloning.
 The `.git` suffix is optional and the repo will be cloned to `~/.local/share/contextualize/cache/git/` on first use.
+If no paths are provided and stdin includes `http(s)` URLs, `cat` extracts them and treats them as refs.
 
 Non-text files supported by [markitdown](https://github.com/microsoft/markitdown) are automatically converted to text.
 For Are.na and Discord media descriptions, source media bytes are cached locally; use `--refresh-media` to force a re-fetch.

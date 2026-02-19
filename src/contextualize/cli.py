@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from dataclasses import dataclass
 from collections.abc import Sequence
@@ -53,6 +54,45 @@ GLOBAL_OPTION_DEFAULTS = {
     "append_flag": False,
     "prepend_flag": False,
 }
+
+_STDIN_URL_RE = re.compile(r"https?://[^\s<>'\"`]+")
+_STDIN_URL_TRAILING = ".,;:!?"
+
+
+def _normalize_stdin_url(candidate: str) -> str:
+    value = candidate.strip()
+    if value.startswith("<") and value.endswith(">") and len(value) > 2:
+        value = value[1:-1]
+    value = value.rstrip(_STDIN_URL_TRAILING)
+    while value:
+        if value.endswith(")") and value.count("(") < value.count(")"):
+            value = value[:-1]
+            continue
+        if value.endswith("]") and value.count("[") < value.count("]"):
+            value = value[:-1]
+            continue
+        if value.endswith("}") and value.count("{") < value.count("}"):
+            value = value[:-1]
+            continue
+        if value.endswith(">"):
+            value = value[:-1]
+            continue
+        break
+    return value
+
+
+def _extract_stdin_urls(text: str) -> tuple[str, ...]:
+    if not text:
+        return ()
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in _STDIN_URL_RE.finditer(text):
+        url = _normalize_stdin_url(match.group(0))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return tuple(urls)
 
 
 @dataclass
@@ -1646,16 +1686,20 @@ def cat_cmd(
                 )
         return f"https://discord.com/channels/{guild_id}/{channel_id}"
 
+    stdin_data = ctx.obj.get("stdin_data", "")
     if len(paths) == 1 and paths[0] == "-":
         paths = ()
-
     if not paths:
         discord_scope = _discord_scope_from_range_env()
         if discord_scope:
             paths = (discord_scope,)
         else:
-            click.echo(ctx.get_help())
-            ctx.exit()
+            stdin_urls = _extract_stdin_urls(stdin_data)
+            if stdin_urls:
+                paths = stdin_urls
+            else:
+                click.echo(ctx.get_help())
+                ctx.exit()
 
     ctx.obj["format"] = format  # for segmentation
 

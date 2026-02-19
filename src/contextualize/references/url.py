@@ -272,7 +272,23 @@ class URLReference:
             return text
 
         r = requests.get(self.url, timeout=30, headers={"User-Agent": "contextualize"})
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.HTTPError:
+            if not self._bypass_jina and r.status_code in {401, 403}:
+                text = self._fetch_via_jina()
+                self._content_type = "text/markdown"
+                self.original_file_content = text
+                self.file_content = text
+                if self.inject:
+                    from ..render.inject import inject_content_in_text
+
+                    text = inject_content_in_text(
+                        text, self.depth, self.trace_collector, self.url
+                    )
+                self.file_content = text
+                return text
+            raise
         content_type = strip_content_type(r.headers.get("Content-Type", ""))
         self._content_type = content_type
         suffix = infer_url_suffix(self.url, dict(r.headers))
