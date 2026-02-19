@@ -40,6 +40,7 @@ def build_payload(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
+    atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
 ) -> PayloadResult:
     payload, input_refs, trace_items, base, skipped, impact = build_payload_impl(
@@ -58,6 +59,7 @@ def build_payload(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
         arena_overrides=arena_overrides,
+        atproto_overrides=atproto_overrides,
         discord_overrides=discord_overrides,
     )
     return PayloadResult(payload, input_refs, trace_items, base, skipped, impact)
@@ -73,6 +75,7 @@ def _prepare_manifest_payload(
     list[str],
     timedelta | None,
     dict | None,
+    dict[str, Any] | None,
     dict | None,
 ]:
     if not isinstance(data, dict):
@@ -106,9 +109,14 @@ def _prepare_manifest_payload(
         elif isinstance(raw_ttl, (int, float)):
             manifest_cache_ttl = timedelta(days=raw_ttl)
 
-    from .hydrate import _resolve_arena_config, _resolve_discord_config
+    from .hydrate import (
+        _resolve_arena_config,
+        _resolve_atproto_config,
+        _resolve_discord_config,
+    )
 
     arena_overrides = _resolve_arena_config(cfg)
+    atproto_overrides = _resolve_atproto_config(cfg)
     discord_overrides = _resolve_discord_config(cfg)
 
     return (
@@ -119,6 +127,7 @@ def _prepare_manifest_payload(
         link_skip_default,
         manifest_cache_ttl,
         arena_overrides,
+        atproto_overrides,
         discord_overrides,
     )
 
@@ -157,6 +166,7 @@ def render_manifest(
         link_skip_default,
         manifest_cache_ttl,
         arena_overrides,
+        atproto_overrides,
         discord_overrides,
     ) = _prepare_manifest_payload(data, base_dir_default)
 
@@ -178,6 +188,7 @@ def render_manifest(
         cache_ttl=effective_ttl,
         refresh_cache=refresh_cache,
         arena_overrides=arena_overrides,
+        atproto_overrides=atproto_overrides,
         discord_overrides=discord_overrides,
     )
 
@@ -207,6 +218,7 @@ def render_manifest_data(
         link_skip_default,
         manifest_cache_ttl,
         arena_overrides,
+        atproto_overrides,
         discord_overrides,
     ) = _prepare_manifest_payload(data, manifest_cwd)
 
@@ -228,5 +240,6 @@ def render_manifest_data(
         cache_ttl=effective_ttl,
         refresh_cache=refresh_cache,
         arena_overrides=arena_overrides,
+        atproto_overrides=atproto_overrides,
         discord_overrides=discord_overrides,
     )

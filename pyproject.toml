@@ -16,6 +16,7 @@ dependencies = [
   "tiktoken>=0.6.0",
   "requests>=2.25.0",
   "markitdown[all]>=0.1.4",
+  "lexrpc>=2.1",
 ]
 
 [project.urls]

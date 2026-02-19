@@ -16,13 +16,21 @@ from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..render.links import add_markdown_link_refs
 from .hydrate import (
     _merge_arena_overrides,
+    _merge_atproto_overrides,
     _merge_discord_overrides,
     _parse_arena_config_mapping,
+    _parse_atproto_config_mapping,
 )
 from ..references.discord import parse_discord_config_mapping
 from .manifest import coerce_file_spec, component_selectors
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_url
+from ..references.atproto import (
+    AtprotoReference,
+    build_atproto_settings,
+    is_atproto_url,
+    resolve_atproto_url,
+)
 from ..references.discord import (
     DiscordResolutionError,
     DiscordReference,
@@ -529,6 +537,54 @@ def _wrapped_discord_references(
     return refs, trace_inputs, trace_items
 
 
+def _wrapped_atproto_references(
+    url: str,
+    *,
+    filename: Optional[str],
+    wrap: Optional[str],
+    inject: bool,
+    depth: int,
+    label_suffix: str | None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    atproto_overrides: dict[str, Any] | None = None,
+) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
+    settings = build_atproto_settings(atproto_overrides)
+    documents = resolve_atproto_url(
+        url,
+        settings=settings,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+
+    refs: list[_SimpleReference] = []
+    trace_inputs: list[Any] = []
+    trace_items: list[tuple[str, str, int]] = []
+    for document in documents:
+        atproto_ref = AtprotoReference(
+            url,
+            document=document,
+            format="raw",
+            inject=inject,
+            depth=depth,
+        )
+        label = filename or atproto_ref.get_label()
+        if label_suffix:
+            label = f"{label} {label_suffix}"
+        wrapped = wrap_text(atproto_ref.output, wrap or "md", label)
+        simple_ref = _SimpleReference(
+            wrapped,
+            path=atproto_ref.path,
+            trace_path=atproto_ref.trace_path,
+            content=atproto_ref.file_content,
+        )
+        refs.append(simple_ref)
+        trace_inputs.append(simple_ref)
+    return refs, trace_inputs, trace_items
+
+
 def _resolve_spec_to_paths(
     raw_spec: str,
     base_dir: str,
@@ -638,6 +694,7 @@ def _resolve_spec_to_seed_refs(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
+    atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
     channel_tracker: _ArenaChannelTracker | None = None,
 ) -> tuple[List[Any], List[Any], List[tuple[str, str, int]]]:
@@ -674,6 +731,24 @@ def _resolve_spec_to_seed_refs(
                     refresh_cache=refresh_cache,
                 )["refs"]
                 seed_refs.extend(refs)
+        elif is_atproto_url(url):
+            atproto_refs, atproto_trace_inputs, atproto_trace_items = (
+                _wrapped_atproto_references(
+                    url,
+                    filename=filename,
+                    wrap=wrap,
+                    inject=inject,
+                    depth=depth,
+                    label_suffix=label_suffix,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                    atproto_overrides=atproto_overrides,
+                )
+            )
+            seed_refs.extend(atproto_refs)
+            trace_inputs.extend(atproto_trace_inputs)
+            channel_trace_items.extend(atproto_trace_items)
         elif is_youtube_url(url):
             seed_refs.append(
                 _wrapped_youtube_reference(
@@ -739,8 +814,34 @@ def _resolve_spec_to_seed_refs(
                     refresh_cache=refresh_cache,
                 )
             )
-        if not is_arena_url(url) and not is_discord_url(url):
+        if (
+            not is_arena_url(url)
+            and not is_discord_url(url)
+            and not is_atproto_url(url)
+        ):
             trace_inputs.extend([r for r in seed_refs if hasattr(r, "path")])
+        return seed_refs, trace_inputs, channel_trace_items
+
+    if is_atproto_url(spec):
+        filename = file_opts.get("filename")
+        wrap = file_opts.get("wrap")
+        atproto_refs, atproto_trace_inputs, atproto_trace_items = (
+            _wrapped_atproto_references(
+                spec,
+                filename=filename,
+                wrap=wrap,
+                inject=inject,
+                depth=depth,
+                label_suffix=label_suffix,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+                atproto_overrides=atproto_overrides,
+            )
+        )
+        seed_refs.extend(atproto_refs)
+        trace_inputs.extend(atproto_trace_inputs)
+        channel_trace_items.extend(atproto_trace_items)
         return seed_refs, trace_inputs, channel_trace_items
 
     tgt = parse_git_target(spec)
@@ -841,6 +942,7 @@ def _resolve_spec(
     cache_ttl: timedelta | None,
     refresh_cache: bool,
     effective_arena_overrides: dict | None,
+    effective_atproto_overrides: dict[str, Any] | None,
     effective_discord_overrides: dict | None,
     channel_tracker: _ArenaChannelTracker | None,
 ) -> _SpecResolution:
@@ -880,6 +982,7 @@ def _resolve_spec(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             arena_overrides=effective_arena_overrides,
+            atproto_overrides=effective_atproto_overrides,
             discord_overrides=effective_discord_overrides,
             channel_tracker=channel_tracker,
         )
@@ -957,6 +1060,7 @@ def build_payload_impl(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
+    atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
 ):
     parts: List[str] = []
@@ -1014,6 +1118,10 @@ def build_payload_impl(
         component_arena_overrides = _parse_arena_config_mapping(
             comp.get("arena"), prefix=f"component '{name}'.arena"
         )
+        component_atproto_overrides = _parse_atproto_config_mapping(
+            comp.get("atproto"),
+            prefix=f"component '{name}'.atproto",
+        )
         component_discord_overrides = parse_discord_config_mapping(
             comp.get("discord"), prefix=f"component '{name}'.discord"
         )
@@ -1048,6 +1156,15 @@ def build_payload_impl(
                 component_arena_overrides,
                 file_arena_overrides,
             )
+            file_atproto_overrides = _parse_atproto_config_mapping(
+                file_opts.get("atproto"),
+                prefix=f"component '{name}' file[{spec_index}].atproto",
+            )
+            effective_atproto_overrides = _merge_atproto_overrides(
+                atproto_overrides,
+                component_atproto_overrides,
+                file_atproto_overrides,
+            )
             file_discord_overrides = parse_discord_config_mapping(
                 file_opts.get("discord"),
                 prefix=f"component '{name}' file[{spec_index}].discord",
@@ -1078,7 +1195,7 @@ def build_payload_impl(
             spec_tasks.append(
                 (
                     spec_index,
-                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, eao=effective_arena_overrides, edo=effective_discord_overrides: (
+                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, eao=effective_arena_overrides, eatpo=effective_atproto_overrides, edo=effective_discord_overrides: (
                         _resolve_spec(
                             raw_spec=rs,
                             file_opts=fo,
@@ -1097,6 +1214,7 @@ def build_payload_impl(
                             cache_ttl=cache_ttl,
                             refresh_cache=refresh_cache,
                             effective_arena_overrides=eao,
+                            effective_atproto_overrides=eatpo,
                             effective_discord_overrides=edo,
                             channel_tracker=channel_tracker,
                         )

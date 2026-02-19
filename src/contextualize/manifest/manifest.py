@@ -16,6 +16,7 @@ _DEFAULT_KEYS = {
     "strip-paths",
     "gitignore",
     "arena",
+    "atproto",
     "discord",
 }
 _GROUP_KEYS = {"group", "components", *_DEFAULT_KEYS}

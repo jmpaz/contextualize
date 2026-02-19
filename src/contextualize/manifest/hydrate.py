@@ -19,6 +19,12 @@ from ..git.target import parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
 from ..references import URLReference, YouTubeReference, create_file_references
 from ..references.arena import is_arena_channel_url, is_arena_url
+from ..references.atproto import (
+    atproto_settings_cache_key,
+    build_atproto_settings,
+    is_atproto_url,
+    resolve_atproto_url,
+)
 from ..references.discord import (
     DiscordResolutionError,
     build_discord_settings,
@@ -98,6 +104,8 @@ class ResolvedItem:
     discord_scope_id: str | None = None
     discord_depth: int | None = None
     discord_settings_key: tuple[Any, ...] | None = None
+    atproto_kind: str | None = None
+    atproto_settings_key: tuple[Any, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -363,6 +371,7 @@ def build_hydration_plan_data(
     components = normalize_components(components)
 
     arena_overrides = _resolve_arena_config(cfg)
+    atproto_overrides = _resolve_atproto_config(cfg)
     discord_overrides = _resolve_discord_config(cfg)
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
@@ -370,6 +379,7 @@ def build_hydration_plan_data(
     context_dir = context_cfg["dir"]
     has_local_sources = _manifest_has_local_sources(components)
     has_arena_channels = _manifest_has_arena_channels(components)
+    has_atproto_sources = _manifest_has_atproto_sources(components)
     has_discord_channels = _manifest_has_discord_channels(components)
     use_external_root = context_cfg["path_strategy"] == "on-disk" and has_local_sources
 
@@ -388,6 +398,7 @@ def build_hydration_plan_data(
             bool,
             bool,
             str | None,
+            tuple[Any, ...] | None,
             tuple[Any, ...] | None,
             tuple[Any, ...] | None,
         ],
@@ -428,6 +439,10 @@ def build_hydration_plan_data(
         )
         component_arena_overrides = _parse_arena_config_mapping(
             comp.get("arena"), prefix=f"component '{comp_name}'.arena"
+        )
+        component_atproto_overrides = _parse_atproto_config_mapping(
+            comp.get("atproto"),
+            prefix=f"component '{comp_name}'.atproto",
         )
         component_discord_overrides = parse_discord_config_mapping(
             comp.get("discord"), prefix=f"component '{comp_name}'.discord"
@@ -494,8 +509,16 @@ def build_hydration_plan_data(
                     str | None,
                     tuple[Any, ...] | None,
                     tuple[Any, ...] | None,
+                    tuple[Any, ...] | None,
                 ],
-                tuple[str, Any | None, bool, dict | None, dict | None],
+                tuple[
+                    str,
+                    Any | None,
+                    bool,
+                    dict | None,
+                    dict[str, Any] | None,
+                    dict | None,
+                ],
             ] = {}
 
             for spec_index, (file_spec, force_git, spec_root) in enumerate(
@@ -519,6 +542,15 @@ def build_hydration_plan_data(
                     component_arena_overrides,
                     file_arena_overrides,
                 )
+                file_atproto_overrides = _parse_atproto_config_mapping(
+                    file_opts.get("atproto"),
+                    prefix=f"component '{comp_name}' file[{spec_index}].atproto",
+                )
+                effective_atproto_overrides = _merge_atproto_overrides(
+                    atproto_overrides,
+                    component_atproto_overrides,
+                    file_atproto_overrides,
+                )
                 file_discord_overrides = parse_discord_config_mapping(
                     file_opts.get("discord"),
                     prefix=f"component '{comp_name}' file[{spec_index}].discord",
@@ -530,6 +562,9 @@ def build_hydration_plan_data(
                 )
                 arena_overrides_key = _arena_overrides_cache_key(
                     effective_arena_overrides
+                )
+                atproto_overrides_key = _atproto_overrides_cache_key(
+                    effective_atproto_overrides
                 )
                 discord_overrides_key = _discord_overrides_cache_key(
                     effective_discord_overrides
@@ -543,6 +578,7 @@ def build_hydration_plan_data(
                     comp_gitignore,
                     cache_alias,
                     arena_overrides_key,
+                    atproto_overrides_key,
                     discord_overrides_key,
                 )
                 if (
@@ -554,6 +590,7 @@ def build_hydration_plan_data(
                         alias_hint,
                         force_git,
                         effective_arena_overrides,
+                        effective_atproto_overrides,
                         effective_discord_overrides,
                     )
 
@@ -572,7 +609,7 @@ def build_hydration_plan_data(
                 (
                     index,
                     (
-                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, eao=effective_arena_overrides, edo=effective_discord_overrides: (
+                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, eao=effective_arena_overrides, eatpo=effective_atproto_overrides, edo=effective_discord_overrides: (
                             _resolve_spec_items(
                                 rs,
                                 base_dir,
@@ -584,6 +621,7 @@ def build_hydration_plan_data(
                                 refresh_cache=context_cfg["refresh_cache"],
                                 force_git=fg,
                                 arena_overrides=eao,
+                                atproto_overrides=eatpo,
                                 discord_overrides=edo,
                             )
                         )
@@ -596,6 +634,7 @@ def build_hydration_plan_data(
                         alias_hint,
                         force_git,
                         effective_arena_overrides,
+                        effective_atproto_overrides,
                         effective_discord_overrides,
                     ),
                 ) in enumerate(pending_by_key.items())
@@ -606,6 +645,12 @@ def build_hydration_plan_data(
                 from ..references.arena import warmup_arena_network_stack
 
                 warmup_arena_network_stack()
+            if tasks and any(
+                is_atproto_url(raw_spec) for raw_spec, *_ in pending_by_key.values()
+            ):
+                from ..references.atproto import warmup_atproto_network_stack
+
+                warmup_atproto_network_stack()
             pending_keys = list(pending_by_key.keys())
             for task_index, result_items in run_indexed_tasks_fail_fast(
                 tasks, max_workers=spec_jobs
@@ -783,6 +828,8 @@ def build_hydration_plan_data(
                 include_root=has_local_sources,
                 include_arena_max_depth=has_arena_channels,
                 arena_overrides=arena_overrides,
+                include_atproto_defaults=has_atproto_sources,
+                atproto_overrides=atproto_overrides,
                 include_discord_defaults=has_discord_channels,
                 discord_overrides=discord_overrides,
             ),
@@ -1109,6 +1156,108 @@ def _arena_overrides_cache_key(
     return tuple(normalized)
 
 
+def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{prefix} must be a mapping")
+
+    allowed_keys = {
+        "max-items",
+        "thread-parent-height",
+        "thread-depth",
+        "include-replies",
+        "quote-depth",
+        "include-media-descriptions",
+        "include-embed-media-descriptions",
+        "media-mode",
+    }
+    unknown_keys = sorted(str(key) for key in raw.keys() if key not in allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"{prefix} has invalid keys: {', '.join(unknown_keys)}")
+
+    result: dict[str, Any] = {}
+
+    if "max-items" in raw:
+        value = raw["max-items"]
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{prefix}.max-items must be a positive integer")
+        result["max_items"] = value
+
+    if "thread-parent-height" in raw:
+        value = raw["thread-parent-height"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{prefix}.thread-parent-height must be >= 0")
+        result["thread_parent_height"] = value
+
+    if "thread-depth" in raw:
+        value = raw["thread-depth"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{prefix}.thread-depth must be >= 0")
+        result["thread_depth"] = value
+
+    if "include-replies" in raw:
+        value = raw["include-replies"]
+        if not isinstance(value, bool):
+            raise ValueError(f"{prefix}.include-replies must be a boolean")
+        result["include_replies"] = value
+
+    if "quote-depth" in raw:
+        value = raw["quote-depth"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{prefix}.quote-depth must be >= 0")
+        result["quote_depth"] = value
+
+    if "include-media-descriptions" in raw:
+        value = raw["include-media-descriptions"]
+        if not isinstance(value, bool):
+            raise ValueError(f"{prefix}.include-media-descriptions must be a boolean")
+        result["include_media_descriptions"] = value
+
+    if "include-embed-media-descriptions" in raw:
+        value = raw["include-embed-media-descriptions"]
+        if not isinstance(value, bool):
+            raise ValueError(
+                f"{prefix}.include-embed-media-descriptions must be a boolean"
+            )
+        result["include_embed_media_descriptions"] = value
+
+    if "media-mode" in raw:
+        value = raw["media-mode"]
+        if not isinstance(value, str) or value.strip().lower() not in {
+            "describe",
+            "transcribe",
+        }:
+            raise ValueError(
+                f"{prefix}.media-mode must be one of: describe, transcribe"
+            )
+        result["media_mode"] = value.strip().lower()
+
+    return result or None
+
+
+def _resolve_atproto_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    return _parse_atproto_config_mapping(cfg.get("atproto"), prefix="config.atproto")
+
+
+def _merge_atproto_overrides(
+    *overrides: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    merged: dict[str, Any] = {}
+    for item in overrides:
+        if item:
+            merged.update(item)
+    return merged or None
+
+
+def _atproto_overrides_cache_key(
+    overrides: dict[str, Any] | None,
+) -> tuple[Any, ...] | None:
+    if not overrides:
+        return None
+    return tuple((key, value) for key, value in sorted(overrides.items()))
+
+
 def _resolve_discord_config(cfg: dict[str, Any]) -> dict | None:
     return parse_discord_config_mapping(cfg.get("discord"), prefix="config.discord")
 
@@ -1127,6 +1276,10 @@ def _discord_overrides_cache_key(
 
 def _discord_settings_cache_key(settings: Any) -> tuple[Any, ...]:
     return discord_settings_cache_key(settings)
+
+
+def _atproto_settings_cache_key(settings: Any) -> tuple[Any, ...]:
+    return atproto_settings_cache_key(settings)
 
 
 def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
@@ -1280,7 +1433,7 @@ def _find_global_subpath_prefix(
         for file_spec, force_git, _root in all_specs:
             raw_spec, file_opts = coerce_file_spec(file_spec)
             raw_spec, _ = split_spec_symbols(raw_spec)
-            if is_http_url(raw_spec):
+            if is_http_url(raw_spec) or is_atproto_url(os.path.expanduser(raw_spec)):
                 continue
             try:
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
@@ -1326,6 +1479,25 @@ def _manifest_has_arena_channels(components: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _manifest_has_atproto_sources(components: list[dict[str, Any]]) -> bool:
+    for comp in components:
+        files = comp.get("files")
+        if not files or not isinstance(files, list):
+            continue
+        for file_spec in files:
+            raw_spec, _ = coerce_file_spec(file_spec)
+            spec = os.path.expanduser(raw_spec)
+            if is_atproto_url(spec):
+                return True
+            if not is_http_url(spec):
+                continue
+            opts = parse_target_spec(spec)
+            target = opts.get("target", spec)
+            if is_atproto_url(target):
+                return True
+    return False
+
+
 def _manifest_has_discord_channels(components: list[dict[str, Any]]) -> bool:
     for comp in components:
         files = comp.get("files")
@@ -1345,6 +1517,8 @@ def _manifest_has_discord_channels(components: list[dict[str, Any]]) -> bool:
 
 def _is_external_spec(raw_spec: str) -> bool:
     spec = os.path.expanduser(raw_spec)
+    if is_atproto_url(spec):
+        return True
     if is_http_url(spec):
         return True
     return parse_git_target(spec) is not None
@@ -1430,9 +1604,21 @@ def _resolve_spec_items(
     refresh_cache: bool = False,
     force_git: bool = False,
     arena_overrides: dict | None = None,
+    atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
+
+    if is_atproto_url(spec):
+        alias = alias_hint if isinstance(alias_hint, str) else None
+        return _resolve_atproto_items(
+            spec,
+            alias,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            atproto_overrides=atproto_overrides,
+        )
 
     if is_http_url(spec):
         opts = parse_target_spec(spec)
@@ -1513,6 +1699,16 @@ def _resolve_spec_items(
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
                 discord_overrides=discord_overrides,
+            )
+
+        if is_atproto_url(url):
+            return _resolve_atproto_items(
+                url,
+                alias,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+                atproto_overrides=atproto_overrides,
             )
 
         return [
@@ -1669,6 +1865,58 @@ def _resolve_youtube_item(
         manifest_spec=url,
         alias=alias if isinstance(alias, str) else None,
     )
+
+
+def _resolve_atproto_items(
+    url: str,
+    alias: Any | None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    atproto_overrides: dict[str, Any] | None = None,
+) -> list[ResolvedItem]:
+    settings = build_atproto_settings(atproto_overrides)
+    settings_key = _atproto_settings_cache_key(settings)
+    documents = resolve_atproto_url(
+        url,
+        settings=settings,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+
+    alias_prefix: str | None = None
+    if isinstance(alias, str) and alias.strip():
+        raw_alias = alias.strip()
+        if raw_alias.endswith(".md"):
+            raw_alias = raw_alias[:-3]
+        alias_prefix = _sanitize_path_segment(raw_alias, fallback="atproto")
+
+    items: list[ResolvedItem] = []
+    for document in documents:
+        context_subpath = document.context_subpath
+        if alias_prefix:
+            context_subpath = f"{alias_prefix}/{context_subpath}"
+        uri = document.uri
+        source_path = uri.replace("at://", "", 1) if uri.startswith("at://") else uri
+        items.append(
+            ResolvedItem(
+                source_type="atproto",
+                source_ref="atproto",
+                source_rev=None,
+                source_path=source_path or document.trace_path,
+                context_subpath=context_subpath,
+                content=document.rendered,
+                manifest_spec=url,
+                alias=alias if isinstance(alias, str) else None,
+                source_created=document.source_created,
+                source_modified=document.source_modified,
+                atproto_kind=document.kind,
+                atproto_settings_key=settings_key,
+            )
+        )
+    return items
 
 
 def _resolve_arena_items(
@@ -2274,6 +2522,7 @@ def _build_identity_key(
         item.source_rev,
         item.source_path,
         item.arena_settings_key if item.source_type == "arena" else None,
+        item.atproto_settings_key if item.source_type == "atproto" else None,
         item.discord_settings_key if item.source_type == "discord" else None,
         ranges_key,
         symbols_key,
@@ -2335,6 +2584,8 @@ def _build_external_path(
             / subpath
         )
     if item.source_type == "arena":
+        return prefix / subpath if prefix.parts else subpath
+    if item.source_type == "atproto":
         return prefix / subpath if prefix.parts else subpath
     if item.source_type == "discord":
         return prefix / subpath if prefix.parts else subpath
@@ -2460,7 +2711,7 @@ def _build_manifest_file_entry(
     comment: str | None,
     extras: dict[str, Any],
 ) -> dict[str, Any] | str:
-    key = "url" if item.source_type == "http" else "path"
+    key = "url" if item.source_type in {"http", "atproto"} else "path"
     entry = {key: item.manifest_spec}
     entry.update({k: v for k, v in extras.items() if k not in {"range", "symbols"}})
     if range_spec:
@@ -2585,6 +2836,8 @@ def _build_normalized_config(
     include_root: bool,
     include_arena_max_depth: bool,
     arena_overrides: dict[str, Any] | None,
+    include_atproto_defaults: bool,
+    atproto_overrides: dict[str, Any] | None,
     include_discord_defaults: bool,
     discord_overrides: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -2625,6 +2878,22 @@ def _build_normalized_config(
         else:
             arena["max-blocks-per-channel"] = arena_settings.max_blocks_per_channel
         normalized["arena"] = arena
+    if include_atproto_defaults:
+        atproto_settings = build_atproto_settings(atproto_overrides)
+        atproto = dict(cfg.get("atproto") or {})
+        atproto["max-items"] = atproto_settings.max_items
+        atproto["thread-parent-height"] = atproto_settings.thread_parent_height
+        atproto["thread-depth"] = atproto_settings.thread_depth
+        atproto["include-replies"] = atproto_settings.include_replies
+        atproto["quote-depth"] = atproto_settings.quote_depth
+        atproto["include-media-descriptions"] = (
+            atproto_settings.include_media_descriptions
+        )
+        atproto["include-embed-media-descriptions"] = (
+            atproto_settings.include_embed_media_descriptions
+        )
+        atproto["media-mode"] = atproto_settings.media_mode
+        normalized["atproto"] = atproto
     if include_discord_defaults:
         discord_settings = build_discord_settings(discord_overrides)
         discord = dict(cfg.get("discord") or {})

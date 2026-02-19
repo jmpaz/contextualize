@@ -21,6 +21,12 @@ from .helpers import (
 )
 from .url import URLReference
 from .arena import ArenaReference, is_arena_channel_url, is_arena_block_url
+from .atproto import (
+    AtprotoReference,
+    build_atproto_settings,
+    is_atproto_url,
+    resolve_atproto_url,
+)
 from .discord import (
     DiscordResolutionError,
     DiscordReference,
@@ -141,6 +147,32 @@ def create_file_references(
                     refresh_cache=refresh_cache,
                 )
             )
+            continue
+
+        if is_atproto_url(target):
+            atproto_settings = build_atproto_settings()
+            atproto_documents = resolve_atproto_url(
+                target,
+                settings=atproto_settings,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+            )
+            for document in atproto_documents:
+                file_references.append(
+                    AtprotoReference(
+                        target,
+                        document=document,
+                        format=format,
+                        label=label,
+                        label_suffix=label_suffix,
+                        include_token_count=include_token_count,
+                        token_target=token_target,
+                        inject=inject,
+                        depth=depth,
+                        trace_collector=trace_collector,
+                    )
+                )
             continue
 
         if is_arena_channel_url(target):

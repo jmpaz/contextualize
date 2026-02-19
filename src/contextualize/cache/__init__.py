@@ -3,6 +3,19 @@ from .arena import (
     get_cached_channel,
     store_channel,
 )
+from .atproto import (
+    ATPROTO_CACHE_ROOT,
+    get_cached_api_json as get_cached_atproto_api_json,
+    get_cached_handle_did,
+    get_cached_identity as get_cached_atproto_identity,
+    get_cached_media_bytes as get_cached_atproto_media_bytes,
+    get_cached_rendered as get_cached_atproto_rendered,
+    store_api_json as store_atproto_api_json,
+    store_handle_did,
+    store_identity as store_atproto_identity,
+    store_media_bytes as store_atproto_media_bytes,
+    store_rendered as store_atproto_rendered,
+)
 from .discord import (
     DISCORD_CACHE_ROOT,
     get_cached_api_json,
@@ -27,10 +40,16 @@ from .youtube import (
 
 __all__ = [
     "ARENA_CACHE_ROOT",
+    "ATPROTO_CACHE_ROOT",
     "DISCORD_CACHE_ROOT",
     "DEFAULT_TTL",
     "URL_CACHE_ROOT",
     "YOUTUBE_CACHE_ROOT",
+    "get_cached_atproto_api_json",
+    "get_cached_atproto_identity",
+    "get_cached_atproto_media_bytes",
+    "get_cached_atproto_rendered",
+    "get_cached_handle_did",
     "get_cached_api_json",
     "get_cached",
     "get_cached_channel",
@@ -39,6 +58,11 @@ __all__ = [
     "is_expired",
     "normalize_url",
     "parse_duration",
+    "store_atproto_api_json",
+    "store_atproto_identity",
+    "store_atproto_media_bytes",
+    "store_atproto_rendered",
+    "store_handle_did",
     "store_api_json",
     "store_cached",
     "store_channel",

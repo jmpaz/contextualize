@@ -1253,8 +1253,8 @@ def hydrate_cmd(
     """
     Materialize targets or a YAML manifest into a context folder.
 
-    Accepts file paths, directories, URLs, Are.na channels, Discord URLs, YouTube URLs,
-    or a single YAML manifest file.
+    Accepts file paths, directories, URLs, ATProto refs (`at://` and `bsky.app`),
+    Are.na channels, Discord URLs, YouTube URLs, or a single YAML manifest file.
     """
     used_options = _collect_used_global_option_labels(ctx)
     if used_options:
