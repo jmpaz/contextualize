@@ -351,7 +351,7 @@ def format_trace_output(
         else:
             token_str = f"({token_display} tokens)"
         if title:
-            line = f"  {rel_path} — {title} {token_str}"
+            line = f"  {rel_path} • {title} {token_str}"
         else:
             line = f"  {rel_path} {token_str}"
         lines.append(line)
@@ -365,7 +365,7 @@ def format_trace_output(
             path_token_widths = []
             for p, t, _chain, _title in formatted_discovered[depth]:
                 token_part = "(✓)" if t is None else f"({t})"
-                title_part = f" — {_title}" if _title else ""
+                title_part = f" • {_title}" if _title else ""
                 left_text = f"{p}{title_part} {token_part}"
                 path_token_widths.append(len(left_text))
             max_path_token_width = max(path_token_widths, default=0)
@@ -374,7 +374,7 @@ def format_trace_output(
                 depth
             ]:
                 token_part = "(✓)" if token_count is None else f"({token_count})"
-                title_part = f" — {title}" if title else ""
+                title_part = f" • {title}" if title else ""
                 left_text = f"{rel_path}{title_part} {token_part}"
                 padding = max_path_token_width - len(left_text)
 
@@ -390,7 +390,7 @@ def format_trace_output(
 
         for rel_path, token_count, source_chain, title in formatted_discovered[depth]:
             token_part = "(✓)" if token_count is None else f"({token_count})"
-            title_part = f" — {title}" if title else ""
+            title_part = f" • {title}" if title else ""
             left_text = f"{rel_path}{title_part} {token_part}"
             chain_text = f"← {source_chain}" if source_chain else ""
 
