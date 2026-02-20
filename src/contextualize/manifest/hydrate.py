@@ -8,7 +8,7 @@ import shutil
 import stat
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -107,6 +107,8 @@ class ResolvedItem:
     discord_settings_key: tuple[Any, ...] | None = None
     atproto_kind: str | None = None
     atproto_settings_key: tuple[Any, ...] | None = None
+    atproto_route_kind: str | None = None
+    atproto_scope_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,15 @@ class HydratePlan:
 
 @dataclass(frozen=True)
 class _ArenaPendingWrite:
+    rel_path: Path
+    content: str
+    should_write: bool
+    item: ResolvedItem
+    encounter_index: int
+
+
+@dataclass(frozen=True)
+class _AtprotoPendingWrite:
     rel_path: Path
     content: str
     should_write: bool
@@ -393,6 +404,8 @@ def build_hydration_plan_data(
     normalized_components: list[dict[str, Any]] = []
     arena_pending: dict[tuple[Any, ...], list[_ArenaPendingWrite]] = {}
     arena_seen_counter = 0
+    atproto_pending: dict[tuple[Any, ...], list[_AtprotoPendingWrite]] = {}
+    atproto_seen_counter = 0
     resolved_spec_cache: dict[
         tuple[
             str,
@@ -775,6 +788,37 @@ def build_hydration_plan_data(
                         )
                     )
                     continue
+                atproto_identity = _atproto_pending_key(item, ranges, symbols)
+                if atproto_identity:
+                    atproto_pending.setdefault(atproto_identity, []).append(
+                        _AtprotoPendingWrite(
+                            rel_path=rel_path,
+                            content=content,
+                            should_write=should_write,
+                            item=item,
+                            encounter_index=atproto_seen_counter,
+                        )
+                    )
+                    atproto_seen_counter += 1
+                    index_components.setdefault(comp_name, []).append(
+                        _build_index_entry(
+                            rel_path,
+                            item,
+                            ranges,
+                            symbols,
+                            content,
+                        )
+                    )
+                    normalized_files.append(
+                        _build_manifest_file_entry(
+                            item,
+                            range_spec,
+                            symbols,
+                            spec_comment,
+                            file_opts,
+                        )
+                    )
+                    continue
                 if should_write:
                     can_symlink = (
                         not context_cfg["copy"]
@@ -846,6 +890,13 @@ def build_hydration_plan_data(
 
     _materialize_arena_pending(
         arena_pending,
+        context_dir,
+        files_to_write,
+        files_to_symlink,
+        file_timestamps,
+    )
+    _materialize_atproto_pending(
+        atproto_pending,
         context_dir,
         files_to_write,
         files_to_symlink,
@@ -1233,6 +1284,7 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
         "include-media-descriptions",
         "include-embed-media-descriptions",
         "media-mode",
+        "include-lineage",
     }
     unknown_keys = sorted(str(key) for key in raw.keys() if key not in allowed_keys)
     if unknown_keys:
@@ -1367,6 +1419,12 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
                 f"{prefix}.media-mode must be one of: describe, transcribe"
             )
         result["media_mode"] = value.strip().lower()
+
+    if "include-lineage" in raw:
+        value = raw["include-lineage"]
+        if not isinstance(value, bool):
+            raise ValueError(f"{prefix}.include-lineage must be a boolean")
+        result["include_lineage"] = value
 
     return result or None
 
@@ -2002,6 +2060,105 @@ def _resolve_youtube_item(
     )
 
 
+def _parse_atproto_frontmatter(content: str) -> dict[str, Any] | None:
+    if not content.startswith("---\n"):
+        return None
+    end = content.find("\n---\n", 4)
+    if end == -1:
+        return None
+    block = content[4:end]
+    try:
+        import yaml
+
+        parsed = yaml.safe_load(block)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _atproto_metadata_str(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _parse_atproto_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.endswith("Z"):
+        cleaned = f"{cleaned[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_atproto_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return "0000-00-00T000000Z"
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+
+
+def _atproto_post_id_from_uri(uri: str) -> str:
+    cleaned = uri.strip().rstrip("/")
+    if not cleaned:
+        return "post"
+    leaf = cleaned.rsplit("/", 1)[-1].strip()
+    if not leaf:
+        return _sanitize_path_segment(cleaned, fallback="post")
+    return _sanitize_path_segment(leaf, fallback="post")
+
+
+def _atproto_document_root(context_subpath: str) -> Path:
+    path = _split_subpath(context_subpath)
+    parts = list(path.parts)
+    if "posts" in parts:
+        index = parts.index("posts")
+        if index > 0:
+            return Path(*parts[:index])
+    return path.parent
+
+
+def _atproto_route_kind(metadata: dict[str, Any]) -> str:
+    lineage_role = _atproto_metadata_str(metadata, "lineage_role")
+    reply_root_uri = _atproto_metadata_str(metadata, "reply_root_uri")
+    reply_to_uri = _atproto_metadata_str(metadata, "reply_to_uri")
+    if lineage_role == "root_anchor" or reply_root_uri or reply_to_uri:
+        return "replies"
+    entry_type = _atproto_metadata_str(metadata, "entry_type") or "post"
+    if entry_type == "repost":
+        return "reposts"
+    if entry_type == "like":
+        return "likes"
+    return "posts"
+
+
+def _atproto_document_timestamp(
+    document: Any,
+    metadata: dict[str, Any],
+) -> datetime | None:
+    for value in (
+        _atproto_metadata_str(metadata, "created_at"),
+        document.source_created,
+        document.source_modified,
+        _atproto_metadata_str(metadata, "activity_at"),
+    ):
+        parsed = _parse_atproto_timestamp(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _resolve_atproto_items(
     url: str,
     alias: Any | None,
@@ -2027,12 +2184,84 @@ def _resolve_atproto_items(
         if raw_alias.endswith(".md"):
             raw_alias = raw_alias[:-3]
         alias_prefix = _sanitize_path_segment(raw_alias, fallback="atproto")
+    posts_flat_mode = (
+        settings.replies_filter == "exclude"
+        and settings.reposts_filter == "exclude"
+        and settings.likes_filter == "exclude"
+    )
+
+    routed_docs: dict[int, dict[str, Any]] = {}
+    uri_timestamps: dict[str, datetime] = {}
+    bucket_timestamps: dict[str, datetime] = {}
+    for index, document in enumerate(documents):
+        metadata = _parse_atproto_frontmatter(document.rendered)
+        if not isinstance(metadata, dict):
+            continue
+        uri = _atproto_metadata_str(metadata, "uri")
+        if not uri:
+            continue
+        if _atproto_metadata_str(metadata, "entry_type") is None:
+            continue
+        route_kind = _atproto_route_kind(metadata)
+        doc_root = _atproto_document_root(document.context_subpath)
+        timestamp = _atproto_document_timestamp(document, metadata)
+        filename = f"{_format_atproto_timestamp(timestamp)}_{_atproto_post_id_from_uri(uri)}.md"
+        reply_root_uri = _atproto_metadata_str(metadata, "reply_root_uri")
+        reply_to_uri = _atproto_metadata_str(metadata, "reply_to_uri")
+        bucket_uri = None
+        if route_kind == "replies":
+            bucket_uri = reply_root_uri or reply_to_uri or uri
+        routed_docs[index] = {
+            "uri": uri,
+            "root": doc_root,
+            "route_kind": route_kind,
+            "filename": filename,
+            "bucket_uri": bucket_uri,
+        }
+        if timestamp is not None:
+            existing = uri_timestamps.get(uri)
+            if existing is None or timestamp < existing:
+                uri_timestamps[uri] = timestamp
+            if route_kind == "replies" and isinstance(bucket_uri, str) and bucket_uri:
+                bucket_existing = bucket_timestamps.get(bucket_uri)
+                if bucket_existing is None or timestamp < bucket_existing:
+                    bucket_timestamps[bucket_uri] = timestamp
 
     items: list[ResolvedItem] = []
-    for document in documents:
-        context_subpath = document.context_subpath
+    for index, document in enumerate(documents):
+        route_data = routed_docs.get(index)
+        if route_data:
+            route_kind = str(route_data["route_kind"])
+            doc_root = route_data["root"]
+            filename = str(route_data["filename"])
+            if route_kind == "posts":
+                if posts_flat_mode:
+                    routed_subpath = doc_root / filename
+                else:
+                    routed_subpath = doc_root / "posts" / filename
+            elif route_kind == "replies":
+                bucket_uri = str(
+                    route_data.get("bucket_uri") or route_data.get("uri") or ""
+                ).strip()
+                root_timestamp = uri_timestamps.get(bucket_uri)
+                fallback_timestamp = bucket_timestamps.get(bucket_uri)
+                bucket_timestamp = _format_atproto_timestamp(
+                    root_timestamp or fallback_timestamp
+                )
+                bucket_name = (
+                    f"{bucket_timestamp}_{_atproto_post_id_from_uri(bucket_uri)}"
+                )
+                routed_subpath = doc_root / "replies" / bucket_name / filename
+            else:
+                routed_subpath = doc_root / route_kind / filename
+            context_subpath = routed_subpath.as_posix()
+            atproto_route_kind = route_kind
+        else:
+            context_subpath = document.context_subpath
+            atproto_route_kind = None
         if alias_prefix:
             context_subpath = f"{alias_prefix}/{context_subpath}"
+
         uri = document.uri
         source_path = uri.replace("at://", "", 1) if uri.startswith("at://") else uri
         items.append(
@@ -2049,6 +2278,8 @@ def _resolve_atproto_items(
                 source_modified=document.source_modified,
                 atproto_kind=document.kind,
                 atproto_settings_key=settings_key,
+                atproto_route_kind=atproto_route_kind,
+                atproto_scope_id=url,
             )
         )
     return items
@@ -2656,6 +2887,8 @@ def _build_identity_key(
         item.source_ref,
         item.source_rev,
         item.source_path,
+        item.atproto_scope_id if item.source_type == "atproto" else None,
+        item.context_subpath if item.source_type == "atproto" else None,
         item.arena_settings_key if item.source_type == "arena" else None,
         item.atproto_settings_key if item.source_type == "atproto" else None,
         item.discord_settings_key if item.source_type == "discord" else None,
@@ -2930,6 +3163,85 @@ def _materialize_arena_pending(
             files_to_symlink.append((context_dir / occ.rel_path, canonical_path))
 
 
+_ATPROTO_ROUTE_PRIORITY: dict[str, int] = {
+    "posts": 0,
+    "replies": 1,
+    "reposts": 2,
+    "likes": 3,
+}
+
+
+def _atproto_pending_key(
+    item: ResolvedItem,
+    ranges: list[tuple[int, int]] | None,
+    symbols: list[str] | None,
+) -> tuple[Any, ...] | None:
+    if item.source_type != "atproto":
+        return None
+    route_kind = item.atproto_route_kind
+    if route_kind not in _ATPROTO_ROUTE_PRIORITY:
+        return None
+    source_scope = item.atproto_scope_id
+    if not isinstance(source_scope, str) or not source_scope:
+        return None
+    ranges_key = tuple(tuple(r) for r in ranges) if ranges else None
+    symbols_key = tuple(symbols) if symbols else None
+    return (
+        "atproto-post",
+        source_scope,
+        item.atproto_settings_key or (),
+        item.source_path,
+        ranges_key,
+        symbols_key,
+    )
+
+
+def _atproto_rank(item: ResolvedItem, encounter_index: int) -> tuple[int, int]:
+    route_kind = item.atproto_route_kind or ""
+    priority = _ATPROTO_ROUTE_PRIORITY.get(route_kind, 99)
+    return (priority, encounter_index)
+
+
+def _materialize_atproto_pending(
+    atproto_pending: dict[tuple[Any, ...], list[_AtprotoPendingWrite]],
+    context_dir: Path,
+    files_to_write: list[tuple[Path, str]],
+    files_to_symlink: list[tuple[Path, Path]],
+    file_timestamps: dict[Path, tuple[float, float]],
+) -> None:
+    for occurrences in atproto_pending.values():
+        canonical = min(
+            occurrences,
+            key=lambda occ: _atproto_rank(occ.item, occ.encounter_index),
+        )
+        canonical_path = context_dir / canonical.rel_path
+
+        writer = canonical
+        if not writer.should_write:
+            writer = next(
+                (
+                    occ
+                    for occ in occurrences
+                    if occ.rel_path == canonical.rel_path and occ.should_write
+                ),
+                writer,
+            )
+
+        if writer.should_write:
+            files_to_write.append((canonical_path, writer.content))
+            file_ts = _item_file_ts(writer.item)
+            if file_ts:
+                file_timestamps[canonical_path] = file_ts
+            dir_ts = _item_dir_ts(writer.item)
+            if dir_ts:
+                file_timestamps.setdefault(canonical_path.parent, dir_ts)
+
+        for occ in occurrences:
+            if occ.rel_path == canonical.rel_path:
+                continue
+            files_to_symlink.append((context_dir / occ.rel_path, canonical_path))
+
+
 def _dedupe_manifest_entries(files: list[Any]) -> list[Any]:
     deduped: list[Any] = []
     seen: set[str] = set()
@@ -3074,6 +3386,7 @@ def _build_normalized_config(
             atproto_settings.include_embed_media_descriptions
         )
         atproto["media-mode"] = atproto_settings.media_mode
+        atproto["include-lineage"] = atproto_settings.include_lineage
         normalized["atproto"] = atproto
     if include_discord_defaults:
         discord_settings = build_discord_settings(discord_overrides)

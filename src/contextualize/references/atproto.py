@@ -112,6 +112,7 @@ class AtprotoSettings:
     replies_filter: Literal["include", "exclude", "only"] = "include"
     reposts_filter: Literal["include", "exclude", "only"] = "include"
     likes_filter: Literal["include", "exclude", "only"] = "exclude"
+    include_lineage: bool = False
 
 
 @dataclass(frozen=True)
@@ -411,6 +412,10 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         os.environ.get("ATPROTO_LIKES", ""),
         default="exclude",
     )
+    include_lineage = _parse_bool(
+        os.environ.get("ATPROTO_INCLUDE_LINEAGE", ""),
+        default=False,
+    )
     _validate_created_window(
         created_after=created_after,
         created_before=created_before,
@@ -437,6 +442,7 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         replies_filter=replies_filter,
         reposts_filter=reposts_filter,
         likes_filter=likes_filter,
+        include_lineage=include_lineage,
     )
 
 
@@ -494,6 +500,10 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
         default=env.likes_filter,
         field="likes_filter",
     )
+    include_lineage_raw = overrides.get("include_lineage", env.include_lineage)
+    if not isinstance(include_lineage_raw, bool):
+        raise ValueError("include_lineage must be a boolean")
+    include_lineage = include_lineage_raw
     _validate_created_window(
         created_after=created_after,
         created_before=created_before,
@@ -520,12 +530,13 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
         replies_filter=replies_filter,
         reposts_filter=reposts_filter,
         likes_filter=likes_filter,
+        include_lineage=include_lineage,
     )
 
 
 def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
     return (
-        "v7",
+        "v8",
         "all" if settings.max_items is None else settings.max_items,
         settings.thread_depth,
         "all" if settings.post_ancestors is None else settings.post_ancestors,
@@ -540,6 +551,7 @@ def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
         settings.replies_filter,
         settings.reposts_filter,
         settings.likes_filter,
+        settings.include_lineage,
     )
 
 
@@ -1587,6 +1599,93 @@ def _fetch_direct_reply_posts(
     return output
 
 
+def _fetch_post_by_uri_cached(
+    *,
+    uri: str,
+    client: Any,
+    post_cache: dict[str, dict[str, Any] | None],
+) -> dict[str, Any] | None:
+    cleaned = uri.strip()
+    if not cleaned:
+        return None
+    if cleaned in post_cache:
+        return post_cache[cleaned]
+    try:
+        fetched = _fetch_post_by_uri(uri=cleaned, client=client)
+    except Exception as exc:
+        _log(f"  failed to fetch post for lineage ({cleaned}): {exc}")
+        post_cache[cleaned] = None
+        return None
+    post_cache[cleaned] = fetched
+    return fetched
+
+
+def _resolve_lineage_root_uri(
+    *,
+    post: dict[str, Any],
+    settings: AtprotoSettings,
+    client: Any,
+    root_uri_cache: dict[str, str | None],
+    post_cache: dict[str, dict[str, Any] | None],
+) -> str | None:
+    direct_root_uri = _reply_root_uri(post)
+    if direct_root_uri:
+        post_uri = post.get("uri")
+        if isinstance(post_uri, str) and post_uri:
+            root_uri_cache[post_uri] = direct_root_uri
+        return direct_root_uri
+    if not settings.include_lineage:
+        return None
+    post_uri = post.get("uri")
+    if not isinstance(post_uri, str) or not post_uri:
+        return None
+    if post_uri in root_uri_cache:
+        return root_uri_cache[post_uri]
+
+    parent_uri = _reply_parent_uri(post)
+    if not parent_uri:
+        root_uri_cache[post_uri] = None
+        return None
+    if parent_uri in root_uri_cache:
+        resolved = root_uri_cache[parent_uri]
+        root_uri_cache[post_uri] = resolved
+        return resolved
+
+    path: list[str] = [post_uri]
+    seen: set[str] = {post_uri}
+    current_uri = parent_uri
+    resolved_root: str | None = None
+    while current_uri:
+        if current_uri in root_uri_cache:
+            resolved_root = root_uri_cache[current_uri]
+            break
+        if current_uri in seen:
+            break
+        seen.add(current_uri)
+        path.append(current_uri)
+        current_post = _fetch_post_by_uri_cached(
+            uri=current_uri,
+            client=client,
+            post_cache=post_cache,
+        )
+        if not isinstance(current_post, dict):
+            resolved_root = current_uri
+            break
+        nested_root_uri = _reply_root_uri(current_post)
+        if nested_root_uri:
+            resolved_root = nested_root_uri
+            break
+        next_parent_uri = _reply_parent_uri(current_post)
+        if not next_parent_uri:
+            resolved_root = current_uri
+            break
+        current_uri = next_parent_uri
+
+    for uri in path:
+        root_uri_cache[uri] = resolved_root
+    return resolved_root
+
+
 def _render_post_document(
     *,
     post: dict[str, Any],
@@ -1599,6 +1698,8 @@ def _render_post_document(
     like_record_uri: str | None = None,
     reposted_by: str | None = None,
     activity_at: str | None = None,
+    resolved_reply_root_uri: str | None = None,
+    lineage_role: str | None = None,
 ) -> str:
     record = post.get("record")
     if not isinstance(record, dict):
@@ -1617,7 +1718,7 @@ def _render_post_document(
     web_url = _uri_to_bsky_url(uri, handle=author.get("handle"))
     quote_uri = quote_uris[0] if quote_uris else None
     reply_to_uri = _reply_parent_uri(post)
-    reply_root_uri = _reply_root_uri(post)
+    reply_root_uri = resolved_reply_root_uri or _reply_root_uri(post)
     if reply_root_uri == reply_to_uri:
         reply_root_uri = None
     display_name = author.get("displayName") if isinstance(author, dict) else None
@@ -1644,6 +1745,7 @@ def _render_post_document(
         "like_record_uri": like_record_uri,
         "reposted_by": reposted_by,
         "metrics": _post_metrics(post),
+        "lineage_role": lineage_role,
     }
     body = rendered_text or "(empty)"
     sections: list[str] = []
@@ -1737,6 +1839,9 @@ def _collect_post_documents(
     like_record_uri: str | None = None,
     reposted_by: str | None = None,
     activity_at: str | None = None,
+    root_uri_cache: dict[str, str | None],
+    post_cache: dict[str, dict[str, Any] | None],
+    lineage_role: str | None = None,
 ) -> list[AtprotoDocument]:
     uri = post.get("uri")
     if not isinstance(uri, str) or not uri:
@@ -1744,6 +1849,14 @@ def _collect_post_documents(
     if uri in emitted_uris:
         return []
     emitted_uris.add(uri)
+
+    resolved_reply_root_uri = _resolve_lineage_root_uri(
+        post=post,
+        settings=settings,
+        client=client,
+        root_uri_cache=root_uri_cache,
+        post_cache=post_cache,
+    )
 
     quote_uris: list[str] = []
     nested_docs: list[AtprotoDocument] = []
@@ -1770,6 +1883,8 @@ def _collect_post_documents(
                     quote_depth=quote_depth - 1,
                     quote_seen={*quote_seen, quote_uri},
                     expand_replies=False,
+                    root_uri_cache=root_uri_cache,
+                    post_cache=post_cache,
                 )
             )
 
@@ -1800,6 +1915,8 @@ def _collect_post_documents(
         like_record_uri=like_record_uri,
         reposted_by=reposted_by,
         activity_at=activity_at,
+        resolved_reply_root_uri=resolved_reply_root_uri,
+        lineage_role=lineage_role,
     )
     source_created, source_modified = _post_source_timestamps(post)
     documents = [
@@ -1816,6 +1933,37 @@ def _collect_post_documents(
         )
     ]
     documents.extend(nested_docs)
+
+    if (
+        settings.include_lineage
+        and resolved_reply_root_uri
+        and resolved_reply_root_uri != uri
+        and resolved_reply_root_uri not in emitted_uris
+    ):
+        root_post = _fetch_post_by_uri_cached(
+            uri=resolved_reply_root_uri,
+            client=client,
+            post_cache=post_cache,
+        )
+        if isinstance(root_post, dict):
+            documents.extend(
+                _collect_post_documents(
+                    post=root_post,
+                    source_url=source_url,
+                    kind=kind,
+                    root=root,
+                    settings=settings,
+                    client=client,
+                    index_counter=index_counter,
+                    emitted_uris=emitted_uris,
+                    quote_depth=0,
+                    quote_seen={resolved_reply_root_uri},
+                    expand_replies=False,
+                    root_uri_cache=root_uri_cache,
+                    post_cache=post_cache,
+                    lineage_role="root_anchor",
+                )
+            )
 
     for reply_post in reply_posts:
         reply_uri = reply_post.get("uri")
@@ -1836,6 +1984,8 @@ def _collect_post_documents(
                 quote_depth=settings.reply_quote_depth,
                 quote_seen={reply_uri},
                 expand_replies=False,
+                root_uri_cache=root_uri_cache,
+                post_cache=post_cache,
             )
         )
     return documents
@@ -1885,6 +2035,8 @@ def _post_documents_from_feed(
     documents: list[AtprotoDocument] = []
     emitted_uris: set[str] = set()
     index_counter = [0]
+    root_uri_cache: dict[str, str | None] = {}
+    post_cache: dict[str, dict[str, Any] | None] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -1904,6 +2056,8 @@ def _post_documents_from_feed(
                 quote_depth=settings.quote_depth,
                 quote_seen={str(post.get("uri") or "")},
                 expand_replies=True,
+                root_uri_cache=root_uri_cache,
+                post_cache=post_cache,
             )
         )
     return documents
@@ -2381,6 +2535,8 @@ def _post_documents_from_activity_items(
 ) -> list[AtprotoDocument]:
     documents: list[AtprotoDocument] = []
     emitted_uris: set[str] = set()
+    root_uri_cache: dict[str, str | None] = {}
+    post_cache: dict[str, dict[str, Any] | None] = {}
     resolvable_uris = {
         str(item.post.get("uri"))
         for item in items
@@ -2410,6 +2566,8 @@ def _post_documents_from_activity_items(
                     like_record_uri=item.like_record_uri,
                     reposted_by=item.reposted_by,
                     activity_at=item.activity_at_raw,
+                    root_uri_cache=root_uri_cache,
+                    post_cache=post_cache,
                 )
             )
             continue
@@ -2603,6 +2761,8 @@ def _resolve_post_documents(
     documents: list[AtprotoDocument] = []
     emitted_uris: set[str] = set()
     index_counter = [0]
+    root_uri_cache: dict[str, str | None] = {}
+    post_cache: dict[str, dict[str, Any] | None] = {}
     for post in posts:
         uri = post.get("uri")
         documents.extend(
@@ -2618,6 +2778,8 @@ def _resolve_post_documents(
                 quote_depth=settings.quote_depth,
                 quote_seen={str(uri or "")},
                 expand_replies=False,
+                root_uri_cache=root_uri_cache,
+                post_cache=post_cache,
             )
         )
     return documents
