@@ -1220,9 +1220,8 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
 
     allowed_keys = {
         "max-items",
-        "thread-parent-height",
         "thread-depth",
-        "include-replies",
+        "post-ancestors",
         "quote-depth",
         "max-replies",
         "reply-quote-depth",
@@ -1244,23 +1243,24 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
             raise ValueError(f"{prefix}.max-items must be a positive integer")
         result["max_items"] = value
 
-    if "thread-parent-height" in raw:
-        value = raw["thread-parent-height"]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"{prefix}.thread-parent-height must be >= 0")
-        result["thread_parent_height"] = value
-
     if "thread-depth" in raw:
         value = raw["thread-depth"]
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{prefix}.thread-depth must be >= 0")
         result["thread_depth"] = value
 
-    if "include-replies" in raw:
-        value = raw["include-replies"]
-        if not isinstance(value, bool):
-            raise ValueError(f"{prefix}.include-replies must be a boolean")
-        result["include_replies"] = value
+    if "post-ancestors" in raw:
+        value = raw["post-ancestors"]
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value < 0:
+                raise ValueError(f"{prefix}.post-ancestors must be >= 0 or 'all'")
+            result["post_ancestors"] = value
+        elif isinstance(value, str) and value.strip().lower() == "all":
+            result["post_ancestors"] = "all"
+        else:
+            raise ValueError(
+                f"{prefix}.post-ancestors must be a non-negative integer or 'all'"
+            )
 
     if "quote-depth" in raw:
         value = raw["quote-depth"]
@@ -3002,9 +3002,12 @@ def _build_normalized_config(
         atproto_settings = build_atproto_settings(atproto_overrides)
         atproto = dict(cfg.get("atproto") or {})
         atproto["max-items"] = atproto_settings.max_items
-        atproto["thread-parent-height"] = atproto_settings.thread_parent_height
+        atproto["post-ancestors"] = (
+            "all"
+            if atproto_settings.post_ancestors is None
+            else atproto_settings.post_ancestors
+        )
         atproto["thread-depth"] = atproto_settings.thread_depth
-        atproto["include-replies"] = atproto_settings.include_replies
         atproto["quote-depth"] = atproto_settings.quote_depth
         atproto["max-replies"] = atproto_settings.max_replies
         atproto["reply-quote-depth"] = atproto_settings.reply_quote_depth

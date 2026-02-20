@@ -95,9 +95,8 @@ def is_atproto_url(value: str) -> bool:
 @dataclass(frozen=True)
 class AtprotoSettings:
     max_items: int = 25
-    thread_parent_height: int = 8
     thread_depth: int = 6
-    include_replies: bool = False
+    post_ancestors: int | None = 0
     include_media_descriptions: bool = True
     include_embed_media_descriptions: bool = True
     media_mode: str = "describe"
@@ -152,6 +151,53 @@ def _parse_positive_int(value: str, *, default: int, minimum: int = 1) -> int:
     return parsed
 
 
+def _parse_post_ancestors_env(value: str) -> int | None:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return 0
+    if cleaned == "all":
+        return None
+    try:
+        parsed = int(cleaned)
+    except ValueError:
+        return 0
+    if parsed < 0:
+        return 0
+    return parsed
+
+
+def _normalize_post_ancestors_override(
+    value: Any,
+    *,
+    default: int | None,
+    field: str,
+) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a non-negative integer or 'all'")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(f"{field} must be >= 0")
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return default
+        if cleaned == "all":
+            return None
+        try:
+            parsed = int(cleaned)
+        except ValueError as exc:
+            raise ValueError(
+                f"{field} must be a non-negative integer or 'all'"
+            ) from exc
+        if parsed < 0:
+            raise ValueError(f"{field} must be >= 0")
+        return parsed
+    raise ValueError(f"{field} must be a non-negative integer or 'all'")
+
+
 def _parse_iso_datetime(value: str) -> datetime | None:
     return parse_timestamp_or_duration(value)
 
@@ -203,19 +249,13 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         default=25,
         minimum=1,
     )
-    thread_parent_height = _parse_positive_int(
-        os.environ.get("ATPROTO_THREAD_PARENT_HEIGHT", ""),
-        default=8,
-        minimum=0,
+    post_ancestors = _parse_post_ancestors_env(
+        os.environ.get("ATPROTO_POST_ANCESTORS", "")
     )
     thread_depth = _parse_positive_int(
         os.environ.get("ATPROTO_THREAD_DEPTH", ""),
         default=6,
         minimum=0,
-    )
-    include_replies = _parse_bool(
-        os.environ.get("ATPROTO_INCLUDE_REPLIES", "0"),
-        default=False,
     )
     include_media_descriptions = _parse_bool(
         os.environ.get("ATPROTO_MEDIA_DESCRIPTIONS", "1"),
@@ -253,9 +293,8 @@ def _atproto_settings_from_env() -> AtprotoSettings:
     )
     return AtprotoSettings(
         max_items=max_items,
-        thread_parent_height=thread_parent_height,
         thread_depth=thread_depth,
-        include_replies=include_replies,
+        post_ancestors=post_ancestors,
         include_media_descriptions=include_media_descriptions,
         include_embed_media_descriptions=include_embed_media_descriptions,
         media_mode=media_mode,
@@ -272,11 +311,12 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
     if not overrides:
         return env
     max_items = int(overrides.get("max_items", env.max_items))
-    thread_parent_height = int(
-        overrides.get("thread_parent_height", env.thread_parent_height)
+    post_ancestors = _normalize_post_ancestors_override(
+        overrides.get("post_ancestors", env.post_ancestors),
+        default=env.post_ancestors,
+        field="post_ancestors",
     )
     thread_depth = int(overrides.get("thread_depth", env.thread_depth))
-    include_replies = bool(overrides.get("include_replies", env.include_replies))
     include_media_descriptions = bool(
         overrides.get("include_media_descriptions", env.include_media_descriptions)
     )
@@ -308,9 +348,8 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
     )
     return AtprotoSettings(
         max_items=max(1, max_items),
-        thread_parent_height=max(0, thread_parent_height),
         thread_depth=max(0, thread_depth),
-        include_replies=include_replies,
+        post_ancestors=post_ancestors,
         include_media_descriptions=include_media_descriptions,
         include_embed_media_descriptions=include_embed_media_descriptions,
         media_mode=media_mode,
@@ -324,11 +363,10 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
 
 def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
     return (
-        "v2",
+        "v5",
         settings.max_items,
-        settings.thread_parent_height,
         settings.thread_depth,
-        settings.include_replies,
+        "all" if settings.post_ancestors is None else settings.post_ancestors,
         settings.include_media_descriptions,
         settings.include_embed_media_descriptions,
         settings.media_mode,
@@ -1602,64 +1640,6 @@ def _collect_post_documents(
     return documents
 
 
-def _thread_posts(
-    thread: Any, *, include_replies: bool
-) -> tuple[list[tuple[dict[str, Any], list[str]]], dict[str, int]]:
-    seen: set[str] = set()
-    output: list[tuple[dict[str, Any], list[str]]] = []
-    stats = {"blocked": 0, "not_found": 0}
-
-    def walk_parent(node: Any) -> None:
-        if not isinstance(node, dict):
-            return
-        ntype = str(node.get("$type") or "")
-        if "blocked" in ntype.lower():
-            stats["blocked"] += 1
-            return
-        if "notfound" in ntype.lower():
-            stats["not_found"] += 1
-            return
-        post = node.get("post")
-        if isinstance(post, dict):
-            uri = str(post.get("uri") or "")
-            if uri and uri not in seen:
-                seen.add(uri)
-                output.append((post, ["parent"]))
-            parent = node.get("parent")
-            if isinstance(parent, dict):
-                walk_parent(parent)
-
-    def walk(node: Any) -> None:
-        if not isinstance(node, dict):
-            return
-        ntype = str(node.get("$type") or "")
-        if "blocked" in ntype.lower():
-            stats["blocked"] += 1
-            return
-        if "notfound" in ntype.lower():
-            stats["not_found"] += 1
-            return
-        post = node.get("post")
-        if not isinstance(post, dict):
-            return
-        uri = str(post.get("uri") or "")
-        if uri and uri not in seen:
-            seen.add(uri)
-            output.append((post, ["thread"]))
-        parent = node.get("parent")
-        if isinstance(parent, dict):
-            walk_parent(parent)
-        if include_replies:
-            replies = node.get("replies")
-            if isinstance(replies, list):
-                for reply in replies:
-                    if isinstance(reply, dict):
-                        walk(reply)
-
-    walk(thread)
-    return output, stats
-
-
 def _summary_document(
     *,
     source_url: str,
@@ -1772,6 +1752,61 @@ def _paginate_feed_entries(
     return entries
 
 
+def _thread_root_post(thread: Any) -> dict[str, Any] | None:
+    if not isinstance(thread, dict):
+        return None
+    ntype = str(thread.get("$type") or "")
+    if "blocked" in ntype.lower() or "notfound" in ntype.lower():
+        return None
+    post = thread.get("post")
+    if isinstance(post, dict):
+        return post
+    return None
+
+
+def _fetch_post_by_uri(*, uri: str, client: Any) -> dict[str, Any] | None:
+    response = _client_call(
+        "feed.getPostThread",
+        client.app.bsky.feed.getPostThread,
+        uri=uri,
+        depth=0,
+        parentHeight=0,
+    )
+    return _thread_root_post(response.get("thread"))
+
+
+def _post_and_ancestor_chain(
+    *,
+    target_uri: str,
+    client: Any,
+    parent_limit: int | None,
+) -> list[dict[str, Any]]:
+    root_post = _fetch_post_by_uri(uri=target_uri, client=client)
+    if root_post is None:
+        return []
+    chain = [root_post]
+    seen = {str(root_post.get("uri") or target_uri)}
+    current = root_post
+    remaining = parent_limit
+    while remaining is None or remaining > 0:
+        parent_uri = _reply_parent_uri(current)
+        if parent_uri is None or parent_uri in seen:
+            break
+        parent_post = _fetch_post_by_uri(uri=parent_uri, client=client)
+        if parent_post is None:
+            break
+        parent_post_uri = str(parent_post.get("uri") or parent_uri)
+        if parent_post_uri in seen:
+            break
+        chain.append(parent_post)
+        seen.add(parent_uri)
+        seen.add(parent_post_uri)
+        current = parent_post
+        if remaining is not None:
+            remaining -= 1
+    return chain
+
+
 def _resolve_post_documents(
     target: AtprotoTarget,
     *,
@@ -1780,22 +1815,21 @@ def _resolve_post_documents(
     settings: AtprotoSettings,
 ) -> list[AtprotoDocument]:
     assert target.uri is not None
-    response = _client_call(
-        "feed.getPostThread",
-        client.app.bsky.feed.getPostThread,
-        uri=target.uri,
-        depth=settings.thread_depth,
-        parentHeight=settings.thread_parent_height,
+    posts = _post_and_ancestor_chain(
+        target_uri=target.uri,
+        client=client,
+        parent_limit=settings.post_ancestors,
     )
-    thread = response.get("thread")
-    posts, _ = _thread_posts(thread, include_replies=settings.include_replies)
+    if not posts:
+        return []
     repo, _collection, _rkey = _parse_at_uri(target.uri)
     root_actor = target.actor or repo or "profile"
     root = "atproto/profile/" + _safe_slug(str(root_actor), "profile")
     documents: list[AtprotoDocument] = []
     emitted_uris: set[str] = set()
     index_counter = [0]
-    for post, _context in posts:
+    for post in posts:
+        uri = post.get("uri")
         documents.extend(
             _collect_post_documents(
                 post=post,
@@ -1807,8 +1841,8 @@ def _resolve_post_documents(
                 index_counter=index_counter,
                 emitted_uris=emitted_uris,
                 quote_depth=settings.quote_depth,
-                quote_seen={str(post.get("uri") or "")},
-                expand_replies=True,
+                quote_seen={str(uri or "")},
+                expand_replies=False,
             )
         )
     return documents
