@@ -1272,6 +1272,38 @@ def _post_metrics(post: dict[str, Any]) -> dict[str, int]:
     return metrics
 
 
+def _reply_parent_uri(post: dict[str, Any]) -> str | None:
+    record = post.get("record")
+    if not isinstance(record, dict):
+        record = post.get("value") if isinstance(post.get("value"), dict) else {}
+    for reply in (record.get("reply"), post.get("reply")):
+        if not isinstance(reply, dict):
+            continue
+        parent = reply.get("parent")
+        if not isinstance(parent, dict):
+            continue
+        uri = parent.get("uri")
+        if isinstance(uri, str) and uri.strip():
+            return uri.strip()
+    return None
+
+
+def _reply_root_uri(post: dict[str, Any]) -> str | None:
+    record = post.get("record")
+    if not isinstance(record, dict):
+        record = post.get("value") if isinstance(post.get("value"), dict) else {}
+    for reply in (record.get("reply"), post.get("reply")):
+        if not isinstance(reply, dict):
+            continue
+        root = reply.get("root")
+        if not isinstance(root, dict):
+            continue
+        uri = root.get("uri")
+        if isinstance(uri, str) and uri.strip():
+            return uri.strip()
+    return None
+
+
 def _collect_quote_post(
     post: dict[str, Any],
 ) -> tuple[str | None, dict[str, Any] | None]:
@@ -1359,6 +1391,11 @@ def _render_post_document(
     facets = record.get("facets") if isinstance(record.get("facets"), list) else []
     rendered_text = _render_rich_text(text, facets)
     web_url = _uri_to_bsky_url(uri, handle=author.get("handle"))
+    quote_uri = quote_uris[0] if quote_uris else None
+    reply_to_uri = _reply_parent_uri(post)
+    reply_root_uri = _reply_root_uri(post)
+    if reply_root_uri == reply_to_uri:
+        reply_root_uri = None
     display_name = author.get("displayName") if isinstance(author, dict) else None
     if not isinstance(display_name, str) or not display_name.strip():
         display_name = (
@@ -1373,13 +1410,14 @@ def _render_post_document(
         if isinstance(display_name, str) and display_name.strip()
         else None,
         "created_at": created_at,
+        "reply_root_uri": reply_root_uri,
+        "reply_to_uri": reply_to_uri,
         "source_url": source_url,
+        "quoted_post_uri": quote_uri,
         "metrics": _post_metrics(post),
     }
     body = rendered_text or "(empty)"
     sections: list[str] = []
-    if quote_uris:
-        sections.append("## Quote\n\n" + "\n".join(f"- {item}" for item in quote_uris))
     if reply_uris:
         sections.append(
             "## Replies\n\n" + "\n".join(f"- {item}" for item in reply_uris)
