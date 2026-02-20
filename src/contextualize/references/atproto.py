@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Literal, cast
 from urllib.parse import urlparse
 
 from ..render.text import process_text
@@ -28,6 +28,7 @@ _BSKY_HANDLE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _VALID_MEDIA_MODES = frozenset({"describe", "transcribe"})
+_VALID_ACTIVITY_FILTER_MODES = frozenset({"include", "exclude", "only"})
 _MEDIA_DOWNLOAD_HEADERS = {
     "User-Agent": "contextualize/atproto",
     "Accept": "image/*,video/*,audio/*,application/octet-stream,*/*;q=0.8",
@@ -50,6 +51,9 @@ _KNOWN_KIND_TO_COLLECTION = {
 _DEFAULT_PUBLIC_APPVIEW = "https://public.api.bsky.app"
 _DEFAULT_PDS = "https://bsky.social"
 _ATPROTO_FEED_PAGE_LIMIT = 100
+_ATPROTO_POSTS_BATCH_LIMIT = 25
+_ATPROTO_LIKES_COLLECTION = "app.bsky.feed.like"
+_ATPROTO_HTTP_TIMEOUT_SECONDS = 30
 
 
 def _log(message: str) -> None:
@@ -105,6 +109,9 @@ class AtprotoSettings:
     reply_quote_depth: int = 1
     created_after: datetime | None = None
     created_before: datetime | None = None
+    replies_filter: Literal["include", "exclude", "only"] = "include"
+    reposts_filter: Literal["include", "exclude", "only"] = "include"
+    likes_filter: Literal["include", "exclude", "only"] = "exclude"
 
 
 @dataclass(frozen=True)
@@ -129,6 +136,17 @@ class AtprotoDocument:
     rendered: str
     source_created: str | None = None
     source_modified: str | None = None
+
+
+@dataclass(frozen=True)
+class _ActivityItem:
+    post: dict[str, Any] | None
+    entry_type: Literal["post", "repost", "like"]
+    activity_at: datetime | None
+    activity_at_raw: str | None = None
+    liked_subject_uri: str | None = None
+    like_record_uri: str | None = None
+    reposted_by: str | None = None
 
 
 def _parse_bool(value: str, *, default: bool) -> bool:
@@ -287,6 +305,57 @@ def _parse_media_mode(value: str, *, default: str) -> str:
     return default
 
 
+def _parse_activity_filter_env(
+    value: str,
+    *,
+    default: Literal["include", "exclude", "only"],
+) -> Literal["include", "exclude", "only"]:
+    cleaned = value.strip().lower()
+    if cleaned in _VALID_ACTIVITY_FILTER_MODES:
+        return cast(Literal["include", "exclude", "only"], cleaned)
+    return default
+
+
+def _normalize_activity_filter_override(
+    value: Any,
+    *,
+    default: Literal["include", "exclude", "only"],
+    field: str,
+) -> Literal["include", "exclude", "only"]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return default
+        if cleaned in _VALID_ACTIVITY_FILTER_MODES:
+            return cast(Literal["include", "exclude", "only"], cleaned)
+    raise ValueError(f"{field} must be one of: include, exclude, only")
+
+
+def _validate_activity_filters(
+    *,
+    replies_filter: Literal["include", "exclude", "only"],
+    reposts_filter: Literal["include", "exclude", "only"],
+    likes_filter: Literal["include", "exclude", "only"],
+    scope: str,
+) -> None:
+    only_modes = [
+        name
+        for name, mode in (
+            ("replies", replies_filter),
+            ("reposts", reposts_filter),
+            ("likes", likes_filter),
+        )
+        if mode == "only"
+    ]
+    if len(only_modes) > 1:
+        joined = ", ".join(only_modes)
+        raise ValueError(
+            f"{scope} can set at most one of replies/reposts/likes to 'only' (got: {joined})"
+        )
+
+
 def _atproto_settings_from_env() -> AtprotoSettings:
     _load_dotenv()
     max_items = _parse_max_items_env(
@@ -330,9 +399,27 @@ def _atproto_settings_from_env() -> AtprotoSettings:
     )
     created_after = _parse_iso_datetime(os.environ.get("ATPROTO_CREATED_AFTER", ""))
     created_before = _parse_iso_datetime(os.environ.get("ATPROTO_CREATED_BEFORE", ""))
+    replies_filter = _parse_activity_filter_env(
+        os.environ.get("ATPROTO_REPLIES", ""),
+        default="include",
+    )
+    reposts_filter = _parse_activity_filter_env(
+        os.environ.get("ATPROTO_REPOSTS", ""),
+        default="include",
+    )
+    likes_filter = _parse_activity_filter_env(
+        os.environ.get("ATPROTO_LIKES", ""),
+        default="exclude",
+    )
     _validate_created_window(
         created_after=created_after,
         created_before=created_before,
+        scope="ATPROTO",
+    )
+    _validate_activity_filters(
+        replies_filter=replies_filter,
+        reposts_filter=reposts_filter,
+        likes_filter=likes_filter,
         scope="ATPROTO",
     )
     return AtprotoSettings(
@@ -347,6 +434,9 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         reply_quote_depth=reply_quote_depth,
         created_after=created_after,
         created_before=created_before,
+        replies_filter=replies_filter,
+        reposts_filter=reposts_filter,
+        likes_filter=likes_filter,
     )
 
 
@@ -389,9 +479,30 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
         overrides.get("created_before", env.created_before),
         field="created_before",
     )
+    replies_filter = _normalize_activity_filter_override(
+        overrides.get("replies_filter", env.replies_filter),
+        default=env.replies_filter,
+        field="replies_filter",
+    )
+    reposts_filter = _normalize_activity_filter_override(
+        overrides.get("reposts_filter", env.reposts_filter),
+        default=env.reposts_filter,
+        field="reposts_filter",
+    )
+    likes_filter = _normalize_activity_filter_override(
+        overrides.get("likes_filter", env.likes_filter),
+        default=env.likes_filter,
+        field="likes_filter",
+    )
     _validate_created_window(
         created_after=created_after,
         created_before=created_before,
+        scope="atproto",
+    )
+    _validate_activity_filters(
+        replies_filter=replies_filter,
+        reposts_filter=reposts_filter,
+        likes_filter=likes_filter,
         scope="atproto",
     )
     return AtprotoSettings(
@@ -406,12 +517,15 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
         reply_quote_depth=max(0, reply_quote_depth),
         created_after=created_after,
         created_before=created_before,
+        replies_filter=replies_filter,
+        reposts_filter=reposts_filter,
+        likes_filter=likes_filter,
     )
 
 
 def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
     return (
-        "v6",
+        "v7",
         "all" if settings.max_items is None else settings.max_items,
         settings.thread_depth,
         "all" if settings.post_ancestors is None else settings.post_ancestors,
@@ -423,6 +537,9 @@ def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
         settings.reply_quote_depth,
         settings.created_after.isoformat() if settings.created_after else None,
         settings.created_before.isoformat() if settings.created_before else None,
+        settings.replies_filter,
+        settings.reposts_filter,
+        settings.likes_filter,
     )
 
 
@@ -1461,6 +1578,11 @@ def _render_post_document(
     settings: AtprotoSettings,
     quote_uris: list[str],
     reply_uris: list[str],
+    entry_type: Literal["post", "repost", "like"] = "post",
+    liked_subject_uri: str | None = None,
+    like_record_uri: str | None = None,
+    reposted_by: str | None = None,
+    activity_at: str | None = None,
 ) -> str:
     record = post.get("record")
     if not isinstance(record, dict):
@@ -1492,14 +1614,19 @@ def _render_post_document(
     metadata = {
         "uri": uri or None,
         "url": web_url,
+        "entry_type": entry_type,
         "author_name": display_name.strip()
         if isinstance(display_name, str) and display_name.strip()
         else None,
         "created_at": created_at,
+        "activity_at": activity_at,
         "reply_root_uri": reply_root_uri,
         "reply_to_uri": reply_to_uri,
         "source_url": source_url,
         "quoted_post_uri": quote_uri,
+        "liked_subject_uri": liked_subject_uri,
+        "like_record_uri": like_record_uri,
+        "reposted_by": reposted_by,
         "metrics": _post_metrics(post),
     }
     body = rendered_text or "(empty)"
@@ -1589,6 +1716,11 @@ def _collect_post_documents(
     quote_depth: int,
     quote_seen: set[str],
     expand_replies: bool,
+    entry_type: Literal["post", "repost", "like"] = "post",
+    liked_subject_uri: str | None = None,
+    like_record_uri: str | None = None,
+    reposted_by: str | None = None,
+    activity_at: str | None = None,
 ) -> list[AtprotoDocument]:
     uri = post.get("uri")
     if not isinstance(uri, str) or not uri:
@@ -1647,6 +1779,11 @@ def _collect_post_documents(
         settings=settings,
         quote_uris=quote_uris,
         reply_uris=reply_uris,
+        entry_type=entry_type,
+        liked_subject_uri=liked_subject_uri,
+        like_record_uri=like_record_uri,
+        reposted_by=reposted_by,
+        activity_at=activity_at,
     )
     source_created, source_modified = _post_source_timestamps(post)
     documents = [
@@ -1756,12 +1893,554 @@ def _post_documents_from_feed(
     return documents
 
 
+def _is_repost_feed_entry(entry: dict[str, Any]) -> bool:
+    reason = entry.get("reason")
+    if not isinstance(reason, dict):
+        return False
+    reason_type = str(reason.get("$type") or "")
+    return "reasonrepost" in reason_type.lower()
+
+
+def _is_reply_feed_entry(entry: dict[str, Any], post: dict[str, Any]) -> bool:
+    if isinstance(entry.get("reply"), dict):
+        return True
+    return _reply_parent_uri(post) is not None
+
+
+def _feed_entry_reposted_by(entry: dict[str, Any]) -> str | None:
+    reason = entry.get("reason")
+    if not isinstance(reason, dict):
+        return None
+    by = reason.get("by")
+    if not isinstance(by, dict):
+        return None
+    rendered = _author_name(by).strip()
+    return rendered or None
+
+
+def _post_primary_timestamp_raw(post: dict[str, Any]) -> str | None:
+    record = post.get("record")
+    if not isinstance(record, dict):
+        record = post.get("value") if isinstance(post.get("value"), dict) else {}
+    for key in ("createdAt", "indexedAt"):
+        value = record.get(key) if key in record else post.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _feed_entry_activity(
+    entry: dict[str, Any], post: dict[str, Any]
+) -> tuple[datetime | None, str | None]:
+    reason = entry.get("reason")
+    if isinstance(reason, dict):
+        indexed_at = reason.get("indexedAt")
+        if isinstance(indexed_at, str) and indexed_at:
+            return _parse_iso_datetime(indexed_at), indexed_at
+    raw = _post_primary_timestamp_raw(post)
+    if raw is None:
+        return None, None
+    return _parse_iso_datetime(raw), raw
+
+
+def _like_record_activity(record: dict[str, Any]) -> tuple[datetime | None, str | None]:
+    value = record.get("value")
+    if isinstance(value, dict):
+        created_at = value.get("createdAt")
+        if isinstance(created_at, str) and created_at:
+            return _parse_iso_datetime(created_at), created_at
+    indexed_at = record.get("indexedAt")
+    if isinstance(indexed_at, str) and indexed_at:
+        return _parse_iso_datetime(indexed_at), indexed_at
+    return None, None
+
+
+def _entry_matches_activity_filters(
+    *,
+    entry: dict[str, Any],
+    post: dict[str, Any],
+    settings: AtprotoSettings,
+) -> bool:
+    is_reply = _is_reply_feed_entry(entry, post)
+    is_repost = _is_repost_feed_entry(entry)
+
+    if settings.replies_filter == "exclude" and is_reply:
+        return False
+    if settings.replies_filter == "only" and not is_reply:
+        return False
+    if settings.reposts_filter == "exclude" and is_repost:
+        return False
+    if settings.reposts_filter == "only" and not is_repost:
+        return False
+    return True
+
+
+def _activity_items_from_feed(
+    entries: list[Any],
+) -> list[_ActivityItem]:
+    items: list[_ActivityItem] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        post = entry.get("post")
+        if not isinstance(post, dict):
+            continue
+        activity_at, activity_at_raw = _feed_entry_activity(entry, post)
+        if _is_repost_feed_entry(entry):
+            items.append(
+                _ActivityItem(
+                    post=post,
+                    entry_type="repost",
+                    activity_at=activity_at,
+                    activity_at_raw=activity_at_raw,
+                    reposted_by=_feed_entry_reposted_by(entry),
+                )
+            )
+            continue
+        items.append(
+            _ActivityItem(
+                post=post,
+                entry_type="post",
+                activity_at=activity_at,
+                activity_at_raw=activity_at_raw,
+            )
+        )
+    return items
+
+
+def _like_record_subject_uri(record: dict[str, Any]) -> str | None:
+    value = record.get("value")
+    if not isinstance(value, dict):
+        return None
+    subject = value.get("subject")
+    if not isinstance(subject, dict):
+        return None
+    uri = subject.get("uri")
+    if isinstance(uri, str) and uri:
+        return uri
+    return None
+
+
+def _like_record_uri_from_feed_entry(entry: dict[str, Any]) -> str | None:
+    reason = entry.get("reason")
+    if not isinstance(reason, dict):
+        return None
+    uri = reason.get("uri")
+    if isinstance(uri, str) and uri:
+        return uri
+    return None
+
+
+def _fetch_posts_by_uris(
+    *,
+    uris: list[str],
+    client: Any,
+) -> dict[str, dict[str, Any]]:
+    unique_uris: list[str] = []
+    seen: set[str] = set()
+    for uri in uris:
+        cleaned = uri.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        unique_uris.append(cleaned)
+
+    posts: dict[str, dict[str, Any]] = {}
+    for index in range(0, len(unique_uris), _ATPROTO_POSTS_BATCH_LIMIT):
+        batch = unique_uris[index : index + _ATPROTO_POSTS_BATCH_LIMIT]
+        try:
+            response = _client_call(
+                "feed.getPosts",
+                client.app.bsky.feed.getPosts,
+                uris=batch,
+            )
+        except Exception as exc:
+            _log(f"  failed to fetch liked subjects: {exc}")
+            continue
+        fetched = response.get("posts")
+        if not isinstance(fetched, list):
+            continue
+        for post in fetched:
+            if not isinstance(post, dict):
+                continue
+            uri = post.get("uri")
+            if not isinstance(uri, str) or not uri:
+                continue
+            posts[uri] = post
+    return posts
+
+
+@lru_cache(maxsize=2048)
+def _resolve_pds_endpoint_for_did(did: str) -> str | None:
+    cleaned = did.strip()
+    if not cleaned.startswith("did:"):
+        return None
+    try:
+        import requests
+    except Exception as exc:
+        _log(f"  failed to resolve DID document for {cleaned}: {exc}")
+        return None
+    try:
+        if cleaned.startswith("did:web:"):
+            domain = cleaned.removeprefix("did:web:").strip()
+            if not domain:
+                return None
+            response = requests.get(
+                f"https://{domain}/.well-known/did.json",
+                timeout=_ATPROTO_HTTP_TIMEOUT_SECONDS,
+            )
+        elif cleaned.startswith("did:plc:"):
+            response = requests.get(
+                f"https://plc.directory/{cleaned}",
+                timeout=_ATPROTO_HTTP_TIMEOUT_SECONDS,
+            )
+        else:
+            return None
+        response.raise_for_status()
+        did_doc = response.json()
+    except Exception as exc:
+        _log(f"  failed DID fetch for {cleaned}: {exc}")
+        return None
+    services = did_doc.get("service") if isinstance(did_doc, dict) else None
+    if not isinstance(services, list):
+        return None
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        service_id = str(service.get("id") or "")
+        service_type = str(service.get("type") or "")
+        if not (
+            service_id == "#atproto_pds"
+            or service_id.endswith("atproto_pds")
+            or service_type == "AtprotoPersonalDataServer"
+        ):
+            continue
+        endpoint = service.get("serviceEndpoint")
+        if isinstance(endpoint, str) and endpoint.strip():
+            return endpoint.strip().rstrip("/")
+    return None
+
+
+def _list_like_records_from_actor_pds(
+    *,
+    actor: str,
+    max_items: int | None,
+) -> list[dict[str, Any]]:
+    pds_endpoint = _resolve_pds_endpoint_for_did(actor)
+    if not pds_endpoint:
+        _log(f"  no PDS endpoint resolved for actor {actor}")
+        return []
+    try:
+        import requests
+    except Exception as exc:
+        _log(f"  failed to import requests for PDS likes fetch: {exc}")
+        return []
+
+    records: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while max_items is None or len(records) < max_items:
+        limit = _ATPROTO_FEED_PAGE_LIMIT
+        if max_items is not None:
+            limit = min(_ATPROTO_FEED_PAGE_LIMIT, max_items - len(records))
+        params: dict[str, Any] = {
+            "repo": actor,
+            "collection": _ATPROTO_LIKES_COLLECTION,
+            "limit": limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            response = requests.get(
+                f"{pds_endpoint}/xrpc/com.atproto.repo.listRecords",
+                params=params,
+                timeout=_ATPROTO_HTTP_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            _log(f"  failed PDS listRecords likes fetch for {actor}: {exc}")
+            return []
+        page_records = payload.get("records") if isinstance(payload, dict) else None
+        if not isinstance(page_records, list) or not page_records:
+            break
+        for record in page_records:
+            if isinstance(record, dict):
+                records.append(record)
+        if max_items is not None and len(records) >= max_items:
+            return records[:max_items]
+        next_cursor = payload.get("cursor") if isinstance(payload, dict) else None
+        if not isinstance(next_cursor, str) or not next_cursor.strip():
+            break
+        cursor = next_cursor.strip()
+    return records
+
+
+def _activity_items_from_like_records(
+    *,
+    like_records: list[dict[str, Any]],
+    settings: AtprotoSettings,
+    client: Any,
+) -> list[_ActivityItem]:
+    if not like_records:
+        return []
+    subject_uris = [
+        uri
+        for uri in (_like_record_subject_uri(record) for record in like_records)
+        if isinstance(uri, str) and uri
+    ]
+    posts_by_uri = _fetch_posts_by_uris(uris=subject_uris, client=client)
+
+    items: list[_ActivityItem] = []
+    for record in like_records:
+        if not isinstance(record, dict):
+            continue
+        subject_uri = _like_record_subject_uri(record)
+        if not subject_uri:
+            continue
+        activity_at, activity_at_raw = _like_record_activity(record)
+        like_record_uri = (
+            record.get("uri")
+            if isinstance(record.get("uri"), str) and record.get("uri")
+            else None
+        )
+        post = posts_by_uri.get(subject_uri)
+        if post is not None:
+            if not _post_within_created_window(
+                post,
+                created_after=settings.created_after,
+                created_before=settings.created_before,
+            ):
+                continue
+            items.append(
+                _ActivityItem(
+                    post=post,
+                    entry_type="like",
+                    activity_at=activity_at,
+                    activity_at_raw=activity_at_raw,
+                    liked_subject_uri=subject_uri,
+                    like_record_uri=like_record_uri,
+                )
+            )
+            continue
+        items.append(
+            _ActivityItem(
+                post=None,
+                entry_type="like",
+                activity_at=activity_at,
+                activity_at_raw=activity_at_raw,
+                liked_subject_uri=subject_uri,
+                like_record_uri=like_record_uri,
+            )
+        )
+    return items
+
+
+def _activity_items_from_actor_likes_feed(
+    entries: list[Any],
+) -> list[_ActivityItem]:
+    items: list[_ActivityItem] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        post = entry.get("post")
+        if not isinstance(post, dict):
+            continue
+        subject_uri = post.get("uri")
+        if not isinstance(subject_uri, str) or not subject_uri:
+            continue
+        activity_at, activity_at_raw = _feed_entry_activity(entry, post)
+        items.append(
+            _ActivityItem(
+                post=post,
+                entry_type="like",
+                activity_at=activity_at,
+                activity_at_raw=activity_at_raw,
+                liked_subject_uri=subject_uri,
+                like_record_uri=_like_record_uri_from_feed_entry(entry),
+            )
+        )
+    return items
+
+
+def _activity_items_from_likes(
+    *,
+    actor: str,
+    settings: AtprotoSettings,
+    client: Any,
+) -> list[_ActivityItem]:
+    like_records = _list_like_records_from_actor_pds(
+        actor=actor,
+        max_items=settings.max_items,
+    )
+    if like_records:
+        return _activity_items_from_like_records(
+            like_records=like_records,
+            settings=settings,
+            client=client,
+        )
+
+    try:
+        like_entries = _paginate_feed_entries(
+            fetch=lambda **kwargs: _client_call(
+                "feed.getActorLikes",
+                client.app.bsky.feed.getActorLikes,
+                actor=actor,
+                **kwargs,
+            ),
+            max_items=settings.max_items,
+            created_after=settings.created_after,
+            created_before=settings.created_before,
+        )
+        if like_entries:
+            return _activity_items_from_actor_likes_feed(like_entries)
+        _log("  getActorLikes returned no entries; trying client listRecords fallback")
+    except Exception as exc:
+        _log(f"  getActorLikes unavailable; falling back to listRecords: {exc}")
+
+    try:
+        like_records = _paginate_records(
+            fetch=lambda **kwargs: _client_call(
+                "repo.listRecords",
+                client.com.atproto.repo.listRecords,
+                repo=actor,
+                collection=_ATPROTO_LIKES_COLLECTION,
+                **kwargs,
+            ),
+            max_items=settings.max_items,
+        )
+    except Exception as exc:
+        _log(f"  failed to fetch likes via listRecords: {exc}")
+        return []
+    return _activity_items_from_like_records(
+        like_records=like_records,
+        settings=settings,
+        client=client,
+    )
+
+
+def _sort_activity_items(
+    items: list[_ActivityItem],
+) -> list[_ActivityItem]:
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    indexed = list(enumerate(items))
+    indexed.sort(
+        key=lambda pair: ((pair[1].activity_at or epoch), -pair[0]),
+        reverse=True,
+    )
+    return [item for _, item in indexed]
+
+
+def _render_missing_liked_post_document(
+    *,
+    source_url: str,
+    subject_uri: str,
+    like_record_uri: str | None,
+    activity_at: str | None,
+) -> str:
+    metadata = {
+        "uri": subject_uri,
+        "entry_type": "like",
+        "source_url": source_url,
+        "liked_subject_uri": subject_uri,
+        "like_record_uri": like_record_uri,
+        "activity_at": activity_at,
+        "status": "unavailable",
+    }
+    return "\n\n".join(
+        [
+            _render_markdown_frontmatter(metadata),
+            "Liked post is unavailable (deleted, private, or otherwise unresolved).",
+        ]
+    )
+
+
+def _post_documents_from_activity_items(
+    *,
+    source_url: str,
+    kind: str,
+    root: str,
+    items: list[_ActivityItem],
+    settings: AtprotoSettings,
+    client: Any,
+) -> list[AtprotoDocument]:
+    documents: list[AtprotoDocument] = []
+    emitted_uris: set[str] = set()
+    resolvable_uris = {
+        str(item.post.get("uri"))
+        for item in items
+        if isinstance(item.post, dict)
+        and isinstance(item.post.get("uri"), str)
+        and item.post.get("uri")
+    }
+    index_counter = [0]
+    for item in items:
+        post = item.post
+        if isinstance(post, dict):
+            documents.extend(
+                _collect_post_documents(
+                    post=post,
+                    source_url=source_url,
+                    kind=kind,
+                    root=root,
+                    settings=settings,
+                    client=client,
+                    index_counter=index_counter,
+                    emitted_uris=emitted_uris,
+                    quote_depth=settings.quote_depth,
+                    quote_seen={str(post.get("uri") or "")},
+                    expand_replies=True,
+                    entry_type=item.entry_type,
+                    liked_subject_uri=item.liked_subject_uri,
+                    like_record_uri=item.like_record_uri,
+                    reposted_by=item.reposted_by,
+                    activity_at=item.activity_at_raw,
+                )
+            )
+            continue
+        if item.entry_type != "like":
+            continue
+        subject_uri = item.liked_subject_uri
+        if not isinstance(subject_uri, str) or not subject_uri:
+            continue
+        if subject_uri in resolvable_uris:
+            continue
+        if subject_uri in emitted_uris:
+            continue
+        emitted_uris.add(subject_uri)
+        index_counter[0] += 1
+        fallback_slug = f"missing-like-{index_counter[0]:03d}"
+        label = (
+            f"{root}/posts/{index_counter[0]:03d}-"
+            f"{_safe_slug(subject_uri, fallback_slug)}"
+        )
+        documents.append(
+            AtprotoDocument(
+                source_url=source_url,
+                kind=kind,
+                uri=subject_uri,
+                label=label,
+                trace_path=label,
+                context_subpath=f"{label}.md",
+                rendered=_render_missing_liked_post_document(
+                    source_url=source_url,
+                    subject_uri=subject_uri,
+                    like_record_uri=item.like_record_uri,
+                    activity_at=item.activity_at_raw,
+                ),
+                source_created=item.activity_at_raw,
+                source_modified=item.activity_at_raw,
+            )
+        )
+    return documents
+
+
 def _paginate_feed_entries(
     *,
     fetch: Any,
     max_items: int | None,
     created_after: datetime | None,
     created_before: datetime | None,
+    entry_filter: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[Any]:
     entries: list[Any] = []
     cursor: str | None = None
@@ -1788,6 +2467,8 @@ def _paginate_feed_entries(
                 created_after=created_after,
                 created_before=created_before,
             ):
+                continue
+            if entry_filter is not None and not entry_filter(entry):
                 continue
             entries.append(entry)
             if max_items is not None and len(entries) >= max_items:
@@ -1939,17 +2620,49 @@ def _resolve_profile_documents(
         client.app.bsky.actor.getProfile,
         actor=target.repo,
     )
-    feed_entries = _paginate_feed_entries(
-        fetch=lambda **kwargs: _client_call(
-            "feed.getAuthorFeed",
-            client.app.bsky.feed.getAuthorFeed,
+
+    def _activity_feed_filter(entry: dict[str, Any]) -> bool:
+        post = entry.get("post")
+        if not isinstance(post, dict):
+            return False
+        return _entry_matches_activity_filters(
+            entry=entry, post=post, settings=settings
+        )
+
+    feed_items: list[_ActivityItem] = []
+    if settings.likes_filter != "only":
+        feed_entries = _paginate_feed_entries(
+            fetch=lambda **kwargs: _client_call(
+                "feed.getAuthorFeed",
+                client.app.bsky.feed.getAuthorFeed,
+                actor=target.repo,
+                **kwargs,
+            ),
+            max_items=settings.max_items,
+            created_after=settings.created_after,
+            created_before=settings.created_before,
+            entry_filter=_activity_feed_filter,
+        )
+        feed_items = _activity_items_from_feed(feed_entries)
+
+    like_items: list[_ActivityItem] = []
+    if settings.likes_filter != "exclude":
+        like_items = _activity_items_from_likes(
             actor=target.repo,
-            **kwargs,
-        ),
-        max_items=settings.max_items,
-        created_after=settings.created_after,
-        created_before=settings.created_before,
-    )
+            settings=settings,
+            client=client,
+        )
+
+    activity_items: list[_ActivityItem]
+    if settings.likes_filter == "only":
+        activity_items = _sort_activity_items(like_items)
+    elif settings.likes_filter == "include":
+        activity_items = _sort_activity_items([*feed_items, *like_items])
+    else:
+        activity_items = _sort_activity_items(feed_items)
+    if settings.max_items is not None:
+        activity_items = activity_items[: settings.max_items]
+
     handle = profile.get("handle") if isinstance(profile, dict) else None
     display_name = profile.get("displayName") if isinstance(profile, dict) else None
     root = "atproto/profile/" + _safe_slug(str(handle or target.repo), "profile")
@@ -1959,11 +2672,11 @@ def _resolve_profile_documents(
         if isinstance(handle, str) and handle.strip()
         else _uri_to_bsky_url(profile_uri)
     )
-    documents = _post_documents_from_feed(
+    documents = _post_documents_from_activity_items(
         source_url=source_url,
         kind="profile",
         root=root,
-        entries=feed_entries,
+        items=activity_items,
         settings=settings,
         client=client,
     )
@@ -1991,6 +2704,7 @@ def _resolve_profile_documents(
                 "post_count",
                 profile.get("postsCount") if isinstance(profile, dict) else None,
             ),
+            ("activity_item_count", len(activity_items)),
         ],
         source_modified=profile.get("indexedAt")
         if isinstance(profile, dict) and isinstance(profile.get("indexedAt"), str)

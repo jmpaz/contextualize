@@ -1225,6 +1225,9 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
         "quote-depth",
         "max-replies",
         "reply-quote-depth",
+        "replies",
+        "reposts",
+        "likes",
         "created-after",
         "created-before",
         "include-media-descriptions",
@@ -1284,6 +1287,37 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{prefix}.reply-quote-depth must be >= 0")
         result["reply_quote_depth"] = value
+
+    for config_key, result_key in (
+        ("replies", "replies_filter"),
+        ("reposts", "reposts_filter"),
+        ("likes", "likes_filter"),
+    ):
+        if config_key not in raw:
+            continue
+        value = raw[config_key]
+        if not isinstance(value, str) or value.strip().lower() not in {
+            "include",
+            "exclude",
+            "only",
+        }:
+            raise ValueError(
+                f"{prefix}.{config_key} must be one of: include, exclude, only"
+            )
+        result[result_key] = value.strip().lower()
+    only_modes = [
+        mode
+        for mode in (
+            result.get("replies_filter"),
+            result.get("reposts_filter"),
+            result.get("likes_filter"),
+        )
+        if mode == "only"
+    ]
+    if len(only_modes) > 1:
+        raise ValueError(
+            f"{prefix} can set at most one of replies/reposts/likes to 'only'"
+        )
 
     for config_key, result_key in (
         ("created-after", "created_after"),
@@ -3018,6 +3052,9 @@ def _build_normalized_config(
         atproto["quote-depth"] = atproto_settings.quote_depth
         atproto["max-replies"] = atproto_settings.max_replies
         atproto["reply-quote-depth"] = atproto_settings.reply_quote_depth
+        atproto["replies"] = atproto_settings.replies_filter
+        atproto["reposts"] = atproto_settings.reposts_filter
+        atproto["likes"] = atproto_settings.likes_filter
         if atproto_settings.created_after:
             atproto["created-after"] = (
                 atproto_settings.created_after.isoformat().replace("+00:00", "Z")
