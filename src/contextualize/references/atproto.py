@@ -5,13 +5,14 @@ import os
 import re
 import sys
 from dataclasses import asdict, dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from ..render.text import process_text
+from .helpers import parse_timestamp_or_duration
 from ..utils import count_tokens
 
 _AT_URI_RE = re.compile(
@@ -48,6 +49,7 @@ _KNOWN_KIND_TO_COLLECTION = {
 }
 _DEFAULT_PUBLIC_APPVIEW = "https://public.api.bsky.app"
 _DEFAULT_PDS = "https://bsky.social"
+_ATPROTO_FEED_PAGE_LIMIT = 100
 
 
 def _log(message: str) -> None:
@@ -102,6 +104,8 @@ class AtprotoSettings:
     quote_depth: int = 1
     max_replies: int = 0
     reply_quote_depth: int = 1
+    created_after: datetime | None = None
+    created_before: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,43 @@ def _parse_positive_int(value: str, *, default: int, minimum: int = 1) -> int:
     if parsed < minimum:
         return default
     return parsed
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    return parse_timestamp_or_duration(value)
+
+
+def _normalize_optional_datetime_override(value: Any, *, field: str) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        parsed = _parse_iso_datetime(value)
+        if parsed is None:
+            raise ValueError(
+                f"{field} must be a valid timestamp (ISO, epoch, or relative duration)"
+            )
+        return parsed
+    raise ValueError(
+        f"{field} must be a timestamp string (ISO, epoch, or relative duration)"
+    )
+
+
+def _validate_created_window(
+    *,
+    created_after: datetime | None,
+    created_before: datetime | None,
+    scope: str,
+) -> None:
+    if (
+        created_after is not None
+        and created_before is not None
+        and created_after > created_before
+    ):
+        raise ValueError(f"{scope}.created_after must be <= {scope}.created_before")
 
 
 def _parse_media_mode(value: str, *, default: str) -> str:
@@ -203,6 +244,13 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         default=1,
         minimum=0,
     )
+    created_after = _parse_iso_datetime(os.environ.get("ATPROTO_CREATED_AFTER", ""))
+    created_before = _parse_iso_datetime(os.environ.get("ATPROTO_CREATED_BEFORE", ""))
+    _validate_created_window(
+        created_after=created_after,
+        created_before=created_before,
+        scope="ATPROTO",
+    )
     return AtprotoSettings(
         max_items=max_items,
         thread_parent_height=thread_parent_height,
@@ -214,6 +262,8 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         quote_depth=quote_depth,
         max_replies=max_replies,
         reply_quote_depth=reply_quote_depth,
+        created_after=created_after,
+        created_before=created_before,
     )
 
 
@@ -243,6 +293,19 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
     quote_depth = int(overrides.get("quote_depth", env.quote_depth))
     max_replies = int(overrides.get("max_replies", env.max_replies))
     reply_quote_depth = int(overrides.get("reply_quote_depth", env.reply_quote_depth))
+    created_after = _normalize_optional_datetime_override(
+        overrides.get("created_after", env.created_after),
+        field="created_after",
+    )
+    created_before = _normalize_optional_datetime_override(
+        overrides.get("created_before", env.created_before),
+        field="created_before",
+    )
+    _validate_created_window(
+        created_after=created_after,
+        created_before=created_before,
+        scope="atproto",
+    )
     return AtprotoSettings(
         max_items=max(1, max_items),
         thread_parent_height=max(0, thread_parent_height),
@@ -254,11 +317,14 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
         quote_depth=max(0, quote_depth),
         max_replies=max(0, max_replies),
         reply_quote_depth=max(0, reply_quote_depth),
+        created_after=created_after,
+        created_before=created_before,
     )
 
 
 def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
     return (
+        "v2",
         settings.max_items,
         settings.thread_parent_height,
         settings.thread_depth,
@@ -269,6 +335,8 @@ def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
         settings.quote_depth,
         settings.max_replies,
         settings.reply_quote_depth,
+        settings.created_after.isoformat() if settings.created_after else None,
+        settings.created_before.isoformat() if settings.created_before else None,
     )
 
 
@@ -1344,6 +1412,39 @@ def _post_source_timestamps(post: dict[str, Any]) -> tuple[str | None, str | Non
     return source_created, source_modified
 
 
+def _post_created_datetime(post: dict[str, Any]) -> datetime | None:
+    record = post.get("record")
+    if not isinstance(record, dict):
+        record = post.get("value") if isinstance(post.get("value"), dict) else {}
+    created = record.get("createdAt")
+    if isinstance(created, str):
+        parsed = _parse_iso_datetime(created)
+        if parsed is not None:
+            return parsed
+    indexed = post.get("indexedAt")
+    if isinstance(indexed, str):
+        return _parse_iso_datetime(indexed)
+    return None
+
+
+def _post_within_created_window(
+    post: dict[str, Any],
+    *,
+    created_after: datetime | None,
+    created_before: datetime | None,
+) -> bool:
+    if created_after is None and created_before is None:
+        return True
+    created_at = _post_created_datetime(post)
+    if created_at is None:
+        return True
+    if created_after is not None and created_at < created_after:
+        return False
+    if created_before is not None and created_at > created_before:
+        return False
+    return True
+
+
 def _post_document_label(root: str, index: int, post: dict[str, Any]) -> str:
     return (
         f"{root}/posts/{index:03d}-"
@@ -1589,6 +1690,50 @@ def _post_documents_from_feed(
     return documents
 
 
+def _paginate_feed_entries(
+    *,
+    fetch: Any,
+    max_items: int,
+    created_after: datetime | None,
+    created_before: datetime | None,
+) -> list[Any]:
+    entries: list[Any] = []
+    cursor: str | None = None
+    while len(entries) < max_items:
+        limit = min(_ATPROTO_FEED_PAGE_LIMIT, max_items - len(entries))
+        kwargs: dict[str, Any] = {"limit": limit}
+        if cursor:
+            kwargs["cursor"] = cursor
+        response = fetch(**kwargs)
+        page_entries = response.get("feed")
+        if not isinstance(page_entries, list) or not page_entries:
+            break
+        should_stop = False
+        for entry in page_entries:
+            if not isinstance(entry, dict):
+                continue
+            post = entry.get("post")
+            if not isinstance(post, dict):
+                continue
+            if not _post_within_created_window(
+                post,
+                created_after=created_after,
+                created_before=created_before,
+            ):
+                continue
+            entries.append(entry)
+            if len(entries) >= max_items:
+                should_stop = True
+                break
+        if should_stop:
+            break
+        next_cursor = response.get("cursor")
+        if not isinstance(next_cursor, str) or not next_cursor.strip():
+            break
+        cursor = next_cursor.strip()
+    return entries
+
+
 def _resolve_post_documents(
     target: AtprotoTarget,
     *,
@@ -1644,15 +1789,17 @@ def _resolve_profile_documents(
         client.app.bsky.actor.getProfile,
         actor=target.repo,
     )
-    feed_resp = _client_call(
-        "feed.getAuthorFeed",
-        client.app.bsky.feed.getAuthorFeed,
-        actor=target.repo,
-        limit=settings.max_items,
+    feed_entries = _paginate_feed_entries(
+        fetch=lambda **kwargs: _client_call(
+            "feed.getAuthorFeed",
+            client.app.bsky.feed.getAuthorFeed,
+            actor=target.repo,
+            **kwargs,
+        ),
+        max_items=settings.max_items,
+        created_after=settings.created_after,
+        created_before=settings.created_before,
     )
-    feed_entries = feed_resp.get("feed")
-    if not isinstance(feed_entries, list):
-        feed_entries = []
     handle = profile.get("handle") if isinstance(profile, dict) else None
     display_name = profile.get("displayName") if isinstance(profile, dict) else None
     root = "atproto/profile/" + _safe_slug(str(handle or target.repo), "profile")
@@ -1715,15 +1862,17 @@ def _resolve_feed_documents(
         client.app.bsky.feed.getFeedGenerator,
         feed=target.uri,
     )
-    feed_resp = _client_call(
-        "feed.getFeed",
-        client.app.bsky.feed.getFeed,
-        feed=target.uri,
-        limit=settings.max_items,
+    entries = _paginate_feed_entries(
+        fetch=lambda **kwargs: _client_call(
+            "feed.getFeed",
+            client.app.bsky.feed.getFeed,
+            feed=target.uri,
+            **kwargs,
+        ),
+        max_items=settings.max_items,
+        created_after=settings.created_after,
+        created_before=settings.created_before,
     )
-    entries = feed_resp.get("feed")
-    if not isinstance(entries, list):
-        entries = []
     view = generator_resp.get("view") if isinstance(generator_resp, dict) else {}
     display_name = view.get("displayName") if isinstance(view, dict) else None
     root = "atproto/feed/" + _safe_slug(str(target.rkey or target.uri), "feed")

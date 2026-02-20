@@ -8,7 +8,7 @@ import shutil
 import stat
 import sys
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -43,6 +43,7 @@ from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
     is_http_url,
+    parse_timestamp_or_duration_value,
     parse_gist_url,
     parse_git_url_target,
     parse_target_spec,
@@ -1047,18 +1048,69 @@ def _parse_arena_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | No
             )
         result["max_blocks_per_channel"] = max_blocks_per_channel
 
+    for config_key, result_key in (
+        ("connected-after", "connected_after"),
+        ("connected-before", "connected_before"),
+        ("created-after", "created_after"),
+        ("created-before", "created_before"),
+    ):
+        if config_key not in raw:
+            continue
+        value = raw[config_key]
+        parsed = _parse_iso_timestamp(value)
+        if parsed is None:
+            raise ValueError(
+                f"{prefix}.{config_key} is not a valid timestamp "
+                "(ISO, epoch, or relative duration)"
+            )
+        result[result_key] = parsed
+
     allowed_keys = {
         "recurse-depth",
         "max-depth",
         "block-sort",
         "sort",
         "max-blocks-per-channel",
+        "connected-after",
+        "connected-before",
+        "created-after",
+        "created-before",
         "recurse-users",
         "block",
     }
     unknown_keys = sorted(str(key) for key in raw.keys() if key not in allowed_keys)
     if unknown_keys:
         raise ValueError(f"{prefix} has invalid keys: {', '.join(unknown_keys)}")
+
+    has_connected_window = (
+        result.get("connected_after") is not None
+        or result.get("connected_before") is not None
+    )
+    has_created_window = (
+        result.get("created_after") is not None
+        or result.get("created_before") is not None
+    )
+    if has_connected_window and has_created_window:
+        raise ValueError(f"{prefix} cannot mix connected-* and created-* windows")
+
+    connected_after = result.get("connected_after")
+    connected_before = result.get("connected_before")
+    created_after = result.get("created_after")
+    created_before = result.get("created_before")
+    if (
+        isinstance(connected_after, datetime)
+        and isinstance(connected_before, datetime)
+        and connected_after > connected_before
+    ):
+        raise ValueError(
+            f"{prefix}.connected-after must be <= {prefix}.connected-before"
+        )
+    if (
+        isinstance(created_after, datetime)
+        and isinstance(created_before, datetime)
+        and created_after > created_before
+    ):
+        raise ValueError(f"{prefix}.created-after must be <= {prefix}.created-before")
 
     block_cfg = raw.get("block")
     if block_cfg is not None and not isinstance(block_cfg, dict):
@@ -1156,6 +1208,10 @@ def _arena_overrides_cache_key(
     return tuple(normalized)
 
 
+def _parse_iso_timestamp(value: Any) -> datetime | None:
+    return parse_timestamp_or_duration_value(value)
+
+
 def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
     if raw is None:
         return None
@@ -1170,6 +1226,8 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
         "quote-depth",
         "max-replies",
         "reply-quote-depth",
+        "created-after",
+        "created-before",
         "include-media-descriptions",
         "include-embed-media-descriptions",
         "media-mode",
@@ -1221,6 +1279,30 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{prefix}.reply-quote-depth must be >= 0")
         result["reply_quote_depth"] = value
+
+    for config_key, result_key in (
+        ("created-after", "created_after"),
+        ("created-before", "created_before"),
+    ):
+        if config_key not in raw:
+            continue
+        value = raw[config_key]
+        parsed = _parse_iso_timestamp(value)
+        if parsed is None:
+            raise ValueError(
+                f"{prefix}.{config_key} is not a valid timestamp "
+                "(ISO, epoch, or relative duration)"
+            )
+        result[result_key] = parsed
+
+    created_after = result.get("created_after")
+    created_before = result.get("created_before")
+    if (
+        isinstance(created_after, datetime)
+        and isinstance(created_before, datetime)
+        and created_after > created_before
+    ):
+        raise ValueError(f"{prefix}.created-after must be <= {prefix}.created-before")
 
     if "include-media-descriptions" in raw:
         value = raw["include-media-descriptions"]
@@ -2891,6 +2973,30 @@ def _build_normalized_config(
             arena.pop("max-blocks-per-channel", None)
         else:
             arena["max-blocks-per-channel"] = arena_settings.max_blocks_per_channel
+        if arena_settings.connected_after:
+            arena["connected-after"] = (
+                arena_settings.connected_after.isoformat().replace("+00:00", "Z")
+            )
+        else:
+            arena.pop("connected-after", None)
+        if arena_settings.connected_before:
+            arena["connected-before"] = (
+                arena_settings.connected_before.isoformat().replace("+00:00", "Z")
+            )
+        else:
+            arena.pop("connected-before", None)
+        if arena_settings.created_after:
+            arena["created-after"] = arena_settings.created_after.isoformat().replace(
+                "+00:00", "Z"
+            )
+        else:
+            arena.pop("created-after", None)
+        if arena_settings.created_before:
+            arena["created-before"] = arena_settings.created_before.isoformat().replace(
+                "+00:00", "Z"
+            )
+        else:
+            arena.pop("created-before", None)
         normalized["arena"] = arena
     if include_atproto_defaults:
         atproto_settings = build_atproto_settings(atproto_overrides)
@@ -2902,6 +3008,18 @@ def _build_normalized_config(
         atproto["quote-depth"] = atproto_settings.quote_depth
         atproto["max-replies"] = atproto_settings.max_replies
         atproto["reply-quote-depth"] = atproto_settings.reply_quote_depth
+        if atproto_settings.created_after:
+            atproto["created-after"] = (
+                atproto_settings.created_after.isoformat().replace("+00:00", "Z")
+            )
+        else:
+            atproto.pop("created-after", None)
+        if atproto_settings.created_before:
+            atproto["created-before"] = (
+                atproto_settings.created_before.isoformat().replace("+00:00", "Z")
+            )
+        else:
+            atproto.pop("created-before", None)
         atproto["include-media-descriptions"] = (
             atproto_settings.include_media_descriptions
         )

@@ -13,6 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .helpers import parse_compound_duration, parse_timestamp_or_duration
 from ..render.text import process_text
 from ..utils import count_tokens
 
@@ -206,61 +207,23 @@ def _message_id_to_datetime(value: str | None) -> datetime | None:
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
-    cleaned = value.strip()
-    if not cleaned:
-        return None
-    if cleaned.isdigit():
-        try:
-            ts = int(cleaned)
-        except ValueError:
-            return None
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
-    try:
-        parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    else:
-        parsed = parsed.astimezone(timezone.utc)
-    return parsed
+    return parse_timestamp_or_duration(value)
 
 
 def _parse_duration_compound(raw: str) -> timedelta | None:
-    value = raw.strip().lower()
-    if not value:
-        return None
-    if value.isdigit():
-        return timedelta(seconds=int(value))
-    parts = re.findall(r"(\d+)\s*([ymdhis])", value)
-    if not parts:
-        return None
-    cursor = 0
-    for amount, unit in parts:
-        token = f"{amount}{unit}"
-        idx = value.find(token, cursor)
-        if idx < 0:
-            return None
-        cursor = idx + len(token)
-    if value[cursor:].strip():
-        return None
-
-    seconds = 0
-    for amount_raw, unit in parts:
-        amount = int(amount_raw)
-        if unit == "y":
-            seconds += amount * 365 * 24 * 60 * 60
-        elif unit == "m":
-            seconds += amount * 30 * 24 * 60 * 60
-        elif unit == "d":
-            seconds += amount * 24 * 60 * 60
-        elif unit == "h":
-            seconds += amount * 60 * 60
-        elif unit == "i":
-            seconds += amount * 60
-        elif unit == "s":
-            seconds += amount
-    return timedelta(seconds=seconds)
+    return parse_compound_duration(
+        raw,
+        unit_seconds={
+            "mo": 30 * 24 * 60 * 60,
+            "y": 365 * 24 * 60 * 60,
+            "w": 7 * 24 * 60 * 60,
+            "d": 24 * 60 * 60,
+            "h": 60 * 60,
+            "m": 30 * 24 * 60 * 60,
+            "i": 60,
+            "s": 1,
+        },
+    )
 
 
 def _parse_gap_threshold(raw: str, *, default: timedelta) -> timedelta:
@@ -3566,11 +3529,15 @@ def _parse_window_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
         value = raw.get(config_key)
         if not isinstance(value, str):
             raise ValueError(
-                f"{prefix}.window.{config_key} must be an ISO timestamp string"
+                f"{prefix}.window.{config_key} must be a timestamp string "
+                "(ISO, epoch, or relative duration)"
             )
         parsed = _parse_iso_datetime(value)
         if parsed is None:
-            raise ValueError(f"{prefix}.window.{config_key} is not a valid timestamp")
+            raise ValueError(
+                f"{prefix}.window.{config_key} is not a valid timestamp "
+                "(ISO, epoch, or relative duration)"
+            )
         result[result_key] = parsed
 
     for config_key, result_key in (
@@ -3599,7 +3566,7 @@ def _parse_window_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
         parsed = _parse_duration_compound(value)
         if parsed is None:
             raise ValueError(
-                f"{prefix}.window.{config_key} must use compound units like 2m5d, 6h, 45s"
+                f"{prefix}.window.{config_key} must use compound units like 2mo5d, 6h, 45s, 30i"
             )
         result[result_key] = parsed
 

@@ -8,7 +8,9 @@ from functools import lru_cache
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
+from .helpers import parse_timestamp_or_duration
 from ..render.text import process_text
 from ..utils import count_tokens
 
@@ -329,6 +331,56 @@ def _get_max_blocks_per_channel() -> int | None:
     return value
 
 
+def _parse_iso_datetime(value: str) -> datetime | None:
+    return parse_timestamp_or_duration(value)
+
+
+def _get_window_bound(name: str) -> datetime | None:
+    return _parse_iso_datetime(os.environ.get(name, ""))
+
+
+def _normalize_optional_datetime_override(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        parsed = _parse_iso_datetime(value)
+        if parsed is None:
+            raise ValueError(
+                "Are.na time window value must be a valid timestamp (ISO, epoch, or relative duration)"
+            )
+        return parsed
+    raise ValueError(
+        "Are.na time window value must be a timestamp string (ISO, epoch, or relative duration)"
+    )
+
+
+def _validate_time_window(settings: ArenaSettings) -> None:
+    has_connected = (
+        settings.connected_after is not None or settings.connected_before is not None
+    )
+    has_created = (
+        settings.created_after is not None or settings.created_before is not None
+    )
+    if has_connected and has_created:
+        raise ValueError("Are.na time window cannot mix connected-* and created-*")
+    if (
+        settings.connected_after is not None
+        and settings.connected_before is not None
+        and settings.connected_after > settings.connected_before
+    ):
+        raise ValueError("ARENA_CONNECTED_AFTER must be <= ARENA_CONNECTED_BEFORE")
+    if (
+        settings.created_after is not None
+        and settings.created_before is not None
+        and settings.created_after > settings.created_before
+    ):
+        raise ValueError("ARENA_CREATED_AFTER must be <= ARENA_CREATED_BEFORE")
+
+
 VALID_SORT_ORDERS = frozenset(
     {
         "asc",
@@ -353,11 +405,15 @@ class ArenaSettings:
     include_pdf_content: bool = False
     include_media_descriptions: bool = True
     recurse_users: set[str] | None = field(default_factory=lambda: {"self"})
+    connected_after: datetime | None = None
+    connected_before: datetime | None = None
+    created_after: datetime | None = None
+    created_before: datetime | None = None
 
 
 def _arena_settings_from_env() -> ArenaSettings:
     _load_dotenv()
-    return ArenaSettings(
+    settings = ArenaSettings(
         max_depth=_get_max_depth(),
         sort_order=_get_sort_order(),
         max_blocks_per_channel=_get_max_blocks_per_channel(),
@@ -367,7 +423,13 @@ def _arena_settings_from_env() -> ArenaSettings:
         include_pdf_content=_get_include_pdf_content(),
         include_media_descriptions=_get_include_media_descriptions(),
         recurse_users=_get_recurse_users(),
+        connected_after=_get_window_bound("ARENA_CONNECTED_AFTER"),
+        connected_before=_get_window_bound("ARENA_CONNECTED_BEFORE"),
+        created_after=_get_window_bound("ARENA_CREATED_AFTER"),
+        created_before=_get_window_bound("ARENA_CREATED_BEFORE"),
     )
+    _validate_time_window(settings)
+    return settings
 
 
 def _has_env_recurse_depth_override() -> bool:
@@ -410,8 +472,20 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
         "include_media_descriptions", env.include_media_descriptions
     )
     recurse_users = overrides.get("recurse_users", env.recurse_users)
+    connected_after = _normalize_optional_datetime_override(
+        overrides.get("connected_after", env.connected_after)
+    )
+    connected_before = _normalize_optional_datetime_override(
+        overrides.get("connected_before", env.connected_before)
+    )
+    created_after = _normalize_optional_datetime_override(
+        overrides.get("created_after", env.created_after)
+    )
+    created_before = _normalize_optional_datetime_override(
+        overrides.get("created_before", env.created_before)
+    )
 
-    return ArenaSettings(
+    settings = ArenaSettings(
         max_depth=max_depth,
         sort_order=sort_order,
         max_blocks_per_channel=max_blocks_per_channel,
@@ -421,7 +495,13 @@ def build_arena_settings(overrides: dict | None = None) -> ArenaSettings:
         include_pdf_content=include_pdf_content,
         include_media_descriptions=include_media_descriptions,
         recurse_users=recurse_users,
+        connected_after=connected_after,
+        connected_before=connected_before,
+        created_after=created_after,
+        created_before=created_before,
     )
+    _validate_time_window(settings)
+    return settings
 
 
 def _owner_slug(obj: dict) -> str:
@@ -452,6 +532,7 @@ def _fetch_all_channel_contents(
     max_depth: int | None = None,
     sort_order: str | None = None,
     max_blocks_per_channel: int | None = None,
+    _time_window_settings: ArenaSettings | None = None,
     _depth: int = 0,
     _visited: set[int] | None = None,
     _root_owner_id: int | None = None,
@@ -492,8 +573,26 @@ def _fetch_all_channel_contents(
         page_data = _fetch_channel_page(slug, page)
         all_contents.extend(page_data.get("data", page_data.get("contents", [])))
 
+    all_contents = _sort_channel_contents(all_contents, sort_order)
+
+    has_time_window = _time_window_settings is not None and (
+        _time_window_settings.connected_after is not None
+        or _time_window_settings.connected_before is not None
+        or _time_window_settings.created_after is not None
+        or _time_window_settings.created_before is not None
+    )
+    if has_time_window:
+        all_contents = [
+            item
+            for item in all_contents
+            if (
+                item.get("base_type") == "Channel"
+                or item.get("type") == "Channel"
+                or _passes_block_time_window(item, _time_window_settings)
+            )
+        ]
+
     if max_blocks_per_channel is not None:
-        all_contents = _sort_channel_contents(all_contents, sort_order)
         all_contents = all_contents[:max_blocks_per_channel]
 
     if _depth < max_depth:
@@ -514,6 +613,7 @@ def _fetch_all_channel_contents(
                         max_depth=max_depth,
                         sort_order=sort_order,
                         max_blocks_per_channel=max_blocks_per_channel,
+                        _time_window_settings=_time_window_settings,
                         _depth=_depth + 1,
                         _visited=_visited,
                         _root_owner_id=_root_owner_id,
@@ -1331,6 +1431,45 @@ def _block_chrono_value(block: dict) -> str:
     return block.get("connected_at") or block.get("created_at") or ""
 
 
+def _parse_block_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return _parse_iso_datetime(value)
+
+
+def _passes_block_time_window(block: dict, settings: ArenaSettings) -> bool:
+    timestamp: datetime | None = None
+    after: datetime | None = None
+    before: datetime | None = None
+
+    if settings.connected_after is not None or settings.connected_before is not None:
+        timestamp = _parse_block_timestamp(block.get("connected_at"))
+        after = settings.connected_after
+        before = settings.connected_before
+    elif settings.created_after is not None or settings.created_before is not None:
+        timestamp = _parse_block_timestamp(block.get("created_at"))
+        after = settings.created_after
+        before = settings.created_before
+
+    if timestamp is None:
+        return True
+    if after is not None and timestamp < after:
+        return False
+    if before is not None and timestamp > before:
+        return False
+    return True
+
+
+def _filter_flat_blocks(
+    flat: list[tuple[str, dict]], settings: ArenaSettings
+) -> list[tuple[str, dict]]:
+    return [
+        (path, block)
+        for path, block in flat
+        if _passes_block_time_window(block, settings)
+    ]
+
+
 def resolve_channel(
     slug: str,
     *,
@@ -1349,7 +1488,18 @@ def resolve_channel(
     mb_key = (
         str(max_blocks_per_channel) if max_blocks_per_channel is not None else "all"
     )
-    cache_key = f"{slug}:d={max_depth}:u={ru_key}:s={sort_order}:m={mb_key}"
+    ca_key = (
+        settings.connected_after.isoformat() if settings.connected_after else "none"
+    )
+    cb_key = (
+        settings.connected_before.isoformat() if settings.connected_before else "none"
+    )
+    cra_key = settings.created_after.isoformat() if settings.created_after else "none"
+    crb_key = settings.created_before.isoformat() if settings.created_before else "none"
+    cache_key = (
+        f"v2:{slug}:d={max_depth}:u={ru_key}:s={sort_order}:m={mb_key}:"
+        f"ca={ca_key}:cb={cb_key}:cra={cra_key}:crb={crb_key}"
+    )
 
     if use_cache and not refresh_cache:
         from ..cache.arena import get_cached_channel
@@ -1360,6 +1510,7 @@ def resolve_channel(
             metadata = data["metadata"]
             flat_unsorted = [(path, block) for path, block in data["blocks"]]
             flat = _sort_blocks(flat_unsorted, sort_order)
+            flat = _filter_flat_blocks(flat, settings)
             channel_title = metadata.get("title") or slug
             _log(f"  using cached channel: {channel_title} ({len(flat)} items)")
             return metadata, flat
@@ -1369,10 +1520,12 @@ def resolve_channel(
         max_depth=max_depth,
         sort_order=sort_order,
         max_blocks_per_channel=max_blocks_per_channel,
+        _time_window_settings=settings,
         _recurse_users=recurse_users,
     )
     flat_unsorted = _flatten_channel_blocks(contents, slug)
     flat = _sort_blocks(flat_unsorted, sort_order)
+    flat = _filter_flat_blocks(flat, settings)
 
     if use_cache:
         from ..cache.arena import store_channel

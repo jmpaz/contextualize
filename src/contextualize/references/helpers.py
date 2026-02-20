@@ -3,8 +3,9 @@ from __future__ import annotations
 import codecs
 import os
 import re
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Protocol, TYPE_CHECKING, runtime_checkable
+from typing import Mapping, Protocol, TYPE_CHECKING, runtime_checkable
 from urllib.parse import unquote, urlparse
 
 if TYPE_CHECKING:
@@ -38,6 +39,109 @@ def is_http_url(value: str) -> bool:
     if value.startswith(RAW_PREFIX):
         value = value[len(RAW_PREFIX) :]
     return value.startswith(_URL_PREFIXES)
+
+
+def parse_compound_duration(
+    raw: str,
+    *,
+    unit_seconds: Mapping[str, int],
+    allow_plain_seconds: bool = True,
+) -> timedelta | None:
+    value = raw.strip().lower()
+    if not value:
+        return None
+    if allow_plain_seconds and value.isdigit():
+        return timedelta(seconds=int(value))
+    if not unit_seconds:
+        return None
+
+    units = sorted(unit_seconds.keys(), key=len, reverse=True)
+    units_pattern = "|".join(re.escape(unit) for unit in units)
+    token_re = re.compile(rf"(\d+)\s*({units_pattern})")
+
+    cursor = 0
+    total_seconds = 0
+    matched_any = False
+    while cursor < len(value):
+        while cursor < len(value) and value[cursor].isspace():
+            cursor += 1
+        if cursor >= len(value):
+            break
+        match = token_re.match(value, cursor)
+        if match is None:
+            return None
+        matched_any = True
+        amount = int(match.group(1))
+        unit = match.group(2)
+        total_seconds += amount * int(unit_seconds[unit])
+        cursor = match.end()
+    if not matched_any:
+        return None
+    return timedelta(seconds=total_seconds)
+
+
+def parse_timestamp_or_duration(
+    value: str, *, now: datetime | None = None
+) -> datetime | None:
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.isdigit():
+        try:
+            ts = int(cleaned)
+        except ValueError:
+            return None
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    try:
+        parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        pass
+
+    parsed_duration = parse_compound_duration(
+        cleaned,
+        unit_seconds={
+            "y": 365 * 24 * 60 * 60,
+            "w": 7 * 24 * 60 * 60,
+            "d": 24 * 60 * 60,
+            "h": 60 * 60,
+            "m": 60,
+            "s": 1,
+        },
+        allow_plain_seconds=False,
+    )
+    if parsed_duration is None:
+        return None
+    anchor = now if now is not None else datetime.now(timezone.utc)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    else:
+        anchor = anchor.astimezone(timezone.utc)
+    return anchor - parsed_duration
+
+
+def parse_timestamp_or_duration_value(
+    value: object, *, now: datetime | None = None
+) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        return parse_timestamp_or_duration(value, now=now)
+    return None
 
 
 def parse_target_spec(spec: str) -> dict[str, str | None]:
