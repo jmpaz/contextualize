@@ -1168,6 +1168,8 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
         "thread-depth",
         "include-replies",
         "quote-depth",
+        "max-replies",
+        "reply-quote-depth",
         "include-media-descriptions",
         "include-embed-media-descriptions",
         "media-mode",
@@ -1207,6 +1209,18 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{prefix}.quote-depth must be >= 0")
         result["quote_depth"] = value
+
+    if "max-replies" in raw:
+        value = raw["max-replies"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{prefix}.max-replies must be >= 0")
+        result["max_replies"] = value
+
+    if "reply-quote-depth" in raw:
+        value = raw["reply-quote-depth"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{prefix}.reply-quote-depth must be >= 0")
+        result["reply_quote_depth"] = value
 
     if "include-media-descriptions" in raw:
         value = raw["include-media-descriptions"]
@@ -2886,6 +2900,8 @@ def _build_normalized_config(
         atproto["thread-depth"] = atproto_settings.thread_depth
         atproto["include-replies"] = atproto_settings.include_replies
         atproto["quote-depth"] = atproto_settings.quote_depth
+        atproto["max-replies"] = atproto_settings.max_replies
+        atproto["reply-quote-depth"] = atproto_settings.reply_quote_depth
         atproto["include-media-descriptions"] = (
             atproto_settings.include_media_descriptions
         )

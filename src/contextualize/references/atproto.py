@@ -95,11 +95,13 @@ class AtprotoSettings:
     max_items: int = 25
     thread_parent_height: int = 8
     thread_depth: int = 6
-    include_replies: bool = True
+    include_replies: bool = False
     include_media_descriptions: bool = True
     include_embed_media_descriptions: bool = True
     media_mode: str = "describe"
     quote_depth: int = 1
+    max_replies: int = 0
+    reply_quote_depth: int = 1
 
 
 @dataclass(frozen=True)
@@ -171,8 +173,8 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         minimum=0,
     )
     include_replies = _parse_bool(
-        os.environ.get("ATPROTO_INCLUDE_REPLIES", "1"),
-        default=True,
+        os.environ.get("ATPROTO_INCLUDE_REPLIES", "0"),
+        default=False,
     )
     include_media_descriptions = _parse_bool(
         os.environ.get("ATPROTO_MEDIA_DESCRIPTIONS", "1"),
@@ -191,6 +193,16 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         default=1,
         minimum=0,
     )
+    max_replies = _parse_positive_int(
+        os.environ.get("ATPROTO_MAX_REPLIES", ""),
+        default=0,
+        minimum=0,
+    )
+    reply_quote_depth = _parse_positive_int(
+        os.environ.get("ATPROTO_REPLY_QUOTE_DEPTH", ""),
+        default=1,
+        minimum=0,
+    )
     return AtprotoSettings(
         max_items=max_items,
         thread_parent_height=thread_parent_height,
@@ -200,6 +212,8 @@ def _atproto_settings_from_env() -> AtprotoSettings:
         include_embed_media_descriptions=include_embed_media_descriptions,
         media_mode=media_mode,
         quote_depth=quote_depth,
+        max_replies=max_replies,
+        reply_quote_depth=reply_quote_depth,
     )
 
 
@@ -227,6 +241,8 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
         default=env.media_mode,
     )
     quote_depth = int(overrides.get("quote_depth", env.quote_depth))
+    max_replies = int(overrides.get("max_replies", env.max_replies))
+    reply_quote_depth = int(overrides.get("reply_quote_depth", env.reply_quote_depth))
     return AtprotoSettings(
         max_items=max(1, max_items),
         thread_parent_height=max(0, thread_parent_height),
@@ -236,6 +252,8 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
         include_embed_media_descriptions=include_embed_media_descriptions,
         media_mode=media_mode,
         quote_depth=max(0, quote_depth),
+        max_replies=max(0, max_replies),
+        reply_quote_depth=max(0, reply_quote_depth),
     )
 
 
@@ -249,6 +267,8 @@ def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
         settings.include_embed_media_descriptions,
         settings.media_mode,
         settings.quote_depth,
+        settings.max_replies,
+        settings.reply_quote_depth,
     )
 
 
@@ -367,7 +387,7 @@ def _resolution_cache_identity(
     url: str, settings: AtprotoSettings, auth_mode: str
 ) -> str:
     payload = {
-        "v": 1,
+        "v": 2,
         "url": url,
         "settings": atproto_settings_cache_key(settings),
         "auth_mode": auth_mode,
@@ -782,67 +802,73 @@ def _collect_media_entries(post: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
-    external = None
-    if isinstance(view_media, dict) and isinstance(view_media.get("external"), dict):
-        external = view_media["external"]
-    elif isinstance(record_media, dict) and isinstance(
-        record_media.get("external"), dict
-    ):
-        external = record_media["external"]
-    if isinstance(external, dict):
-        thumb = external.get("thumb")
-        if isinstance(thumb, str) and thumb:
-            media.append(
-                {
-                    "kind": "image",
-                    "url": thumb,
-                    "alt": external.get("title")
-                    if isinstance(external.get("title"), str)
-                    else None,
-                    "mime": None,
-                    "width": None,
-                    "height": None,
-                    "cache_identity": f"atproto:url:{thumb}",
-                    "is_embed_media": True,
-                }
-            )
-
     return media
 
 
-def _extract_external_card(post: dict[str, Any]) -> dict[str, str] | None:
+def _extract_external_link(post: dict[str, Any]) -> dict[str, Any] | None:
     record = post.get("record")
     if not isinstance(record, dict):
         record = post.get("value") if isinstance(post.get("value"), dict) else {}
-
     record_embed = record.get("embed") if isinstance(record.get("embed"), dict) else {}
     view_embed = post.get("embed") if isinstance(post.get("embed"), dict) else {}
     if not view_embed:
         embeds = post.get("embeds")
         if isinstance(embeds, list):
-            view_embed = (
-                next((item for item in embeds if isinstance(item, dict)), {}) or {}
-            )
-
+            first = next((item for item in embeds if isinstance(item, dict)), None)
+            view_embed = first or {}
     record_media, view_media = _extract_record_embed(record_embed, view_embed)
+
     external = None
     if isinstance(view_media, dict) and isinstance(view_media.get("external"), dict):
-        external = view_media["external"]
+        external = view_media.get("external")
     elif isinstance(record_media, dict) and isinstance(
         record_media.get("external"), dict
     ):
-        external = record_media["external"]
+        external = record_media.get("external")
     if not isinstance(external, dict):
         return None
     uri = external.get("uri")
     if not isinstance(uri, str) or not uri:
         return None
-    result = {"uri": uri}
-    for key in ("title", "description"):
-        value = external.get(key)
-        if isinstance(value, str) and value.strip():
-            result[key] = value.strip()
-    return result
+    title = external.get("title")
+    description = external.get("description")
+    thumb = external.get("thumb")
+    return {
+        "uri": uri,
+        "title": title.strip() if isinstance(title, str) and title.strip() else None,
+        "description": description.strip()
+        if isinstance(description, str) and description.strip()
+        else None,
+        "thumb": thumb if isinstance(thumb, str) and thumb else None,
+    }
+
+
+def _facet_link_uris(post: dict[str, Any]) -> list[str]:
+    record = post.get("record")
+    if not isinstance(record, dict):
+        record = post.get("value") if isinstance(post.get("value"), dict) else {}
+    facets = record.get("facets")
+    if not isinstance(facets, list):
+        return []
+    links: list[str] = []
+    seen: set[str] = set()
+    for facet in facets:
+        if not isinstance(facet, dict):
+            continue
+        features = facet.get("features")
+        if not isinstance(features, list):
+            continue
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            uri = feature.get("uri")
+            if not isinstance(uri, str) or not uri:
+                continue
+            if uri in seen:
+                continue
+            seen.add(uri)
+            links.append(uri)
+    return links
 
 
 def _extract_quote_view(post: dict[str, Any]) -> dict[str, Any] | None:
@@ -1000,7 +1026,7 @@ def _describe_media(
                 prompt_append=prompt_append,
             )
             markdown = result.markdown
-        cleaned = markdown.strip()
+        cleaned = _normalize_llm_description(markdown)
         if not cleaned:
             return None
         store_rendered(render_identity, cleaned)
@@ -1011,33 +1037,77 @@ def _describe_media(
         tmp.unlink(missing_ok=True)
 
 
+def _normalize_llm_description(markdown: str) -> str:
+    text = markdown.strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+
+    # Drop image size line; dimensions are rendered separately in metadata.
+    if lines and lines[0].strip().startswith("ImageSize:"):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+
+    # Drop generic markitdown heading prefixes.
+    if lines:
+        first = lines[0].strip().lower()
+        if first in {
+            "# description (auto-generated):",
+            "## description (auto-generated):",
+            "# description:",
+            "## description:",
+        }:
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+
+    return "\n".join(lines).strip()
+
+
+def _append_field_line(
+    lines: list[str],
+    key: str,
+    value: str,
+    *,
+    literal: bool = False,
+    prefix: str = "  - ",
+) -> None:
+    cleaned = value.strip()
+    if not cleaned:
+        return
+    leading_spaces = len(prefix) - len(prefix.lstrip(" "))
+    literal_prefix = " " * (leading_spaces + 4)
+    if literal or "\n" in cleaned:
+        lines.append(f"{prefix}{key}: |")
+        lines.extend(
+            f"{literal_prefix}{line}" if line else literal_prefix
+            for line in cleaned.splitlines()
+        )
+        return
+    lines.append(f"{prefix}{key}: {cleaned}")
+
+
 def _render_media_section(
     media_items: list[dict[str, Any]], settings: AtprotoSettings
 ) -> str:
     lines: list[str] = []
     for media in media_items:
-        kind = str(media.get("kind") or "file")
         url = str(media.get("url") or "")
         if not url:
             continue
+        kind = str(media.get("kind") or "file")
+        lines.append(f"- {url} ({kind})")
         alt = media.get("alt") if isinstance(media.get("alt"), str) else None
-        dims = ""
+        if alt:
+            _append_field_line(lines, "alt", alt)
         width = media.get("width")
         height = media.get("height")
         if isinstance(width, int) and isinstance(height, int):
-            dims = f"{width}x{height}"
-        meta_parts = [part for part in (kind, dims, media.get("mime")) if part]
-        suffix = (
-            f" ({', '.join(str(part) for part in meta_parts)})" if meta_parts else ""
-        )
-        lines.append(f"- {url}{suffix}")
-        if alt:
-            lines.append(f"  - alt: {alt}")
+            lines.append(f"  - dimensions: {width}x{height}")
         generated = _describe_media(media, settings=settings)
         if generated:
-            rendered = generated.replace("\n", "\n    ")
-            lines.append("  - description:")
-            lines.append(f"    {rendered}")
+            _append_field_line(lines, "llm-description", generated, literal=True)
     return "\n".join(lines)
 
 
@@ -1058,20 +1128,153 @@ def _author_name(author: Any) -> str:
     return "unknown"
 
 
-def _indent_block(text: str, prefix: str) -> str:
-    return "\n".join(
-        f"{prefix}{line}" if line else prefix.rstrip() for line in text.splitlines()
-    )
+def _render_markdown_frontmatter(payload: dict[str, Any]) -> str:
+    import yaml
+
+    data = {key: value for key, value in payload.items() if value is not None}
+    frontmatter = yaml.safe_dump(
+        data,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+    ).strip()
+    return f"---\n{frontmatter}\n---"
 
 
-def _render_post(
+def _render_links_section(
     post: dict[str, Any],
     *,
     settings: AtprotoSettings,
+) -> str | None:
+    blocks: list[str] = []
+    seen: set[str] = set()
+
+    external = _extract_external_link(post)
+    if external:
+        uri = external["uri"]
+        seen.add(uri)
+        lines = [f"- {uri}"]
+        if external.get("title"):
+            lines.append(f"  - title: {external['title']}")
+        if external.get("description"):
+            _append_field_line(
+                lines,
+                "description",
+                str(external["description"]),
+                literal=True,
+            )
+        thumb = external.get("thumb")
+        if isinstance(thumb, str) and thumb:
+            lines.append(f"  - preview-image: {thumb}")
+            preview_media = {
+                "kind": "image",
+                "url": thumb,
+                "alt": external.get("title"),
+                "mime": None,
+                "width": None,
+                "height": None,
+                "cache_identity": f"atproto:url:{thumb}",
+                "is_embed_media": True,
+            }
+            generated = _describe_media(preview_media, settings=settings)
+            if generated:
+                _append_field_line(lines, "llm-description", generated, literal=True)
+        blocks.append("\n".join(lines))
+
+    for facet_uri in _facet_link_uris(post):
+        if facet_uri in seen:
+            continue
+        seen.add(facet_uri)
+        blocks.append(f"- {facet_uri}")
+
+    joined = "\n\n".join(blocks).strip()
+    return joined or None
+
+
+def _post_metrics(post: dict[str, Any]) -> dict[str, int]:
+    metrics: dict[str, int] = {}
+    for key, label in (
+        ("replyCount", "replies"),
+        ("repostCount", "reposts"),
+        ("likeCount", "likes"),
+        ("quoteCount", "quotes"),
+    ):
+        value = post.get(key)
+        metrics[label] = value if isinstance(value, int) else 0
+    return metrics
+
+
+def _collect_quote_post(
+    post: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    quote_view = _extract_quote_view(post)
+    if not isinstance(quote_view, dict):
+        return None, None
+    quote_post = _quote_to_post(quote_view)
+    quote_uri = quote_view.get("uri")
+    if not isinstance(quote_uri, str) or not quote_uri:
+        quote_uri = (
+            str(quote_post.get("uri") or "") if isinstance(quote_post, dict) else ""
+        )
+    return (quote_uri or None), quote_post
+
+
+def _fetch_direct_reply_posts(
+    uri: str,
+    *,
     client: Any,
-    quote_depth: int,
-    visited_quotes: set[str],
-    context_lines: list[str] | None = None,
+    max_replies: int,
+) -> list[dict[str, Any]]:
+    if max_replies <= 0:
+        return []
+    try:
+        response = _client_call(
+            "feed.getPostThread",
+            client.app.bsky.feed.getPostThread,
+            uri=uri,
+            depth=1,
+            parentHeight=0,
+        )
+    except Exception as exc:
+        _log(f"  failed to fetch replies for {uri}: {exc}")
+        return []
+    thread = response.get("thread")
+    if not isinstance(thread, dict):
+        return []
+    replies = thread.get("replies")
+    if not isinstance(replies, list):
+        return []
+
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for reply in replies:
+        if len(output) >= max_replies:
+            break
+        if not isinstance(reply, dict):
+            continue
+        ntype = str(reply.get("$type") or "")
+        if "blocked" in ntype.lower() or "notfound" in ntype.lower():
+            continue
+        post = reply.get("post")
+        if not isinstance(post, dict):
+            continue
+        reply_uri = post.get("uri")
+        if not isinstance(reply_uri, str) or not reply_uri:
+            continue
+        if reply_uri in seen:
+            continue
+        seen.add(reply_uri)
+        output.append(post)
+    return output
+
+
+def _render_post_document(
+    *,
+    post: dict[str, Any],
+    source_url: str,
+    settings: AtprotoSettings,
+    quote_uris: list[str],
+    reply_uris: list[str],
 ) -> str:
     record = post.get("record")
     if not isinstance(record, dict):
@@ -1088,70 +1291,176 @@ def _render_post(
     facets = record.get("facets") if isinstance(record.get("facets"), list) else []
     rendered_text = _render_rich_text(text, facets)
     web_url = _uri_to_bsky_url(uri, handle=author.get("handle"))
-
-    lines = [f"URI: {uri or 'unknown'}"]
-    if web_url:
-        lines.append(f"URL: {web_url}")
-    lines.append(f"Author: {_author_name(author)}")
-    if created_at:
-        lines.append(f"Created: {created_at}")
-    metrics: list[str] = []
-    for key, label in (
-        ("replyCount", "replies"),
-        ("repostCount", "reposts"),
-        ("likeCount", "likes"),
-        ("quoteCount", "quotes"),
-    ):
-        value = post.get(key)
-        if isinstance(value, int):
-            metrics.append(f"{label}={value}")
-    if metrics:
-        lines.append("Metrics: " + ", ".join(metrics))
-    if context_lines:
-        lines.append("Context: " + " | ".join(context_lines))
-    lines.append("")
-    lines.append("Text:")
-    lines.append(rendered_text or "(empty)")
-
-    media_items = _collect_media_entries(post)
-    if media_items:
-        lines.append("")
-        lines.append("Media:")
-        lines.append(_render_media_section(media_items, settings))
-
-    external = _extract_external_card(post)
-    if external:
-        lines.append("")
-        lines.append("External:")
-        lines.append(f"- url: {external['uri']}")
-        if "title" in external:
-            lines.append(f"- title: {external['title']}")
-        if "description" in external:
-            lines.append(f"- description: {external['description']}")
-
-    if quote_depth > 0:
-        quote_view = _extract_quote_view(post)
-        quote_post = (
-            _quote_to_post(quote_view) if isinstance(quote_view, dict) else None
+    display_name = author.get("displayName") if isinstance(author, dict) else None
+    if not isinstance(display_name, str) or not display_name.strip():
+        display_name = (
+            author.get("handle")
+            if isinstance(author, dict) and isinstance(author.get("handle"), str)
+            else None
         )
-        if quote_post is not None:
-            quote_uri = str(quote_post.get("uri") or "")
-            if quote_uri and quote_uri not in visited_quotes:
-                quote_text = _render_post(
-                    quote_post,
+    metadata = {
+        "uri": uri or None,
+        "url": web_url,
+        "author_name": display_name.strip()
+        if isinstance(display_name, str) and display_name.strip()
+        else None,
+        "created_at": created_at,
+        "source_url": source_url,
+        "metrics": _post_metrics(post),
+    }
+    body = rendered_text or "(empty)"
+    sections: list[str] = []
+    if quote_uris:
+        sections.append("## Quote\n\n" + "\n".join(f"- {item}" for item in quote_uris))
+    if reply_uris:
+        sections.append(
+            "## Replies\n\n" + "\n".join(f"- {item}" for item in reply_uris)
+        )
+    links_section = _render_links_section(post, settings=settings)
+    if links_section:
+        sections.append("## Links\n\n" + links_section)
+    media_items = _collect_media_entries(post)
+    media_section = _render_media_section(media_items, settings).strip()
+    if media_section:
+        sections.append("## Media\n\n" + media_section)
+
+    lines = [
+        _render_markdown_frontmatter(metadata),
+        body,
+    ]
+    if sections:
+        lines.extend(["***", "\n\n".join(sections)])
+    return "\n\n".join(part.strip() for part in lines if part.strip())
+
+
+def _post_source_timestamps(post: dict[str, Any]) -> tuple[str | None, str | None]:
+    record = post.get("record")
+    if not isinstance(record, dict):
+        record = post.get("value") if isinstance(post.get("value"), dict) else {}
+    created = record.get("createdAt")
+    source_created = created if isinstance(created, str) else None
+    modified = post.get("indexedAt")
+    source_modified = modified if isinstance(modified, str) else None
+    return source_created, source_modified
+
+
+def _post_document_label(root: str, index: int, post: dict[str, Any]) -> str:
+    return (
+        f"{root}/posts/{index:03d}-"
+        f"{_safe_slug(_post_label(post, index), f'post-{index:03d}')}"
+    )
+
+
+def _collect_post_documents(
+    *,
+    post: dict[str, Any],
+    source_url: str,
+    kind: str,
+    root: str,
+    settings: AtprotoSettings,
+    client: Any,
+    index_counter: list[int],
+    emitted_uris: set[str],
+    quote_depth: int,
+    quote_seen: set[str],
+    expand_replies: bool,
+) -> list[AtprotoDocument]:
+    uri = post.get("uri")
+    if not isinstance(uri, str) or not uri:
+        return []
+    if uri in emitted_uris:
+        return []
+    emitted_uris.add(uri)
+
+    quote_uris: list[str] = []
+    nested_docs: list[AtprotoDocument] = []
+    if quote_depth > 0:
+        quote_uri, quote_post = _collect_quote_post(post)
+        if quote_uri:
+            quote_uris.append(quote_uri)
+        if (
+            quote_uri
+            and isinstance(quote_post, dict)
+            and quote_uri not in quote_seen
+            and quote_uri not in emitted_uris
+        ):
+            nested_docs.extend(
+                _collect_post_documents(
+                    post=quote_post,
+                    source_url=source_url,
+                    kind=kind,
+                    root=root,
                     settings=settings,
                     client=client,
+                    index_counter=index_counter,
+                    emitted_uris=emitted_uris,
                     quote_depth=quote_depth - 1,
-                    visited_quotes={*visited_quotes, quote_uri},
+                    quote_seen={*quote_seen, quote_uri},
+                    expand_replies=False,
                 )
-                lines.append("")
-                lines.append("Quote:")
-                lines.append(_indent_block(quote_text, "> "))
-            elif quote_uri:
-                lines.append("")
-                lines.append(f"Quote: {quote_uri} (skipped: cycle detected)")
+            )
 
-    return "\n".join(lines).strip()
+    reply_posts: list[dict[str, Any]] = []
+    reply_uris: list[str] = []
+    if expand_replies and settings.max_replies > 0:
+        reply_posts = _fetch_direct_reply_posts(
+            uri,
+            client=client,
+            max_replies=settings.max_replies,
+        )
+        reply_uris = [
+            str(item.get("uri"))
+            for item in reply_posts
+            if isinstance(item.get("uri"), str) and item.get("uri")
+        ]
+
+    index_counter[0] += 1
+    label = _post_document_label(root, index_counter[0], post)
+    rendered = _render_post_document(
+        post=post,
+        source_url=source_url,
+        settings=settings,
+        quote_uris=quote_uris,
+        reply_uris=reply_uris,
+    )
+    source_created, source_modified = _post_source_timestamps(post)
+    documents = [
+        AtprotoDocument(
+            source_url=source_url,
+            kind=kind,
+            uri=uri,
+            label=label,
+            trace_path=label,
+            context_subpath=f"{label}.md",
+            rendered=rendered,
+            source_created=source_created,
+            source_modified=source_modified,
+        )
+    ]
+    documents.extend(nested_docs)
+
+    for reply_post in reply_posts:
+        reply_uri = reply_post.get("uri")
+        if not isinstance(reply_uri, str) or not reply_uri:
+            continue
+        if reply_uri in emitted_uris:
+            continue
+        documents.extend(
+            _collect_post_documents(
+                post=reply_post,
+                source_url=source_url,
+                kind=kind,
+                root=root,
+                settings=settings,
+                client=client,
+                index_counter=index_counter,
+                emitted_uris=emitted_uris,
+                quote_depth=settings.reply_quote_depth,
+                quote_seen={reply_uri},
+                expand_replies=False,
+            )
+        )
+    return documents
 
 
 def _thread_posts(
@@ -1218,13 +1527,19 @@ def _summary_document(
     kind: str,
     uri: str,
     root: str,
-    title: str,
-    lines: list[str],
+    fields: list[tuple[str, Any]],
     source_created: str | None = None,
     source_modified: str | None = None,
 ) -> AtprotoDocument:
     label = f"{root}/index"
-    rendered = f"{title}\n\n" + "\n".join(lines).strip()
+    lines: list[str] = []
+    for key, value in fields:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        lines.append(f"{key}: {value}")
+    rendered = "\n".join(lines).strip()
     return AtprotoDocument(
         source_url=source_url,
         kind=kind,
@@ -1248,55 +1563,27 @@ def _post_documents_from_feed(
     client: Any,
 ) -> list[AtprotoDocument]:
     documents: list[AtprotoDocument] = []
-    for index, entry in enumerate(entries, start=1):
+    emitted_uris: set[str] = set()
+    index_counter = [0]
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         post = entry.get("post") if isinstance(entry.get("post"), dict) else None
         if post is None:
             continue
-        context_lines: list[str] = []
-        reply = entry.get("reply")
-        if isinstance(reply, dict):
-            parent = reply.get("parent")
-            if isinstance(parent, dict) and isinstance(parent.get("uri"), str):
-                context_lines.append(f"reply-to={parent['uri']}")
-        reason = entry.get("reason")
-        if isinstance(reason, dict):
-            rtype = str(reason.get("$type") or "")
-            by = reason.get("by") if isinstance(reason.get("by"), dict) else {}
-            if "repost" in rtype.lower():
-                context_lines.append(f"reposted-by={_author_name(by)}")
-
-        rendered = _render_post(
-            post,
-            settings=settings,
-            client=client,
-            quote_depth=settings.quote_depth,
-            visited_quotes={str(post.get("uri") or "")},
-            context_lines=context_lines,
-        )
-        label = f"{root}/posts/{index:03d}-{_safe_slug(_post_label(post, index), f'post-{index:03d}')}"
-        source_created = None
-        record = post.get("record")
-        if isinstance(record, dict):
-            created_at = record.get("createdAt")
-            if isinstance(created_at, str):
-                source_created = created_at
-        source_modified = (
-            post.get("indexedAt") if isinstance(post.get("indexedAt"), str) else None
-        )
-        uri = str(post.get("uri") or "")
-        documents.append(
-            AtprotoDocument(
+        documents.extend(
+            _collect_post_documents(
+                post=post,
                 source_url=source_url,
                 kind=kind,
-                uri=uri,
-                label=label,
-                trace_path=label,
-                context_subpath=f"{label}.md",
-                rendered=rendered,
-                source_created=source_created,
-                source_modified=source_modified,
+                root=root,
+                settings=settings,
+                client=client,
+                index_counter=index_counter,
+                emitted_uris=emitted_uris,
+                quote_depth=settings.quote_depth,
+                quote_seen={str(post.get("uri") or "")},
+                expand_replies=True,
             )
         )
     return documents
@@ -1318,55 +1605,27 @@ def _resolve_post_documents(
         parentHeight=settings.thread_parent_height,
     )
     thread = response.get("thread")
-    posts, stats = _thread_posts(thread, include_replies=settings.include_replies)
-    repo, _collection, rkey = _parse_at_uri(target.uri)
-    root = "atproto/post/" + _safe_slug(f"{repo}-{rkey}", "thread")
+    posts, _ = _thread_posts(thread, include_replies=settings.include_replies)
+    repo, _collection, _rkey = _parse_at_uri(target.uri)
+    root_actor = target.actor or repo or "profile"
+    root = "atproto/profile/" + _safe_slug(str(root_actor), "profile")
     documents: list[AtprotoDocument] = []
-    summary_lines = [
-        f"Source: {source_url}",
-        f"Canonical URI: {target.uri}",
-        f"Posts rendered: {len(posts)}",
-        f"Replies included: {'yes' if settings.include_replies else 'no'}",
-    ]
-    if stats["blocked"] or stats["not_found"]:
-        summary_lines.append(
-            f"Thread omissions: blocked={stats['blocked']} not_found={stats['not_found']}"
-        )
-    documents.append(
-        _summary_document(
-            source_url=source_url,
-            kind="post",
-            uri=target.uri,
-            root=root,
-            title="# ATProto Post Thread",
-            lines=summary_lines,
-        )
-    )
-    for index, (post, context) in enumerate(posts, start=1):
-        rendered = _render_post(
-            post,
-            settings=settings,
-            client=client,
-            quote_depth=settings.quote_depth,
-            visited_quotes={str(post.get("uri") or "")},
-            context_lines=context,
-        )
-        label = f"{root}/posts/{index:03d}-{_safe_slug(_post_label(post, index), f'post-{index:03d}')}"
-        uri = str(post.get("uri") or target.uri)
-        record = post.get("record")
-        created = record.get("createdAt") if isinstance(record, dict) else None
-        modified = post.get("indexedAt")
-        documents.append(
-            AtprotoDocument(
+    emitted_uris: set[str] = set()
+    index_counter = [0]
+    for post, _context in posts:
+        documents.extend(
+            _collect_post_documents(
+                post=post,
                 source_url=source_url,
                 kind="post",
-                uri=uri,
-                label=label,
-                trace_path=label,
-                context_subpath=f"{label}.md",
-                rendered=rendered,
-                source_created=created if isinstance(created, str) else None,
-                source_modified=modified if isinstance(modified, str) else None,
+                root=root,
+                settings=settings,
+                client=client,
+                index_counter=index_counter,
+                emitted_uris=emitted_uris,
+                quote_depth=settings.quote_depth,
+                quote_seen={str(post.get("uri") or "")},
+                expand_replies=True,
             )
         )
     return documents
@@ -1397,47 +1656,50 @@ def _resolve_profile_documents(
     handle = profile.get("handle") if isinstance(profile, dict) else None
     display_name = profile.get("displayName") if isinstance(profile, dict) else None
     root = "atproto/profile/" + _safe_slug(str(handle or target.repo), "profile")
-    summary_lines = [
-        f"Source: {source_url}",
-        f"Canonical URI: at://{target.repo}",
-        f"DID: {target.repo}",
-        f"Handle: {handle or 'unknown'}",
-    ]
-    if isinstance(display_name, str) and display_name.strip():
-        summary_lines.append(f"Display name: {display_name.strip()}")
-    for key, label in (
-        ("followersCount", "Followers"),
-        ("followsCount", "Follows"),
-        ("postsCount", "Posts"),
-    ):
-        value = profile.get(key) if isinstance(profile, dict) else None
-        if isinstance(value, int):
-            summary_lines.append(f"{label}: {value}")
-    summary_lines.append(f"Author feed entries rendered: {len(feed_entries)}")
-    documents = [
-        _summary_document(
-            source_url=source_url,
-            kind="profile",
-            uri=f"at://{target.repo}",
-            root=root,
-            title="# ATProto Profile",
-            lines=summary_lines,
-            source_modified=profile.get("indexedAt")
-            if isinstance(profile, dict) and isinstance(profile.get("indexedAt"), str)
-            else None,
-        )
-    ]
-    documents.extend(
-        _post_documents_from_feed(
-            source_url=source_url,
-            kind="profile",
-            root=root,
-            entries=feed_entries,
-            settings=settings,
-            client=client,
-        )
+    profile_uri = f"at://{target.repo}"
+    profile_url = (
+        f"https://bsky.app/profile/{handle}"
+        if isinstance(handle, str) and handle.strip()
+        else _uri_to_bsky_url(profile_uri)
     )
-    return documents
+    documents = _post_documents_from_feed(
+        source_url=source_url,
+        kind="profile",
+        root=root,
+        entries=feed_entries,
+        settings=settings,
+        client=client,
+    )
+    summary = _summary_document(
+        source_url=source_url,
+        kind="profile",
+        uri=profile_uri,
+        root=root,
+        fields=[
+            ("uri", profile_uri),
+            ("url", profile_url),
+            (
+                "display_name",
+                display_name.strip() if isinstance(display_name, str) else None,
+            ),
+            (
+                "followers",
+                profile.get("followersCount") if isinstance(profile, dict) else None,
+            ),
+            (
+                "following",
+                profile.get("followsCount") if isinstance(profile, dict) else None,
+            ),
+            (
+                "post_count",
+                profile.get("postsCount") if isinstance(profile, dict) else None,
+            ),
+        ],
+        source_modified=profile.get("indexedAt")
+        if isinstance(profile, dict) and isinstance(profile.get("indexedAt"), str)
+        else None,
+    )
+    return [summary, *documents]
 
 
 def _resolve_feed_documents(
@@ -1465,37 +1727,37 @@ def _resolve_feed_documents(
     view = generator_resp.get("view") if isinstance(generator_resp, dict) else {}
     display_name = view.get("displayName") if isinstance(view, dict) else None
     root = "atproto/feed/" + _safe_slug(str(target.rkey or target.uri), "feed")
-    summary_lines = [
-        f"Source: {source_url}",
-        f"Canonical URI: {target.uri}",
-    ]
-    if isinstance(display_name, str) and display_name.strip():
-        summary_lines.append(f"Display name: {display_name.strip()}")
     creator = view.get("creator") if isinstance(view, dict) else None
-    if isinstance(creator, dict):
-        summary_lines.append(f"Creator: {_author_name(creator)}")
-    summary_lines.append(f"Feed entries rendered: {len(entries)}")
-    documents = [
-        _summary_document(
-            source_url=source_url,
-            kind="feed",
-            uri=target.uri,
-            root=root,
-            title="# ATProto Feed",
-            lines=summary_lines,
-        )
-    ]
-    documents.extend(
-        _post_documents_from_feed(
-            source_url=source_url,
-            kind="feed",
-            root=root,
-            entries=entries,
-            settings=settings,
-            client=client,
-        )
+    documents = _post_documents_from_feed(
+        source_url=source_url,
+        kind="feed",
+        root=root,
+        entries=entries,
+        settings=settings,
+        client=client,
     )
-    return documents
+    summary = _summary_document(
+        source_url=source_url,
+        kind="feed",
+        uri=target.uri,
+        root=root,
+        fields=[
+            ("uri", target.uri),
+            (
+                "url",
+                source_url
+                if is_bsky_app_url(source_url)
+                else _uri_to_bsky_url(target.uri),
+            ),
+            (
+                "display_name",
+                display_name.strip() if isinstance(display_name, str) else None,
+            ),
+            ("creator", _author_name(creator) if isinstance(creator, dict) else None),
+            ("item_count", len(documents)),
+        ],
+    )
+    return [summary, *documents]
 
 
 def _resolve_list_documents(
@@ -1523,48 +1785,47 @@ def _resolve_list_documents(
         entries = []
     list_view = list_resp.get("list") if isinstance(list_resp, dict) else {}
     root = "atproto/list/" + _safe_slug(str(target.rkey or target.uri), "list")
-    summary_lines = [
-        f"Source: {source_url}",
-        f"Canonical URI: {target.uri}",
-    ]
-    if isinstance(list_view, dict):
-        name = list_view.get("name")
-        if isinstance(name, str) and name.strip():
-            summary_lines.append(f"Name: {name.strip()}")
-        description = list_view.get("description")
-        if isinstance(description, str) and description.strip():
-            summary_lines.append(f"Description: {description.strip()}")
-        creator = list_view.get("creator")
-        if isinstance(creator, dict):
-            summary_lines.append(f"Creator: {_author_name(creator)}")
-        list_item_count = list_view.get("listItemCount")
-        if isinstance(list_item_count, int):
-            summary_lines.append(f"List members: {list_item_count}")
-    items = list_resp.get("items")
-    if isinstance(items, list):
-        summary_lines.append(f"Member entries fetched: {len(items)}")
-    summary_lines.append(f"Feed entries rendered: {len(entries)}")
-    documents = [
-        _summary_document(
-            source_url=source_url,
-            kind="list",
-            uri=target.uri,
-            root=root,
-            title="# ATProto List",
-            lines=summary_lines,
-        )
-    ]
-    documents.extend(
-        _post_documents_from_feed(
-            source_url=source_url,
-            kind="list",
-            root=root,
-            entries=entries,
-            settings=settings,
-            client=client,
-        )
+    documents = _post_documents_from_feed(
+        source_url=source_url,
+        kind="list",
+        root=root,
+        entries=entries,
+        settings=settings,
+        client=client,
     )
-    return documents
+    name = list_view.get("name") if isinstance(list_view, dict) else None
+    description = list_view.get("description") if isinstance(list_view, dict) else None
+    creator = list_view.get("creator") if isinstance(list_view, dict) else None
+    list_item_count = (
+        list_view.get("listItemCount") if isinstance(list_view, dict) else None
+    )
+    summary = _summary_document(
+        source_url=source_url,
+        kind="list",
+        uri=target.uri,
+        root=root,
+        fields=[
+            ("uri", target.uri),
+            (
+                "url",
+                source_url
+                if is_bsky_app_url(source_url)
+                else _uri_to_bsky_url(target.uri),
+            ),
+            ("name", name.strip() if isinstance(name, str) else None),
+            (
+                "description",
+                description.strip() if isinstance(description, str) else None,
+            ),
+            ("creator", _author_name(creator) if isinstance(creator, dict) else None),
+            (
+                "member_count",
+                list_item_count if isinstance(list_item_count, int) else None,
+            ),
+            ("item_count", len(documents)),
+        ],
+    )
+    return [summary, *documents]
 
 
 def _resolve_starter_pack_documents(
@@ -1600,50 +1861,46 @@ def _resolve_starter_pack_documents(
         except Exception as exc:
             _log(f"  starter-pack list feed fallback failed: {exc}")
     root = "atproto/starter-pack/" + _safe_slug(str(target.rkey or target.uri), "pack")
-    summary_lines = [
-        f"Source: {source_url}",
-        f"Canonical URI: {target.uri}",
-    ]
     record = pack.get("record") if isinstance(pack.get("record"), dict) else {}
-    pack_name = record.get("name")
-    if isinstance(pack_name, str) and pack_name.strip():
-        summary_lines.append(f"Name: {pack_name.strip()}")
-    description = record.get("description")
-    if isinstance(description, str) and description.strip():
-        summary_lines.append(f"Description: {description.strip()}")
+    pack_name = record.get("name") if isinstance(record, dict) else None
+    description = record.get("description") if isinstance(record, dict) else None
     creator = pack.get("creator") if isinstance(pack.get("creator"), dict) else None
-    if isinstance(creator, dict):
-        summary_lines.append(f"Creator: {_author_name(creator)}")
-    if list_uri:
-        summary_lines.append(f"List URI: {list_uri}")
-        list_name = list_view.get("name")
-        if isinstance(list_name, str) and list_name.strip():
-            summary_lines.append(f"List name: {list_name.strip()}")
+    list_name = list_view.get("name") if isinstance(list_view, dict) else None
     feeds = pack.get("feeds")
-    if isinstance(feeds, list):
-        summary_lines.append(f"Embedded feeds: {len(feeds)}")
-    summary_lines.append(f"List feed entries rendered: {len(entries)}")
-    documents = [
-        _summary_document(
-            source_url=source_url,
-            kind="starter-pack",
-            uri=target.uri,
-            root=root,
-            title="# ATProto Starter Pack",
-            lines=summary_lines,
-        )
-    ]
-    documents.extend(
-        _post_documents_from_feed(
-            source_url=source_url,
-            kind="starter-pack",
-            root=root,
-            entries=entries,
-            settings=settings,
-            client=client,
-        )
+    documents = _post_documents_from_feed(
+        source_url=source_url,
+        kind="starter-pack",
+        root=root,
+        entries=entries,
+        settings=settings,
+        client=client,
     )
-    return documents
+    summary = _summary_document(
+        source_url=source_url,
+        kind="starter-pack",
+        uri=target.uri,
+        root=root,
+        fields=[
+            ("uri", target.uri),
+            (
+                "url",
+                source_url
+                if is_bsky_app_url(source_url)
+                else _uri_to_bsky_url(target.uri),
+            ),
+            ("name", pack_name.strip() if isinstance(pack_name, str) else None),
+            (
+                "description",
+                description.strip() if isinstance(description, str) else None,
+            ),
+            ("creator", _author_name(creator) if isinstance(creator, dict) else None),
+            ("list_uri", list_uri),
+            ("list_name", list_name.strip() if isinstance(list_name, str) else None),
+            ("embedded_feeds", len(feeds) if isinstance(feeds, list) else None),
+            ("item_count", len(documents)),
+        ],
+    )
+    return [summary, *documents]
 
 
 def _resolve_labeler_documents(
@@ -1677,32 +1934,23 @@ def _resolve_labeler_documents(
             record_payload = None
 
     root = "atproto/labeler/" + _safe_slug(str(target.rkey or target.repo), "labeler")
-    summary_lines = [
-        f"Source: {source_url}",
-        f"Canonical URI: {target.uri or f'at://{target.repo}'}",
-        f"DID: {target.repo}",
-        f"Service views fetched: {len(services)}",
+    fields: list[tuple[str, Any]] = [
+        ("uri", target.uri or f"at://{target.repo}"),
+        (
+            "url",
+            source_url
+            if is_bsky_app_url(source_url)
+            else _uri_to_bsky_url(target.uri or f"at://{target.repo}"),
+        ),
+        ("did", target.repo),
+        ("service_count", len(services)),
     ]
+    for index, service in enumerate(services, start=1):
+        if not isinstance(service, dict):
+            continue
+        fields.append((f"service_{index}_uri", service.get("uri")))
     if record_payload is not None:
-        summary_lines.append("Raw labeler record:")
-        summary_lines.append(_render_json_block(record_payload))
-    if services:
-        summary_lines.append("")
-        summary_lines.append("Service details:")
-        for index, service in enumerate(services, start=1):
-            if not isinstance(service, dict):
-                continue
-            summary_lines.append(f"- [{index}] uri={service.get('uri')}")
-            creator = service.get("creator")
-            if isinstance(creator, dict):
-                summary_lines.append(f"  creator={_author_name(creator)}")
-            policies = service.get("policies")
-            if isinstance(policies, dict):
-                labels = policies.get("labelValues")
-                if isinstance(labels, list):
-                    summary_lines.append(
-                        f"  labels={', '.join(str(v) for v in labels)}"
-                    )
+        fields.append(("record_fetched", True))
 
     return [
         _summary_document(
@@ -1710,8 +1958,7 @@ def _resolve_labeler_documents(
             kind="labeler",
             uri=target.uri or f"at://{target.repo}",
             root=root,
-            title="# ATProto Labeler",
-            lines=summary_lines,
+            fields=fields,
         )
     ]
 
@@ -1745,8 +1992,8 @@ def _resolve_record_documents(
             collection=target.collection,
             rkey=target.rkey,
         )
-        rendered = _render_json_block(payload)
         label = f"{root}/record"
+        rendered = _render_json_block(payload)
         return [
             AtprotoDocument(
                 source_url=source_url,
@@ -1769,21 +2016,7 @@ def _resolve_record_documents(
     records = payload.get("records") if isinstance(payload, dict) else []
     if not isinstance(records, list):
         records = []
-    documents = [
-        _summary_document(
-            source_url=source_url,
-            kind="record",
-            uri=target.uri or "",
-            root=root,
-            title="# ATProto Records",
-            lines=[
-                f"Source: {source_url}",
-                f"Canonical URI: {target.uri}",
-                f"Collection: {target.collection}",
-                f"Records rendered: {len(records)}",
-            ],
-        )
-    ]
+    documents = []
     for index, record in enumerate(records, start=1):
         if not isinstance(record, dict):
             continue
@@ -1800,7 +2033,19 @@ def _resolve_record_documents(
                 rendered=_render_json_block(record),
             )
         )
-    return documents
+    summary = _summary_document(
+        source_url=source_url,
+        kind="record",
+        uri=target.uri or "",
+        root=root,
+        fields=[
+            ("uri", target.uri),
+            ("source_url", source_url),
+            ("collection", target.collection),
+            ("record_count", len(documents)),
+        ],
+    )
+    return [summary, *documents]
 
 
 def resolve_atproto_url(
