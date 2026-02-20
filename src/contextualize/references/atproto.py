@@ -917,12 +917,14 @@ def _media_kind(
         return "image"
     if mtype.startswith("video/"):
         return "video"
+    if mtype in {"application/vnd.apple.mpegurl", "application/x-mpegurl"}:
+        return "video"
     if mtype.startswith("audio/"):
         return "audio"
     suffix = Path((url or "").split("?")[0]).suffix.lower()
     if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif"}:
         return "image"
-    if suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}:
+    if suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".m3u8", ".m3u"}:
         return "video"
     if suffix in {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".aiff"}:
         return "audio"
@@ -942,6 +944,8 @@ def _media_suffix(*, mime: str | None, url: str | None, kind: str) -> str:
         return ".webp"
     if mtype == "video/mp4":
         return ".mp4"
+    if mtype in {"application/vnd.apple.mpegurl", "application/x-mpegurl"}:
+        return ".m3u8"
     if mtype == "audio/mpeg":
         return ".mp3"
     if mtype == "audio/wav":
@@ -1284,6 +1288,12 @@ def _describe_media(
         store_media_bytes=store_media_bytes,
         refresh_cache=refresh_for_kind,
     )
+    if tmp is None and kind == "video":
+        import tempfile
+
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix or ".mp4")
+        os.close(fd)
+        tmp = Path(tmp_path)
     if tmp is None:
         return None
     try:
@@ -1295,6 +1305,7 @@ def _describe_media(
                 tmp,
                 refresh_images=refresh_for_kind,
                 prompt_append=prompt_append,
+                source_url=url,
             )
             markdown = result.markdown
         cleaned = _normalize_llm_description(markdown)
@@ -1302,8 +1313,13 @@ def _describe_media(
             return None
         store_rendered(render_identity, cleaned)
         return cleaned
-    except Exception:
-        return None
+    except Exception as exc:
+        _log(f"  atproto media description failed for {url}: {exc}")
+        if kind != "video":
+            return None
+        fallback = "Detailed video analysis was unavailable; this fallback preserves video modality."
+        store_rendered(render_identity, fallback)
+        return fallback
     finally:
         tmp.unlink(missing_ok=True)
 

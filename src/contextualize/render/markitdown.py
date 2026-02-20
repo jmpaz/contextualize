@@ -97,7 +97,19 @@ _IMAGE_CONVERT_SUFFIXES = frozenset(
 )
 _VIDEO_CONVERT_SUFFIXES = frozenset({".mov", ".avi", ".mkv", ".webm", ".m4v", ".mp4"})
 _VIDEO_SUFFIXES = frozenset(
-    {".mp4", ".mov", ".mpeg", ".mpg", ".webm", ".avi", ".mkv", ".m4v", ".gif"}
+    {
+        ".mp4",
+        ".mov",
+        ".mpeg",
+        ".mpg",
+        ".webm",
+        ".avi",
+        ".mkv",
+        ".m4v",
+        ".gif",
+        ".m3u8",
+        ".m3u",
+    }
 )
 _AUDIO_SUFFIXES = frozenset(
     {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".aiff", ".pcm", ".pcm16"}
@@ -113,6 +125,8 @@ _CONTENT_TYPE_SUFFIXES: dict[str, str] = {
     "video/x-msvideo": ".avi",
     "video/x-matroska": ".mkv",
     "video/mp4": ".mp4",
+    "application/vnd.apple.mpegurl": ".m3u8",
+    "application/x-mpegurl": ".m3u8",
     "audio/wav": ".wav",
     "audio/x-wav": ".wav",
     "audio/mpeg": ".mp3",
@@ -131,7 +145,13 @@ _VIDEO_MIME_BY_SUFFIX: dict[str, str] = {
     ".avi": "video/x-msvideo",
     ".mkv": "video/x-matroska",
     ".m4v": "video/mp4",
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".m3u": "application/vnd.apple.mpegurl",
 }
+_VIDEO_CONTENT_TYPES = frozenset(
+    {"application/vnd.apple.mpegurl", "application/x-mpegurl"}
+)
+_HLS_SUFFIXES = frozenset({".m3u8", ".m3u"})
 _AUDIO_FORMAT_BY_SUFFIX: dict[str, str] = {
     ".wav": "wav",
     ".mp3": "mp3",
@@ -280,6 +300,47 @@ def _transcode_video_to_mp4(source: Path) -> Path:
         output.unlink(missing_ok=True)
         raise MarkItDownConversionError(
             f"Failed to auto-convert {source} to MP4: {stderr}"
+        )
+    return output
+
+
+def _transcode_remote_video_url_to_mp4(source_url: str) -> Path:
+    ffmpeg = _ffmpeg_path()
+    if ffmpeg is None:
+        raise MarkItDownConversionError(
+            f"Auto-conversion to MP4 requires ffmpeg for {source_url}"
+        )
+    output = _mktemp_output(".mp4")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        source_url,
+        "-movflags",
+        "+faststart",
+        "-pix_fmt",
+        "yuv420p",
+        "-t",
+        "30",
+        str(output),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        output.unlink(missing_ok=True)
+        raise MarkItDownConversionError(
+            f"Failed to invoke ffmpeg for {source_url}: {exc}"
+        ) from exc
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or "unknown ffmpeg error"
+        output.unlink(missing_ok=True)
+        raise MarkItDownConversionError(
+            f"Failed to auto-convert {source_url} to MP4: {stderr}"
         )
     return output
 
@@ -517,7 +578,12 @@ def _llm_audio_markdown(data: bytes, *, suffix: str, prompt: str) -> str:
 
 
 def _is_video_media(*, suffix: str, content_type: str = "") -> bool:
-    return suffix in _VIDEO_SUFFIXES or content_type.lower().startswith("video/")
+    normalized_content_type = content_type.lower()
+    return (
+        suffix in _VIDEO_SUFFIXES
+        or normalized_content_type.startswith("video/")
+        or normalized_content_type in _VIDEO_CONTENT_TYPES
+    )
 
 
 def _is_audio_media(*, suffix: str, content_type: str = "") -> bool:
@@ -985,6 +1051,7 @@ def convert_path_to_markdown(
     *,
     refresh_images: bool = False,
     prompt_append: str | None = None,
+    source_url: str | None = None,
 ) -> MarkItDownResult:
     path_obj = Path(path)
     is_image = path_obj.suffix.lower() in _IMAGE_SUFFIXES
@@ -1021,13 +1088,38 @@ def convert_path_to_markdown(
     if is_video:
         video_path = path_obj
         cleanup_video = False
+        hls_transcoded_path: Path | None = None
         try:
             video_path = _maybe_convert_gif_to_mp4(path_obj)
             cleanup_video = video_path is not path_obj
+            prompt = _merge_prompt(_video_prompt(video_path), prompt_append)
+            remote_url = (source_url or "").strip()
+            if remote_url and remote_url.startswith(("http://", "https://")):
+                try:
+                    markdown = _llm_video_markdown(
+                        None,
+                        suffix=video_path.suffix.lower(),
+                        prompt=prompt,
+                        video_url=remote_url,
+                    )
+                    return MarkItDownResult(markdown=markdown, title=None)
+                except MarkItDownConversionError as exc:
+                    if _is_non_recoverable_video_error(exc):
+                        raise
+            if remote_url and video_path.suffix.lower() in _HLS_SUFFIXES:
+                hls_transcoded_path = _transcode_remote_video_url_to_mp4(remote_url)
+                markdown = _llm_video_markdown(
+                    hls_transcoded_path.read_bytes(),
+                    suffix=".mp4",
+                    prompt=_merge_prompt(
+                        _video_prompt(hls_transcoded_path), prompt_append
+                    ),
+                )
+                return MarkItDownResult(markdown=markdown, title=None)
             markdown = _llm_video_markdown(
                 video_path.read_bytes(),
                 suffix=video_path.suffix.lower(),
-                prompt=_merge_prompt(_video_prompt(video_path), prompt_append),
+                prompt=prompt,
             )
             return MarkItDownResult(markdown=markdown, title=None)
         except MarkItDownConversionError as exc:
@@ -1038,6 +1130,8 @@ def convert_path_to_markdown(
         finally:
             if cleanup_video:
                 video_path.unlink(missing_ok=True)
+            if hls_transcoded_path is not None:
+                hls_transcoded_path.unlink(missing_ok=True)
 
     if is_audio:
         try:
@@ -1113,6 +1207,7 @@ def convert_response_to_markdown(
         temp_path = _mktemp_output(temp_suffix)
         video_path = temp_path
         cleanup_video = False
+        hls_transcoded_path: Path | None = None
         try:
             temp_path.write_bytes(response.content)
             video_path = _maybe_convert_gif_to_mp4(temp_path)
@@ -1131,6 +1226,16 @@ def convert_response_to_markdown(
                 except MarkItDownConversionError as exc:
                     if _is_non_recoverable_video_error(exc):
                         raise
+            if remote_url and video_path.suffix.lower() in _HLS_SUFFIXES:
+                hls_transcoded_path = _transcode_remote_video_url_to_mp4(remote_url)
+                markdown = _llm_video_markdown(
+                    hls_transcoded_path.read_bytes(),
+                    suffix=".mp4",
+                    prompt=_merge_prompt(
+                        _video_prompt(hls_transcoded_path), prompt_append
+                    ),
+                )
+                return MarkItDownResult(markdown=markdown, title=None)
             markdown = _llm_video_markdown(
                 video_path.read_bytes(),
                 suffix=video_path.suffix.lower(),
@@ -1145,6 +1250,8 @@ def convert_response_to_markdown(
         finally:
             if cleanup_video:
                 video_path.unlink(missing_ok=True)
+            if hls_transcoded_path is not None:
+                hls_transcoded_path.unlink(missing_ok=True)
             temp_path.unlink(missing_ok=True)
 
     if is_audio:
