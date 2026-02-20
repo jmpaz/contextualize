@@ -1239,9 +1239,14 @@ def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | 
 
     if "max-items" in raw:
         value = raw["max-items"]
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ValueError(f"{prefix}.max-items must be a positive integer")
-        result["max_items"] = value
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value <= 0:
+                raise ValueError(f"{prefix}.max-items must be >= 1 or 'all'")
+            result["max_items"] = value
+        elif isinstance(value, str) and value.strip().lower() == "all":
+            result["max_items"] = "all"
+        else:
+            raise ValueError(f"{prefix}.max-items must be a positive integer or 'all'")
 
     if "thread-depth" in raw:
         value = raw["thread-depth"]
@@ -3001,7 +3006,9 @@ def _build_normalized_config(
     if include_atproto_defaults:
         atproto_settings = build_atproto_settings(atproto_overrides)
         atproto = dict(cfg.get("atproto") or {})
-        atproto["max-items"] = atproto_settings.max_items
+        atproto["max-items"] = (
+            "all" if atproto_settings.max_items is None else atproto_settings.max_items
+        )
         atproto["post-ancestors"] = (
             "all"
             if atproto_settings.post_ancestors is None

@@ -94,7 +94,7 @@ def is_atproto_url(value: str) -> bool:
 
 @dataclass(frozen=True)
 class AtprotoSettings:
-    max_items: int = 25
+    max_items: int | None = 25
     thread_depth: int = 6
     post_ancestors: int | None = 0
     include_media_descriptions: bool = True
@@ -151,6 +151,21 @@ def _parse_positive_int(value: str, *, default: int, minimum: int = 1) -> int:
     return parsed
 
 
+def _parse_max_items_env(value: str, *, default: int) -> int | None:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return default
+    if cleaned == "all":
+        return None
+    try:
+        parsed = int(cleaned)
+    except ValueError:
+        return default
+    if parsed < 1:
+        return default
+    return parsed
+
+
 def _parse_post_ancestors_env(value: str) -> int | None:
     cleaned = value.strip().lower()
     if not cleaned:
@@ -196,6 +211,36 @@ def _normalize_post_ancestors_override(
             raise ValueError(f"{field} must be >= 0")
         return parsed
     raise ValueError(f"{field} must be a non-negative integer or 'all'")
+
+
+def _normalize_max_items_override(
+    value: Any,
+    *,
+    default: int | None,
+    field: str,
+) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a positive integer or 'all'")
+    if isinstance(value, int):
+        if value < 1:
+            raise ValueError(f"{field} must be >= 1")
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return default
+        if cleaned == "all":
+            return None
+        try:
+            parsed = int(cleaned)
+        except ValueError as exc:
+            raise ValueError(f"{field} must be a positive integer or 'all'") from exc
+        if parsed < 1:
+            raise ValueError(f"{field} must be >= 1")
+        return parsed
+    raise ValueError(f"{field} must be a positive integer or 'all'")
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
@@ -244,10 +289,9 @@ def _parse_media_mode(value: str, *, default: str) -> str:
 
 def _atproto_settings_from_env() -> AtprotoSettings:
     _load_dotenv()
-    max_items = _parse_positive_int(
+    max_items = _parse_max_items_env(
         os.environ.get("ATPROTO_MAX_ITEMS", ""),
         default=25,
-        minimum=1,
     )
     post_ancestors = _parse_post_ancestors_env(
         os.environ.get("ATPROTO_POST_ANCESTORS", "")
@@ -310,7 +354,11 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
     env = _atproto_settings_from_env()
     if not overrides:
         return env
-    max_items = int(overrides.get("max_items", env.max_items))
+    max_items = _normalize_max_items_override(
+        overrides.get("max_items", env.max_items),
+        default=env.max_items,
+        field="max_items",
+    )
     post_ancestors = _normalize_post_ancestors_override(
         overrides.get("post_ancestors", env.post_ancestors),
         default=env.post_ancestors,
@@ -347,7 +395,7 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
         scope="atproto",
     )
     return AtprotoSettings(
-        max_items=max(1, max_items),
+        max_items=max_items,
         thread_depth=max(0, thread_depth),
         post_ancestors=post_ancestors,
         include_media_descriptions=include_media_descriptions,
@@ -363,8 +411,8 @@ def build_atproto_settings(overrides: dict[str, Any] | None = None) -> AtprotoSe
 
 def atproto_settings_cache_key(settings: AtprotoSettings) -> tuple[Any, ...]:
     return (
-        "v5",
-        settings.max_items,
+        "v6",
+        "all" if settings.max_items is None else settings.max_items,
         settings.thread_depth,
         "all" if settings.post_ancestors is None else settings.post_ancestors,
         settings.include_media_descriptions,
@@ -1711,14 +1759,16 @@ def _post_documents_from_feed(
 def _paginate_feed_entries(
     *,
     fetch: Any,
-    max_items: int,
+    max_items: int | None,
     created_after: datetime | None,
     created_before: datetime | None,
 ) -> list[Any]:
     entries: list[Any] = []
     cursor: str | None = None
-    while len(entries) < max_items:
-        limit = min(_ATPROTO_FEED_PAGE_LIMIT, max_items - len(entries))
+    while max_items is None or len(entries) < max_items:
+        limit = _ATPROTO_FEED_PAGE_LIMIT
+        if max_items is not None:
+            limit = min(_ATPROTO_FEED_PAGE_LIMIT, max_items - len(entries))
         kwargs: dict[str, Any] = {"limit": limit}
         if cursor:
             kwargs["cursor"] = cursor
@@ -1740,7 +1790,7 @@ def _paginate_feed_entries(
             ):
                 continue
             entries.append(entry)
-            if len(entries) >= max_items:
+            if max_items is not None and len(entries) >= max_items:
                 should_stop = True
                 break
         if should_stop:
@@ -1750,6 +1800,34 @@ def _paginate_feed_entries(
             break
         cursor = next_cursor.strip()
     return entries
+
+
+def _paginate_records(
+    *,
+    fetch: Any,
+    max_items: int | None,
+) -> list[Any]:
+    records: list[Any] = []
+    cursor: str | None = None
+    while max_items is None or len(records) < max_items:
+        limit = _ATPROTO_FEED_PAGE_LIMIT
+        if max_items is not None:
+            limit = min(_ATPROTO_FEED_PAGE_LIMIT, max_items - len(records))
+        kwargs: dict[str, Any] = {"limit": limit}
+        if cursor:
+            kwargs["cursor"] = cursor
+        response = fetch(**kwargs)
+        page_records = response.get("records")
+        if not isinstance(page_records, list) or not page_records:
+            break
+        records.extend(page_records)
+        if max_items is not None and len(records) >= max_items:
+            return records[:max_items]
+        next_cursor = response.get("cursor")
+        if not isinstance(next_cursor, str) or not next_cursor.strip():
+            break
+        cursor = next_cursor.strip()
+    return records
 
 
 def _thread_root_post(thread: Any) -> dict[str, Any] | None:
@@ -1993,17 +2071,19 @@ def _resolve_list_documents(
         "graph.getList",
         client.app.bsky.graph.getList,
         list=target.uri,
-        limit=min(settings.max_items, 100),
+        limit=min(100, settings.max_items) if settings.max_items is not None else 100,
     )
-    feed_resp = _client_call(
-        "feed.getListFeed",
-        client.app.bsky.feed.getListFeed,
-        list=target.uri,
-        limit=settings.max_items,
+    entries = _paginate_feed_entries(
+        fetch=lambda **kwargs: _client_call(
+            "feed.getListFeed",
+            client.app.bsky.feed.getListFeed,
+            list=target.uri,
+            **kwargs,
+        ),
+        max_items=settings.max_items,
+        created_after=settings.created_after,
+        created_before=settings.created_before,
     )
-    entries = feed_resp.get("feed")
-    if not isinstance(entries, list):
-        entries = []
     list_view = list_resp.get("list") if isinstance(list_resp, dict) else {}
     root = "atproto/list/" + _safe_slug(str(target.rkey or target.uri), "list")
     documents = _post_documents_from_feed(
@@ -2070,15 +2150,17 @@ def _resolve_starter_pack_documents(
     entries: list[Any] = []
     if list_uri:
         try:
-            list_feed_resp = _client_call(
-                "feed.getListFeed",
-                client.app.bsky.feed.getListFeed,
-                list=list_uri,
-                limit=settings.max_items,
+            entries = _paginate_feed_entries(
+                fetch=lambda **kwargs: _client_call(
+                    "feed.getListFeed",
+                    client.app.bsky.feed.getListFeed,
+                    list=list_uri,
+                    **kwargs,
+                ),
+                max_items=settings.max_items,
+                created_after=settings.created_after,
+                created_before=settings.created_before,
             )
-            fetched = list_feed_resp.get("feed")
-            if isinstance(fetched, list):
-                entries = fetched
         except Exception as exc:
             _log(f"  starter-pack list feed fallback failed: {exc}")
     root = "atproto/starter-pack/" + _safe_slug(str(target.rkey or target.uri), "pack")
@@ -2227,16 +2309,16 @@ def _resolve_record_documents(
             )
         ]
 
-    payload = _client_call(
-        "repo.listRecords",
-        client.com.atproto.repo.listRecords,
-        repo=target.repo,
-        collection=target.collection,
-        limit=settings.max_items,
+    records = _paginate_records(
+        fetch=lambda **kwargs: _client_call(
+            "repo.listRecords",
+            client.com.atproto.repo.listRecords,
+            repo=target.repo,
+            collection=target.collection,
+            **kwargs,
+        ),
+        max_items=settings.max_items,
     )
-    records = payload.get("records") if isinstance(payload, dict) else []
-    if not isinstance(records, list):
-        records = []
     documents = []
     for index, record in enumerate(records, start=1):
         if not isinstance(record, dict):
