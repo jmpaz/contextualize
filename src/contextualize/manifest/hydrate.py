@@ -23,6 +23,7 @@ from ..references.atproto import (
     atproto_settings_cache_key,
     build_atproto_settings,
     is_atproto_url,
+    parse_atproto_target,
     resolve_atproto_url,
 )
 from ..references.discord import (
@@ -185,6 +186,14 @@ def build_inline_hydration_plan(
         else:
             expanded.append(t)
 
+    atproto_target_kinds = {
+        kind
+        for target in expanded
+        for kind in [_atproto_target_kind_from_spec(target)]
+        if kind is not None
+    }
+    group_atproto_by_kind = len(atproto_target_kinds) > 1
+
     for target in expanded:
         items = _resolve_spec_items(
             target,
@@ -194,6 +203,7 @@ def build_inline_hydration_plan(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
+            group_atproto_by_kind=group_atproto_by_kind,
         )
         for item in items:
             subpath = _split_subpath(item.context_subpath)
@@ -392,6 +402,8 @@ def build_hydration_plan_data(
     has_local_sources = _manifest_has_local_sources(components)
     has_arena_channels = _manifest_has_arena_channels(components)
     has_atproto_sources = _manifest_has_atproto_sources(components)
+    atproto_target_kinds = _manifest_atproto_target_kinds(components)
+    group_atproto_by_kind = len(atproto_target_kinds) > 1
     has_discord_channels = _manifest_has_discord_channels(components)
     use_external_root = context_cfg["path_strategy"] == "on-disk" and has_local_sources
 
@@ -409,6 +421,7 @@ def build_hydration_plan_data(
     resolved_spec_cache: dict[
         tuple[
             str,
+            bool,
             bool,
             bool,
             str | None,
@@ -590,6 +603,7 @@ def build_hydration_plan_data(
                     raw_spec,
                     force_git,
                     comp_gitignore,
+                    group_atproto_by_kind,
                     cache_alias,
                     arena_overrides_key,
                     atproto_overrides_key,
@@ -637,6 +651,7 @@ def build_hydration_plan_data(
                                 arena_overrides=eao,
                                 atproto_overrides=eatpo,
                                 discord_overrides=edo,
+                                group_atproto_by_kind=group_atproto_by_kind,
                             )
                         )
                     ),
@@ -1691,6 +1706,33 @@ def _manifest_has_atproto_sources(components: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _atproto_target_kind_from_spec(raw_spec: str) -> str | None:
+    spec = os.path.expanduser(raw_spec)
+    target = spec
+    if is_http_url(spec):
+        opts = parse_target_spec(spec)
+        target_candidate = opts.get("target", spec)
+        target = target_candidate if isinstance(target_candidate, str) else spec
+    parsed = parse_atproto_target(target)
+    if parsed is None:
+        return None
+    return parsed.kind
+
+
+def _manifest_atproto_target_kinds(components: list[dict[str, Any]]) -> set[str]:
+    kinds: set[str] = set()
+    for comp in components:
+        files = comp.get("files")
+        if not files or not isinstance(files, list):
+            continue
+        for file_spec in files:
+            raw_spec, _ = coerce_file_spec(file_spec)
+            kind = _atproto_target_kind_from_spec(raw_spec)
+            if kind:
+                kinds.add(kind)
+    return kinds
+
+
 def _manifest_has_discord_channels(components: list[dict[str, Any]]) -> bool:
     for comp in components:
         files = comp.get("files")
@@ -1799,6 +1841,7 @@ def _resolve_spec_items(
     arena_overrides: dict | None = None,
     atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
+    group_atproto_by_kind: bool = False,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
 
@@ -1811,6 +1854,7 @@ def _resolve_spec_items(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             atproto_overrides=atproto_overrides,
+            group_atproto_by_kind=group_atproto_by_kind,
         )
 
     if is_http_url(spec):
@@ -1902,6 +1946,7 @@ def _resolve_spec_items(
                 cache_ttl=cache_ttl,
                 refresh_cache=refresh_cache,
                 atproto_overrides=atproto_overrides,
+                group_atproto_by_kind=group_atproto_by_kind,
             )
 
         return [
@@ -2119,14 +2164,50 @@ def _atproto_post_id_from_uri(uri: str) -> str:
     return _sanitize_path_segment(leaf, fallback="post")
 
 
-def _atproto_document_root(context_subpath: str) -> Path:
+def _atproto_source_root(context_subpath: str) -> Path:
     path = _split_subpath(context_subpath)
     parts = list(path.parts)
-    if "posts" in parts:
-        index = parts.index("posts")
-        if index > 0:
-            return Path(*parts[:index])
+    if len(parts) >= 3 and parts[0] == "atproto":
+        return Path(*parts[:3])
     return path.parent
+
+
+_ATPROTO_KIND_DIRS: dict[str, str] = {
+    "profile": "profiles",
+    "post": "posts",
+    "feed": "feeds",
+    "list": "lists",
+    "starter-pack": "starter-packs",
+    "labeler": "labelers",
+    "record": "records",
+}
+
+
+def _atproto_kind_dir(kind: str) -> str:
+    return _ATPROTO_KIND_DIRS.get(kind, "records")
+
+
+def _atproto_entity_slug(
+    *,
+    url: str,
+    documents: list[Any],
+    parsed_target: Any,
+) -> str:
+    for document in documents:
+        root = _atproto_source_root(document.context_subpath)
+        name = root.name.strip()
+        if name:
+            return name
+    if parsed_target is not None:
+        for candidate in (
+            getattr(parsed_target, "actor", None),
+            getattr(parsed_target, "rkey", None),
+            getattr(parsed_target, "repo", None),
+            getattr(parsed_target, "uri", None),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return _sanitize_path_segment(candidate, fallback="atproto")
+    return _sanitize_path_segment(url, fallback="atproto")
 
 
 def _atproto_route_kind(metadata: dict[str, Any]) -> str:
@@ -2167,6 +2248,7 @@ def _resolve_atproto_items(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     atproto_overrides: dict[str, Any] | None = None,
+    group_atproto_by_kind: bool = False,
 ) -> list[ResolvedItem]:
     settings = build_atproto_settings(atproto_overrides)
     settings_key = _atproto_settings_cache_key(settings)
@@ -2177,6 +2259,17 @@ def _resolve_atproto_items(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
     )
+    parsed_target = parse_atproto_target(url)
+    target_kind = parsed_target.kind if parsed_target is not None else "record"
+    source_entity = _atproto_entity_slug(
+        url=url,
+        documents=documents,
+        parsed_target=parsed_target,
+    )
+    if group_atproto_by_kind:
+        base_root = Path(_atproto_kind_dir(target_kind)) / source_entity
+    else:
+        base_root = Path(source_entity)
 
     alias_prefix: str | None = None
     if isinstance(alias, str) and alias.strip():
@@ -2203,7 +2296,6 @@ def _resolve_atproto_items(
         if _atproto_metadata_str(metadata, "entry_type") is None:
             continue
         route_kind = _atproto_route_kind(metadata)
-        doc_root = _atproto_document_root(document.context_subpath)
         timestamp = _atproto_document_timestamp(document, metadata)
         filename = f"{_format_atproto_timestamp(timestamp)}_{_atproto_post_id_from_uri(uri)}.md"
         reply_root_uri = _atproto_metadata_str(metadata, "reply_root_uri")
@@ -2213,7 +2305,6 @@ def _resolve_atproto_items(
             bucket_uri = reply_root_uri or reply_to_uri or uri
         routed_docs[index] = {
             "uri": uri,
-            "root": doc_root,
             "route_kind": route_kind,
             "filename": filename,
             "bucket_uri": bucket_uri,
@@ -2232,13 +2323,12 @@ def _resolve_atproto_items(
         route_data = routed_docs.get(index)
         if route_data:
             route_kind = str(route_data["route_kind"])
-            doc_root = route_data["root"]
             filename = str(route_data["filename"])
             if route_kind == "posts":
                 if posts_flat_mode:
-                    routed_subpath = doc_root / filename
+                    routed_subpath = base_root / filename
                 else:
-                    routed_subpath = doc_root / "posts" / filename
+                    routed_subpath = base_root / "posts" / filename
             elif route_kind == "replies":
                 bucket_uri = str(
                     route_data.get("bucket_uri") or route_data.get("uri") or ""
@@ -2251,13 +2341,19 @@ def _resolve_atproto_items(
                 bucket_name = (
                     f"{bucket_timestamp}_{_atproto_post_id_from_uri(bucket_uri)}"
                 )
-                routed_subpath = doc_root / "replies" / bucket_name / filename
+                routed_subpath = base_root / "replies" / bucket_name / filename
             else:
-                routed_subpath = doc_root / route_kind / filename
+                routed_subpath = base_root / route_kind / filename
             context_subpath = routed_subpath.as_posix()
             atproto_route_kind = route_kind
         else:
-            context_subpath = document.context_subpath
+            source_root = _atproto_source_root(document.context_subpath)
+            original_subpath = _split_subpath(document.context_subpath)
+            try:
+                relative_subpath = original_subpath.relative_to(source_root)
+            except ValueError:
+                relative_subpath = Path(original_subpath.name)
+            context_subpath = (base_root / relative_subpath).as_posix()
             atproto_route_kind = None
         if alias_prefix:
             context_subpath = f"{alias_prefix}/{context_subpath}"
