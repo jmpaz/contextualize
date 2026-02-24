@@ -41,12 +41,20 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
             except subprocess.CalledProcessError:
                 raise err
     elif pull:
-        subprocess.run(
-            ["git", "-C", g.cache_dir, "pull"], check=True, capture_output=True
-        )
+        if g.rev:
+            subprocess.run(
+                ["git", "-C", g.cache_dir, "fetch", "origin"],
+                check=True,
+                capture_output=True,
+            )
+        else:
+            subprocess.run(
+                ["git", "-C", g.cache_dir, "pull"], check=True, capture_output=True
+            )
 
     if g.rev:
         rev = g.rev
+        rev_is_hash = re.fullmatch(r"[0-9a-f]{6,40}", rev) is not None
         # if this looks like a short hash, resolve it to full hash
         if re.fullmatch(r"[0-9a-f]{6,39}", rev):
             try:
@@ -65,13 +73,25 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
                 # if ls-remote fails, try the original rev as-is
                 pass
 
-        try:
-            subprocess.run(
-                ["git", "-C", g.cache_dir, "checkout", rev],
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError:
+        checkout_targets = [rev]
+        if pull and not rev_is_hash and not rev.startswith("refs/"):
+            checkout_targets.insert(0, f"origin/{rev}")
+
+        checkout_error: subprocess.CalledProcessError | None = None
+        for candidate in checkout_targets:
+            try:
+                subprocess.run(
+                    ["git", "-C", g.cache_dir, "checkout", candidate],
+                    check=True,
+                    capture_output=True,
+                )
+                checkout_error = None
+                break
+            except subprocess.CalledProcessError as err:
+                checkout_error = err
+                continue
+
+        if checkout_error is not None:
             try:
                 subprocess.run(
                     ["git", "-C", g.cache_dir, "fetch", "origin", f"{rev}:{rev}"],

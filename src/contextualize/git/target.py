@@ -1,7 +1,7 @@
 import os
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 CACHE_ROOT = os.path.expanduser("~/.local/share/contextualize/cache/git")
 
@@ -142,7 +142,9 @@ def _normalize_github_web_target(
         normalized_rev = rev or segments[3]
     normalized_path = path
     if normalized_path is None and len(segments) > 4:
-        normalized_path = "/".join(segments[4:])
+        normalized_path = "/".join(unquote(segment) for segment in segments[4:])
+    elif normalized_path is not None:
+        normalized_path = unquote(normalized_path)
 
     return normalized_repo_url, normalized_rev, normalized_path
 

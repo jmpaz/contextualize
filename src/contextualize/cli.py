@@ -1548,7 +1548,7 @@ def hydrate_cmd(
     "--refresh",
     "refresh_cache",
     is_flag=True,
-    help="Force refresh all cached URLs",
+    help="Force refresh cached URLs and update cached git refs",
 )
 @click.option(
     "--refresh-media",
@@ -1745,6 +1745,7 @@ def cat_cmd(
         ignored_folders.update(result.get("ignored_folders", {}))
 
     refs = []
+    effective_git_pull = git_pull or refresh_cache
     use_rev = bool(rev)
     repo_root = None
     ignore_spec = None
@@ -1786,7 +1787,11 @@ def cat_cmd(
         if p.startswith("http://") or p.startswith("https://"):
             tgt = parse_git_target(p)
             if tgt:
-                repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
+                repo_dir = ensure_repo(
+                    tgt,
+                    pull=effective_git_pull,
+                    reclone=git_reclone,
+                )
                 expanded_paths = (
                     [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)]
                     if tgt.path
@@ -1845,7 +1850,11 @@ def cat_cmd(
         else:
             tgt = parse_git_target(p)
             if tgt:
-                repo_dir = ensure_repo(tgt, pull=git_pull, reclone=git_reclone)
+                repo_dir = ensure_repo(
+                    tgt,
+                    pull=effective_git_pull,
+                    reclone=git_reclone,
+                )
                 expanded_paths = (
                     [str(Path(item)) for item in expand_git_paths(repo_dir, tgt.path)]
                     if tgt.path
