@@ -1713,7 +1713,7 @@ def cat_cmd(
         split_path_and_symbols,
     )
     from .git.cache import ensure_repo, expand_git_paths
-    from .git.target import parse_git_target
+    from .git.target import github_blob_to_raw_url, parse_git_target
 
     injection_trace_items = [] if inject and trace else None
     ignored_files = []
@@ -1785,6 +1785,10 @@ def cat_cmd(
 
     for p in expanded_all_paths:
         if p.startswith("http://") or p.startswith("https://"):
+            raw_url = github_blob_to_raw_url(p)
+            if raw_url:
+                add_file_refs([raw_url])
+                continue
             tgt = parse_git_target(p)
             if tgt:
                 repo_dir = ensure_repo(

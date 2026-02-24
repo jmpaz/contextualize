@@ -1,7 +1,7 @@
 import os
 import re
 from dataclasses import dataclass
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 CACHE_ROOT = os.path.expanduser("~/.local/share/contextualize/cache/git")
 
@@ -147,6 +147,24 @@ def _normalize_github_web_target(
         normalized_path = unquote(normalized_path)
 
     return normalized_repo_url, normalized_rev, normalized_path
+
+
+def github_blob_to_raw_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host not in {"github.com", "www.github.com"}:
+        return None
+
+    segments = [part for part in parsed.path.split("/") if part]
+    if len(segments) < 5 or segments[2] != "blob":
+        return None
+
+    owner = unquote(segments[0])
+    repo = unquote(segments[1])
+    rev = quote(unquote(segments[3]), safe="")
+    raw_path = "/".join(unquote(segment) for segment in segments[4:])
+    encoded_path = "/".join(quote(part, safe="") for part in raw_path.split("/"))
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{rev}/{encoded_path}"
 
 
 def _is_supported_git_http_url(
