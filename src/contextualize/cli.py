@@ -32,6 +32,8 @@ GLOBAL_OPTION_LABELS = (
     ("write_file", "--write-file"),
     ("token_target", "--token-target"),
     ("md_model", "--md-model"),
+    ("md_image_provider", "--md-image-provider"),
+    ("codex_app_server_command", "--codex-app-server-command"),
     ("output_position", "--position"),
     ("append_flag", "--after"),
     ("prepend_flag", "--before"),
@@ -50,6 +52,8 @@ GLOBAL_OPTION_DEFAULTS = {
     "write_file": None,
     "token_target": "cl100k_base",
     "md_model": None,
+    "md_image_provider": None,
+    "codex_app_server_command": None,
     "output_position": None,
     "append_flag": False,
     "prepend_flag": False,
@@ -278,6 +282,8 @@ def preprocess_args():
         "--copy-segments",
         "--token-target",
         "--md-model",
+        "--md-image-provider",
+        "--codex-app-server-command",
         "--position",
         "--verbose",
         "--quiet",
@@ -290,6 +296,8 @@ def preprocess_args():
         "--copy-segments",
         "--token-target",
         "--md-model",
+        "--md-image-provider",
+        "--codex-app-server-command",
         "--position",
     }
     short_forwardable = {"-p", "-w", "-c", "-s", "-a", "-b"}
@@ -452,6 +460,23 @@ preprocess_args()
     help="Override OPENAI_MODEL (used for optional image captioning during conversion).",
 )
 @click.option(
+    "--md-image-provider",
+    type=click.Choice(["auto", "app-server", "openrouter"], case_sensitive=False),
+    default=None,
+    help=(
+        "Prefer image description provider. Overrides CONTEXTUALIZE_MD_IMAGE_PROVIDER "
+        "(default: auto)."
+    ),
+)
+@click.option(
+    "--codex-app-server-command",
+    default=None,
+    help=(
+        "Command used to start codex app-server for image descriptions "
+        "(default: 'codex app-server --listen stdio://')."
+    ),
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Enable provider progress logs on stderr.",
@@ -487,6 +512,8 @@ def cli(
     write_file,
     token_target,
     md_model,
+    md_image_provider,
+    codex_app_server_command,
     verbose,
     quiet,
     output_position,
@@ -515,6 +542,18 @@ def cli(
             raise click.BadParameter("--md-model cannot be empty")
         os.environ["OPENAI_MODEL"] = model
     ctx.obj["md_model"] = md_model
+    if md_image_provider is not None:
+        provider_mode = md_image_provider.strip().lower()
+        if not provider_mode:
+            raise click.BadParameter("--md-image-provider cannot be empty")
+        os.environ["CONTEXTUALIZE_MD_IMAGE_PROVIDER"] = provider_mode
+    ctx.obj["md_image_provider"] = md_image_provider
+    if codex_app_server_command is not None:
+        command = codex_app_server_command.strip()
+        if not command:
+            raise click.BadParameter("--codex-app-server-command cannot be empty")
+        os.environ["CODEX_APP_SERVER_COMMAND"] = command
+    ctx.obj["codex_app_server_command"] = codex_app_server_command
     if append_flag and prepend_flag:
         raise click.BadParameter("use -a or -b, not both")
     if copy and copy_segments:

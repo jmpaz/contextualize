@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlparse
@@ -163,6 +164,20 @@ _AUDIO_FORMAT_BY_SUFFIX: dict[str, str] = {
     ".pcm": "pcm16",
     ".pcm16": "pcm16",
 }
+_IMAGE_PROVIDER_MODES = frozenset({"auto", "app-server", "openrouter"})
+_DEFAULT_IMAGE_PROVIDER_MODE = "auto"
+_DEFAULT_CODEX_APP_SERVER_COMMAND = "codex app-server --listen stdio://"
+_DEFAULT_OPENROUTER_MODEL = "google/gemini-3-flash-preview"
+_DEFAULT_CODEX_APP_SERVER_MODEL = "gpt-5.3-codex"
+_DEFAULT_CODEX_APP_SERVER_EFFORT = "medium"
+
+
+@dataclass(frozen=True, slots=True)
+class _ImageProviderSelection:
+    requested_mode: str
+    effective_provider: str
+    app_server_live: bool
+    app_server_error: str | None
 
 
 def _postprocess_image_markdown(markdown: str) -> str:
@@ -189,6 +204,11 @@ def _is_non_recoverable_video_error(exc: Exception) -> bool:
     )
 
 
+def _is_app_server_model_unsupported_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "model" in message and "not supported" in message
+
+
 def _format_auto_generated_video_fallback(path: Path) -> str:
     lines = [_AUTO_VIDEO_HEADING]
     duration = _video_duration_seconds(path)
@@ -209,7 +229,7 @@ def _verbose_log(message: str) -> None:
     from ..runtime import get_verbose_logging
 
     if get_verbose_logging():
-        print(message)
+        print(message, file=sys.stderr)
 
 
 def _cache_entries_dir() -> Path:
@@ -718,19 +738,182 @@ def _configured_llm_base_url() -> str:
     ).strip() or "https://openrouter.ai/api/v1"
 
 
-def _image_context() -> tuple[bool, str, str, str, str | None]:
+def _configured_image_provider_mode() -> str:
+    _load_dotenv_once()
+    configured = (os.getenv("CONTEXTUALIZE_MD_IMAGE_PROVIDER") or "").strip().lower()
+    if configured in _IMAGE_PROVIDER_MODES:
+        return configured
+    if configured:
+        logging.getLogger(__name__).warning(
+            "Invalid CONTEXTUALIZE_MD_IMAGE_PROVIDER=%r; using %s.",
+            configured,
+            _DEFAULT_IMAGE_PROVIDER_MODE,
+        )
+    return _DEFAULT_IMAGE_PROVIDER_MODE
+
+
+def _configured_codex_app_server_command() -> str:
+    _load_dotenv_once()
+    return (
+        os.getenv("CODEX_APP_SERVER_COMMAND") or ""
+    ).strip() or _DEFAULT_CODEX_APP_SERVER_COMMAND
+
+
+def _resolve_image_provider(
+    requested_mode: str, *, app_server_command: str
+) -> _ImageProviderSelection:
+    normalized_mode = (
+        requested_mode
+        if requested_mode in _IMAGE_PROVIDER_MODES
+        else _DEFAULT_IMAGE_PROVIDER_MODE
+    )
+    if normalized_mode == "openrouter":
+        _verbose_log(
+            "  image provider selection: mode=openrouter -> provider=openrouter"
+        )
+        return _ImageProviderSelection(
+            requested_mode=normalized_mode,
+            effective_provider="openrouter",
+            app_server_live=False,
+            app_server_error=None,
+        )
+
+    from .codex import is_codex_app_server_live
+
+    _verbose_log(
+        "  probing codex app-server for image descriptions: "
+        f"mode={normalized_mode} command={app_server_command!r}"
+    )
+    is_live, error = is_codex_app_server_live(app_server_command)
+    if is_live:
+        _verbose_log(
+            f"  image provider selection: mode={normalized_mode} -> provider=app-server"
+        )
+        return _ImageProviderSelection(
+            requested_mode=normalized_mode,
+            effective_provider="app-server",
+            app_server_live=True,
+            app_server_error=None,
+        )
+    _verbose_log(
+        "  image provider selection: "
+        f"mode={normalized_mode} -> provider=openrouter (app-server unavailable: {error})"
+    )
+    return _ImageProviderSelection(
+        requested_mode=normalized_mode,
+        effective_provider="openrouter",
+        app_server_live=False,
+        app_server_error=error,
+    )
+
+
+def _app_server_image_markdown_from_path(
+    image_path: Path, *, prompt: str, model: str, app_server_command: str
+) -> str:
+    from .codex import (
+        CodexAppServerError,
+        describe_image_with_codex_app_server,
+    )
+
+    configured_model = (os.getenv("OPENAI_MODEL") or "").strip()
+    provided_model = model.strip()
+    if configured_model:
+        requested_model = configured_model
+    elif provided_model and provided_model != _DEFAULT_OPENROUTER_MODEL:
+        requested_model = provided_model
+    else:
+        requested_model = _DEFAULT_CODEX_APP_SERVER_MODEL
+    effort = _DEFAULT_CODEX_APP_SERVER_EFFORT
+    _verbose_log(
+        "  sending to model: "
+        "provider=codex-app-server "
+        f"model={requested_model} effort={effort} endpoint=turn/start"
+    )
+    try:
+        description_result = describe_image_with_codex_app_server(
+            image_path,
+            prompt=prompt,
+            command=app_server_command,
+            model=requested_model,
+            effort=effort,
+        )
+    except CodexAppServerError as exc:
+        if (
+            requested_model != _DEFAULT_CODEX_APP_SERVER_MODEL
+            and _is_app_server_model_unsupported_error(exc)
+        ):
+            _verbose_log(
+                "  codex app-server rejected requested model; retrying with default: "
+                f"model={_DEFAULT_CODEX_APP_SERVER_MODEL} effort={effort}"
+            )
+            description_result = describe_image_with_codex_app_server(
+                image_path,
+                prompt=prompt,
+                command=app_server_command,
+                model=_DEFAULT_CODEX_APP_SERVER_MODEL,
+                effort=effort,
+            )
+        else:
+            raise
+    if description_result.rerouted_to_model:
+        from_model = description_result.rerouted_from_model or requested_model
+        reason = description_result.reroute_reason or "unspecified"
+        _verbose_log(
+            "  model rerouted: "
+            f"provider=codex-app-server from={from_model} "
+            f"to={description_result.rerouted_to_model} reason={reason}"
+        )
+    else:
+        effective_model = description_result.requested_model or requested_model
+        _verbose_log(
+            "  model used: "
+            f"provider=codex-app-server model={effective_model} effort={effort}"
+        )
+    return _format_auto_generated_description(description_result.text.strip())
+
+
+def _app_server_image_markdown_from_bytes(
+    image_bytes: bytes,
+    *,
+    suffix: str,
+    prompt: str,
+    model: str,
+    app_server_command: str,
+) -> str:
+    temp_path = _mktemp_output(suffix)
+    try:
+        temp_path.write_bytes(image_bytes)
+        return _app_server_image_markdown_from_path(
+            temp_path,
+            prompt=prompt,
+            model=model,
+            app_server_command=app_server_command,
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _image_context() -> tuple[bool, str, str, str, str | None, str, str]:
     _load_dotenv_once()
     llm_enabled = bool(
         (os.getenv("OPENAI_API_KEY") or "").strip()
         or (os.getenv("OPENROUTER_API_KEY") or "").strip()
     )
     base_url = _configured_llm_base_url()
-    model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-3-flash-preview"
+    model = (os.getenv("OPENAI_MODEL") or "").strip() or _DEFAULT_OPENROUTER_MODEL
     prompt = _image_prompt()
     exiftool_path = (os.getenv("EXIFTOOL_PATH") or "").strip() or shutil.which(
         "exiftool"
     )
-    return llm_enabled, base_url, model, prompt, exiftool_path
+    return (
+        llm_enabled,
+        base_url,
+        model,
+        prompt,
+        exiftool_path,
+        _configured_image_provider_mode(),
+        _configured_codex_app_server_command(),
+    )
 
 
 def _image_prompt() -> str:
@@ -910,14 +1093,24 @@ def _image_cache_payload(
     model: str,
     prompt: str,
     exiftool_path: str | None,
+    provider_mode: str,
+    effective_provider: str,
+    app_server_command: str,
 ) -> dict[str, Any]:
     return {
-        "v": 1,
+        "v": 2,
         "type": "image",
         "media_md5": media_md5,
         "markitdown_version": _markitdown_version(),
         "llm_enabled": llm_enabled,
-        "provider": base_url if llm_enabled else None,
+        "provider_mode": provider_mode,
+        "provider": (
+            "codex-app-server"
+            if llm_enabled and effective_provider == "app-server"
+            else (base_url if llm_enabled else None)
+        ),
+        "effective_provider": effective_provider,
+        "app_server_command": app_server_command,
         "model": model if llm_enabled else None,
         "prompt": prompt if llm_enabled else None,
         "exiftool_path": exiftool_path,
@@ -1007,7 +1200,7 @@ def _build_llm_config() -> tuple[object | None, str | None]:
         return None, None
 
     base_url = _configured_llm_base_url()
-    model = (os.getenv("OPENAI_MODEL") or "").strip() or "google/gemini-3-flash-preview"
+    model = (os.getenv("OPENAI_MODEL") or "").strip() or _DEFAULT_OPENROUTER_MODEL
 
     from openai import OpenAI
 
@@ -1060,29 +1253,107 @@ def convert_path_to_markdown(
     media_md5: str | None = None
     cache_key_payload: dict[str, Any] | None = None
     cache_key = ""
+    llm_description_required = False
 
     if is_image:
         media_md5 = _file_md5(path_obj)
-        llm_enabled, base_url, model, prompt, exiftool_path = _image_context()
+        (
+            llm_enabled,
+            base_url,
+            model,
+            prompt,
+            exiftool_path,
+            provider_mode,
+            app_server_command,
+        ) = _image_context()
         prompt = _merge_prompt(prompt, prompt_append)
+        provider_selection = _resolve_image_provider(
+            provider_mode, app_server_command=app_server_command
+        )
+        llm_description_required = bool(
+            provider_selection.effective_provider == "app-server" or llm_enabled
+        )
+        if (
+            provider_selection.requested_mode != "openrouter"
+            and not provider_selection.app_server_live
+            and provider_selection.app_server_error
+        ):
+            _verbose_log(
+                "  app-server probe failed; falling back to OpenRouter image flow: "
+                f"{provider_selection.app_server_error}"
+            )
+            logging.getLogger(__name__).warning(
+                "Codex app-server unavailable; falling back to OpenRouter path: %s",
+                provider_selection.app_server_error,
+            )
 
         cache_key_payload = _image_cache_payload(
             media_md5,
-            llm_enabled=llm_enabled,
+            llm_enabled=llm_description_required,
             base_url=base_url,
             model=model,
             prompt=prompt,
             exiftool_path=exiftool_path,
+            provider_mode=provider_selection.requested_mode,
+            effective_provider=provider_selection.effective_provider,
+            app_server_command=app_server_command,
         )
+        cache_key = _cache_key(cache_key_payload)
         if not _refresh_images_enabled(refresh_images):
             cache_key, cached = _image_cache_lookup(cache_key_payload)
             if cached:
                 return cached
 
+        if provider_selection.effective_provider == "app-server":
+            try:
+                markdown = _app_server_image_markdown_from_path(
+                    path_obj,
+                    prompt=prompt,
+                    model=model,
+                    app_server_command=app_server_command,
+                )
+                result = MarkItDownResult(
+                    markdown=_postprocess_image_markdown(markdown),
+                    title=None,
+                )
+                _write_cache_entry(
+                    cache_key,
+                    payload=cache_key_payload,
+                    markdown=markdown,
+                    title=result.title,
+                )
+                return result
+            except Exception as exc:
+                _verbose_log(
+                    "  app-server image request failed; retrying with OpenRouter image flow: "
+                    f"{exc}"
+                )
+                logging.getLogger(__name__).warning(
+                    "Codex app-server image description failed; falling back to OpenRouter path: %s",
+                    exc,
+                )
+                llm_description_required = llm_enabled
+                cache_key_payload = _image_cache_payload(
+                    media_md5,
+                    llm_enabled=llm_description_required,
+                    base_url=base_url,
+                    model=model,
+                    prompt=prompt,
+                    exiftool_path=exiftool_path,
+                    provider_mode=provider_selection.requested_mode,
+                    effective_provider="openrouter",
+                    app_server_command=app_server_command,
+                )
+                cache_key = _cache_key(cache_key_payload)
+                if not _refresh_images_enabled(refresh_images):
+                    cache_key, cached = _image_cache_lookup(cache_key_payload)
+                    if cached:
+                        return cached
+
         if not _image_text_tools_available():
             raise MarkItDownConversionError(
-                "Image conversion requires either `exiftool` (or EXIFTOOL_PATH) or "
-                "OPENAI_API_KEY/OPENROUTER_API_KEY."
+                "Image conversion requires either `exiftool` (or EXIFTOOL_PATH), "
+                "OPENAI_API_KEY/OPENROUTER_API_KEY, or a live codex app-server."
             )
 
     if is_video:
@@ -1146,7 +1417,11 @@ def convert_path_to_markdown(
 
     markdown, title = _convert_markitdown_with_normalization(path_obj)
 
-    if is_image and llm_enabled and not _HAS_LLM_DESCRIPTION_RE.search(markdown):
+    if (
+        is_image
+        and llm_description_required
+        and not _HAS_LLM_DESCRIPTION_RE.search(markdown)
+    ):
         raise MarkItDownConversionError(
             f"LLM description missing from image conversion of {path_obj}"
         )
@@ -1177,29 +1452,111 @@ def convert_response_to_markdown(
     media_md5: str | None = None
     cache_key_payload: dict[str, Any] | None = None
     cache_key = ""
+    llm_description_required = False
 
     if is_image:
-        llm_enabled, base_url, model, prompt, exiftool_path = _image_context()
+        (
+            llm_enabled,
+            base_url,
+            model,
+            prompt,
+            exiftool_path,
+            provider_mode,
+            app_server_command,
+        ) = _image_context()
         prompt = _merge_prompt(prompt, prompt_append)
         media_md5 = hashlib.md5(response.content).hexdigest()
+        provider_selection = _resolve_image_provider(
+            provider_mode, app_server_command=app_server_command
+        )
+        llm_description_required = bool(
+            provider_selection.effective_provider == "app-server" or llm_enabled
+        )
+        if (
+            provider_selection.requested_mode != "openrouter"
+            and not provider_selection.app_server_live
+            and provider_selection.app_server_error
+        ):
+            _verbose_log(
+                "  app-server probe failed; falling back to OpenRouter image flow: "
+                f"{provider_selection.app_server_error}"
+            )
+            logging.getLogger(__name__).warning(
+                "Codex app-server unavailable; falling back to OpenRouter path: %s",
+                provider_selection.app_server_error,
+            )
 
         cache_key_payload = _image_cache_payload(
             media_md5,
-            llm_enabled=llm_enabled,
+            llm_enabled=llm_description_required,
             base_url=base_url,
             model=model,
             prompt=prompt,
             exiftool_path=exiftool_path,
+            provider_mode=provider_selection.requested_mode,
+            effective_provider=provider_selection.effective_provider,
+            app_server_command=app_server_command,
         )
+        cache_key = _cache_key(cache_key_payload)
         if not _refresh_images_enabled(refresh_images):
             cache_key, cached = _image_cache_lookup(cache_key_payload)
             if cached:
                 return cached
 
+        if provider_selection.effective_provider == "app-server":
+            image_suffix = (
+                url_suffix or _suffix_from_content_type(content_type) or ".jpg"
+            )
+            try:
+                markdown = _app_server_image_markdown_from_bytes(
+                    response.content,
+                    suffix=image_suffix,
+                    prompt=prompt,
+                    model=model,
+                    app_server_command=app_server_command,
+                )
+                result = MarkItDownResult(
+                    markdown=_postprocess_image_markdown(markdown),
+                    title=None,
+                )
+                _write_cache_entry(
+                    cache_key,
+                    payload=cache_key_payload,
+                    markdown=markdown,
+                    title=result.title,
+                )
+                return result
+            except Exception as exc:
+                _verbose_log(
+                    "  app-server image request failed; retrying with OpenRouter image flow: "
+                    f"{exc}"
+                )
+                logging.getLogger(__name__).warning(
+                    "Codex app-server image description failed; falling back to OpenRouter path: %s",
+                    exc,
+                )
+                llm_description_required = llm_enabled
+                cache_key_payload = _image_cache_payload(
+                    media_md5,
+                    llm_enabled=llm_description_required,
+                    base_url=base_url,
+                    model=model,
+                    prompt=prompt,
+                    exiftool_path=exiftool_path,
+                    provider_mode=provider_selection.requested_mode,
+                    effective_provider="openrouter",
+                    app_server_command=app_server_command,
+                )
+                cache_key = _cache_key(cache_key_payload)
+                if not _refresh_images_enabled(refresh_images):
+                    cache_key, cached = _image_cache_lookup(cache_key_payload)
+                    if cached:
+                        return cached
+
         if not _image_text_tools_available():
             raise MarkItDownConversionError(
-                "Image conversion requires either `exiftool` (or EXIFTOOL_PATH) or "
-                "OPENAI_API_KEY/OPENROUTER_API_KEY."
+                "Image conversion requires either `exiftool` (or EXIFTOOL_PATH), "
+                "OPENAI_API_KEY/OPENROUTER_API_KEY, or a live codex app-server."
             )
 
     if is_video:
@@ -1277,7 +1634,11 @@ def convert_response_to_markdown(
         finally:
             temp_path.unlink(missing_ok=True)
 
-    if is_image and llm_enabled and not _HAS_LLM_DESCRIPTION_RE.search(markdown):
+    if (
+        is_image
+        and llm_description_required
+        and not _HAS_LLM_DESCRIPTION_RE.search(markdown)
+    ):
         raise MarkItDownConversionError(
             f"LLM description missing from image conversion of {response.url}"
         )
