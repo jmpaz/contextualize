@@ -61,6 +61,8 @@ def create_file_references(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     arena_overrides: dict | None = None,
+    discord_overrides: dict | None = None,
+    atproto_overrides: dict | None = None,
 ):
     """
     Build a list of file references from the specified paths.
@@ -164,7 +166,7 @@ def create_file_references(
             continue
 
         if is_atproto_url(target):
-            atproto_settings = build_atproto_settings()
+            atproto_settings = build_atproto_settings(atproto_overrides)
             atproto_documents = resolve_atproto_url(
                 target,
                 settings=atproto_settings,
@@ -270,7 +272,7 @@ def create_file_references(
                 continue
 
         if is_discord_url(target):
-            discord_settings = build_discord_settings()
+            discord_settings = build_discord_settings(discord_overrides)
             try:
                 discord_docs = resolve_discord_url(
                     target,
