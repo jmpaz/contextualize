@@ -3,6 +3,9 @@ from __future__ import annotations
 import mimetypes
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 
 _AUDIO_SUFFIX_TO_MIME: dict[str, str] = {
@@ -26,12 +29,22 @@ def transcribe_audio_file(path: str | Path, *, timeout: float = 600) -> str:
     audio_path = Path(path)
     data = audio_path.read_bytes()
     content_type = _guess_audio_content_type(audio_path.name)
-    return transcribe_audio_bytes(
-        data,
-        filename=audio_path.name,
-        content_type=content_type,
-        timeout=timeout,
-    )
+    try:
+        return transcribe_audio_bytes(
+            data,
+            filename=audio_path.name,
+            content_type=content_type,
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        if not _should_retry_chunked_transcription(exc):
+            raise
+        chunked_transcript = _transcribe_audio_file_in_chunks(
+            audio_path, timeout=timeout
+        )
+        if chunked_transcript:
+            return chunked_transcript
+        raise
 
 
 def transcribe_audio_bytes(
@@ -100,3 +113,78 @@ def _extract_transcription_text(payload: Any) -> str:
     if isinstance(text, str):
         return text.strip()
     return ""
+
+
+def _should_retry_chunked_transcription(exc: RuntimeError) -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    message = str(exc)
+    return message.startswith("Whisper API error: 5")
+
+
+def _transcribe_audio_file_in_chunks(audio_path: Path, *, timeout: float) -> str:
+    chunk_seconds = _get_chunk_seconds()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pattern = str(Path(tmpdir) / "chunk_%04d.wav")
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(audio_path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-f",
+                "segment",
+                "-segment_time",
+                str(chunk_seconds),
+                "-c:a",
+                "pcm_s16le",
+                pattern,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(timeout, 120),
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            stdout = result.stdout.strip()
+            detail = stderr or stdout or "unknown error"
+            raise RuntimeError(f"ffmpeg audio chunking failed: {detail}")
+
+        chunk_paths = sorted(Path(tmpdir).glob("chunk_*.wav"))
+        if not chunk_paths:
+            raise RuntimeError("ffmpeg audio chunking produced no chunks")
+
+        parts: list[str] = []
+        for chunk_path in chunk_paths:
+            chunk_data = chunk_path.read_bytes()
+            text = transcribe_audio_bytes(
+                chunk_data,
+                filename=chunk_path.name,
+                content_type="audio/wav",
+                timeout=timeout,
+            ).strip()
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
+
+
+def _get_chunk_seconds() -> int:
+    raw = os.environ.get("WHISPER_CHUNK_SECONDS", "25")
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"Invalid WHISPER_CHUNK_SECONDS value: {raw!r}. Expected a positive integer."
+        ) from None
+    if value <= 0:
+        raise RuntimeError(
+            f"Invalid WHISPER_CHUNK_SECONDS value: {raw!r}. Expected a positive integer."
+        )
+    return value
