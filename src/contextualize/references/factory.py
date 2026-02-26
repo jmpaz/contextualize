@@ -20,7 +20,12 @@ from .helpers import (
     split_spec_symbols,
 )
 from .url import URLReference
-from .arena import ArenaReference, is_arena_channel_url, is_arena_block_url
+from .arena import (
+    ArenaReference,
+    build_arena_settings,
+    is_arena_block_url,
+    is_arena_channel_url,
+)
 from .atproto import (
     AtprotoReference,
     build_atproto_settings,
@@ -55,6 +60,7 @@ def create_file_references(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    arena_overrides: dict | None = None,
 ):
     """
     Build a list of file references from the specified paths.
@@ -125,6 +131,14 @@ def create_file_references(
         else:
             expanded_all_paths.append(raw_path)
 
+    arena_settings = None
+
+    def resolve_arena_settings():
+        nonlocal arena_settings
+        if arena_settings is None:
+            arena_settings = build_arena_settings(arena_overrides)
+        return arena_settings
+
     for raw_path in expanded_all_paths:
         spec_opts = parse_target_spec(raw_path)
         target = spec_opts.get("target", raw_path)
@@ -186,11 +200,13 @@ def create_file_references(
             slug = extract_channel_slug(target)
             if slug:
                 warmup_arena_network_stack()
+                settings = resolve_arena_settings()
                 metadata, flat_blocks = resolve_channel(
                     slug,
                     use_cache=use_cache,
                     cache_ttl=cache_ttl,
                     refresh_cache=refresh_cache,
+                    settings=settings,
                 )
                 tasks = [
                     (
@@ -208,6 +224,11 @@ def create_file_references(
                                 inject=inject,
                                 depth=depth,
                                 trace_collector=trace_collector,
+                                include_descriptions=settings.include_descriptions,
+                                include_comments=settings.include_comments,
+                                include_link_image_descriptions=settings.include_link_image_descriptions,
+                                include_pdf_content=settings.include_pdf_content,
+                                include_media_descriptions=settings.include_media_descriptions,
                             )
                         ),
                     )
@@ -226,6 +247,7 @@ def create_file_references(
             block_id = extract_block_id(target)
             if block_id is not None:
                 block = _fetch_block(block_id)
+                settings = resolve_arena_settings()
                 file_references.append(
                     ArenaReference(
                         target,
@@ -238,6 +260,11 @@ def create_file_references(
                         inject=inject,
                         depth=depth,
                         trace_collector=trace_collector,
+                        include_descriptions=settings.include_descriptions,
+                        include_comments=settings.include_comments,
+                        include_link_image_descriptions=settings.include_link_image_descriptions,
+                        include_pdf_content=settings.include_pdf_content,
+                        include_media_descriptions=settings.include_media_descriptions,
                     )
                 )
                 continue

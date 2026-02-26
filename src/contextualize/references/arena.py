@@ -526,6 +526,33 @@ def _should_recurse(
     return _owner_slug(item) in recurse_users
 
 
+def _channel_page_contents(page_data: dict) -> list[dict]:
+    return list(page_data.get("data", page_data.get("contents", [])))
+
+
+def _has_time_window(settings: ArenaSettings | None) -> bool:
+    return settings is not None and (
+        settings.connected_after is not None
+        or settings.connected_before is not None
+        or settings.created_after is not None
+        or settings.created_before is not None
+    )
+
+
+def _can_short_circuit_channel_paging(
+    *,
+    sort_order: str,
+    max_blocks_per_channel: int | None,
+    has_time_window: bool,
+) -> bool:
+    return (
+        max_blocks_per_channel is not None
+        and max_blocks_per_channel > 0
+        and not has_time_window
+        and sort_order in {"asc", "position-asc", "desc", "position-desc"}
+    )
+
+
 def _fetch_all_channel_contents(
     slug: str,
     *,
@@ -564,23 +591,54 @@ def _fetch_all_channel_contents(
 
     all_contents: list[dict] = []
     first_page = _fetch_channel_page(slug, 1)
-    all_contents.extend(first_page.get("data", first_page.get("contents", [])))
+    first_page_contents = _channel_page_contents(first_page)
 
     meta = first_page.get("meta", {})
     total_pages = meta.get("total_pages", 1)
-    for page in range(2, total_pages + 1):
-        _log(f"{indent}  page {page}/{total_pages}")
-        page_data = _fetch_channel_page(slug, page)
-        all_contents.extend(page_data.get("data", page_data.get("contents", [])))
+    has_time_window = _has_time_window(_time_window_settings)
+    can_short_circuit = _can_short_circuit_channel_paging(
+        sort_order=sort_order,
+        max_blocks_per_channel=max_blocks_per_channel,
+        has_time_window=has_time_window,
+    )
+
+    if can_short_circuit and sort_order in {"asc", "position-asc"}:
+        all_contents.extend(first_page_contents)
+        for page in range(2, total_pages + 1):
+            if (
+                max_blocks_per_channel is not None
+                and len(all_contents) >= max_blocks_per_channel
+            ):
+                break
+            _log(f"{indent}  page {page}/{total_pages}")
+            page_data = _fetch_channel_page(slug, page)
+            all_contents.extend(_channel_page_contents(page_data))
+    elif can_short_circuit:
+        needed = max_blocks_per_channel or 0
+        newest_first: list[dict] = []
+        for page in range(total_pages, 0, -1):
+            if len(newest_first) >= needed:
+                break
+            if page == 1:
+                page_data = first_page
+                page_contents = first_page_contents
+            else:
+                _log(f"{indent}  page {page}/{total_pages}")
+                page_data = _fetch_channel_page(slug, page)
+                page_contents = _channel_page_contents(page_data)
+            page_contents.reverse()
+            remaining = needed - len(newest_first)
+            newest_first.extend(page_contents[:remaining])
+        all_contents = list(reversed(newest_first))
+    else:
+        all_contents.extend(first_page_contents)
+        for page in range(2, total_pages + 1):
+            _log(f"{indent}  page {page}/{total_pages}")
+            page_data = _fetch_channel_page(slug, page)
+            all_contents.extend(_channel_page_contents(page_data))
 
     all_contents = _sort_channel_contents(all_contents, sort_order)
 
-    has_time_window = _time_window_settings is not None and (
-        _time_window_settings.connected_after is not None
-        or _time_window_settings.connected_before is not None
-        or _time_window_settings.created_after is not None
-        or _time_window_settings.created_before is not None
-    )
     if has_time_window:
         all_contents = [
             item
@@ -1470,6 +1528,15 @@ def _filter_flat_blocks(
     ]
 
 
+def _limit_flat_blocks(
+    flat: list[tuple[str, dict]], settings: ArenaSettings
+) -> list[tuple[str, dict]]:
+    max_blocks = settings.max_blocks_per_channel
+    if max_blocks is None:
+        return flat
+    return flat[:max_blocks]
+
+
 def resolve_channel(
     slug: str,
     *,
@@ -1511,6 +1578,7 @@ def resolve_channel(
             flat_unsorted = [(path, block) for path, block in data["blocks"]]
             flat = _sort_blocks(flat_unsorted, sort_order)
             flat = _filter_flat_blocks(flat, settings)
+            flat = _limit_flat_blocks(flat, settings)
             channel_title = metadata.get("title") or slug
             _log(f"  using cached channel: {channel_title} ({len(flat)} items)")
             return metadata, flat
@@ -1526,6 +1594,7 @@ def resolve_channel(
     flat_unsorted = _flatten_channel_blocks(contents, slug)
     flat = _sort_blocks(flat_unsorted, sort_order)
     flat = _filter_flat_blocks(flat, settings)
+    flat = _limit_flat_blocks(flat, settings)
 
     if use_cache:
         from ..cache.arena import store_channel
