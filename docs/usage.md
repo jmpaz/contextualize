@@ -47,6 +47,7 @@ contextualize cat [PATH...] [--ignore PATH] [--format md|xml|shell|raw] [--label
 `PATH` may also start with a git repo spec such as `github:user/repo` or `https://host/repo.git:path`.
 It can also be an `http(s)` URL pointing to a UTF-8 file.
 It can also be a Bluesky `bsky.app` URL or an `at://` ATProto URI.
+It can also be a SoundCloud track/playlist/artist URL or URN (`soundcloud:tracks:*`, `soundcloud:playlists:*`, `soundcloud:users:*`).
 Multiple paths can be separated with commas after the colon.
 Brace expressions and glob patterns in those paths are expanded after cloning.
 The `.git` suffix is optional and the repo will be cloned to `~/.local/share/contextualize/cache/git/` on first use.

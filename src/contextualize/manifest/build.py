@@ -18,8 +18,10 @@ from .hydrate import (
     _merge_arena_overrides,
     _merge_atproto_overrides,
     _merge_discord_overrides,
+    _merge_soundcloud_overrides,
     _parse_arena_config_mapping,
     _parse_atproto_config_mapping,
+    _parse_soundcloud_config_mapping,
 )
 from ..references.discord import parse_discord_config_mapping
 from .manifest import coerce_file_spec, component_selectors
@@ -40,6 +42,12 @@ from ..references.discord import (
     resolve_discord_url,
     split_discord_document_by_utc_day,
     with_discord_document_rendered,
+)
+from ..references.soundcloud import (
+    SoundCloudReference,
+    build_soundcloud_settings,
+    is_soundcloud_url,
+    resolve_soundcloud_url,
 )
 from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
 from ..references.youtube import is_youtube_url
@@ -585,6 +593,54 @@ def _wrapped_atproto_references(
     return refs, trace_inputs, trace_items
 
 
+def _wrapped_soundcloud_references(
+    url: str,
+    *,
+    filename: Optional[str],
+    wrap: Optional[str],
+    inject: bool,
+    depth: int,
+    label_suffix: str | None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    soundcloud_overrides: dict[str, Any] | None = None,
+) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
+    settings = build_soundcloud_settings(soundcloud_overrides)
+    documents = resolve_soundcloud_url(
+        url,
+        settings=settings,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+
+    refs: list[_SimpleReference] = []
+    trace_inputs: list[Any] = []
+    trace_items: list[tuple[str, str, int]] = []
+    for document in documents:
+        soundcloud_ref = SoundCloudReference(
+            url,
+            document=document,
+            format="raw",
+            inject=inject,
+            depth=depth,
+        )
+        label = filename or soundcloud_ref.get_label()
+        if label_suffix:
+            label = f"{label} {label_suffix}"
+        wrapped = wrap_text(soundcloud_ref.output, wrap or "md", label)
+        simple_ref = _SimpleReference(
+            wrapped,
+            path=soundcloud_ref.path,
+            trace_path=soundcloud_ref.trace_path,
+            content=soundcloud_ref.file_content,
+        )
+        refs.append(simple_ref)
+        trace_inputs.append(simple_ref)
+    return refs, trace_inputs, trace_items
+
+
 def _resolve_spec_to_paths(
     raw_spec: str,
     base_dir: str,
@@ -696,6 +752,7 @@ def _resolve_spec_to_seed_refs(
     arena_overrides: dict | None = None,
     atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
+    soundcloud_overrides: dict[str, Any] | None = None,
     channel_tracker: _ArenaChannelTracker | None = None,
 ) -> tuple[List[Any], List[Any], List[tuple[str, str, int]]]:
     spec = os.path.expanduser(raw_spec)
@@ -800,6 +857,24 @@ def _resolve_spec_to_seed_refs(
             seed_refs.extend(discord_refs)
             trace_inputs.extend(discord_trace_inputs)
             channel_trace_items.extend(discord_trace_items)
+        elif is_soundcloud_url(url):
+            soundcloud_refs, soundcloud_trace_inputs, soundcloud_trace_items = (
+                _wrapped_soundcloud_references(
+                    url,
+                    filename=filename,
+                    wrap=wrap,
+                    inject=inject,
+                    depth=depth,
+                    label_suffix=label_suffix,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                    soundcloud_overrides=soundcloud_overrides,
+                )
+            )
+            seed_refs.extend(soundcloud_refs)
+            trace_inputs.extend(soundcloud_trace_inputs)
+            channel_trace_items.extend(soundcloud_trace_items)
         else:
             seed_refs.append(
                 _wrapped_url_reference(
@@ -818,8 +893,31 @@ def _resolve_spec_to_seed_refs(
             not is_arena_url(url)
             and not is_discord_url(url)
             and not is_atproto_url(url)
+            and not is_soundcloud_url(url)
         ):
             trace_inputs.extend([r for r in seed_refs if hasattr(r, "path")])
+        return seed_refs, trace_inputs, channel_trace_items
+
+    if is_soundcloud_url(spec):
+        filename = file_opts.get("filename")
+        wrap = file_opts.get("wrap")
+        soundcloud_refs, soundcloud_trace_inputs, soundcloud_trace_items = (
+            _wrapped_soundcloud_references(
+                spec,
+                filename=filename,
+                wrap=wrap,
+                inject=inject,
+                depth=depth,
+                label_suffix=label_suffix,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+                soundcloud_overrides=soundcloud_overrides,
+            )
+        )
+        seed_refs.extend(soundcloud_refs)
+        trace_inputs.extend(soundcloud_trace_inputs)
+        channel_trace_items.extend(soundcloud_trace_items)
         return seed_refs, trace_inputs, channel_trace_items
 
     if is_atproto_url(spec):
@@ -944,6 +1042,7 @@ def _resolve_spec(
     effective_arena_overrides: dict | None,
     effective_atproto_overrides: dict[str, Any] | None,
     effective_discord_overrides: dict | None,
+    effective_soundcloud_overrides: dict[str, Any] | None,
     channel_tracker: _ArenaChannelTracker | None,
 ) -> _SpecResolution:
     if map_component:
@@ -984,6 +1083,7 @@ def _resolve_spec(
             arena_overrides=effective_arena_overrides,
             atproto_overrides=effective_atproto_overrides,
             discord_overrides=effective_discord_overrides,
+            soundcloud_overrides=effective_soundcloud_overrides,
             channel_tracker=channel_tracker,
         )
     )
@@ -1062,6 +1162,7 @@ def build_payload_impl(
     arena_overrides: dict | None = None,
     atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
+    soundcloud_overrides: dict[str, Any] | None = None,
 ):
     parts: List[str] = []
     all_input_refs = []
@@ -1125,6 +1226,10 @@ def build_payload_impl(
         component_discord_overrides = parse_discord_config_mapping(
             comp.get("discord"), prefix=f"component '{name}'.discord"
         )
+        component_soundcloud_overrides = _parse_soundcloud_config_mapping(
+            comp.get("soundcloud"),
+            prefix=f"component '{name}'.soundcloud",
+        )
 
         comp_link_skip = comp.get("link-skip", link_skip_default)
         if comp_link_skip is None:
@@ -1174,6 +1279,15 @@ def build_payload_impl(
                 component_discord_overrides,
                 file_discord_overrides,
             )
+            file_soundcloud_overrides = _parse_soundcloud_config_mapping(
+                file_opts.get("soundcloud"),
+                prefix=f"component '{name}' file[{spec_index}].soundcloud",
+            )
+            effective_soundcloud_overrides = _merge_soundcloud_overrides(
+                soundcloud_overrides,
+                component_soundcloud_overrides,
+                file_soundcloud_overrides,
+            )
 
             per_file_link_depth = file_opts.get("link-depth")
             per_file_link_scope = (
@@ -1195,7 +1309,7 @@ def build_payload_impl(
             spec_tasks.append(
                 (
                     spec_index,
-                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, eao=effective_arena_overrides, eatpo=effective_atproto_overrides, edo=effective_discord_overrides: (
+                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, eao=effective_arena_overrides, eatpo=effective_atproto_overrides, edo=effective_discord_overrides, esco=effective_soundcloud_overrides: (
                         _resolve_spec(
                             raw_spec=rs,
                             file_opts=fo,
@@ -1216,6 +1330,7 @@ def build_payload_impl(
                             effective_arena_overrides=eao,
                             effective_atproto_overrides=eatpo,
                             effective_discord_overrides=edo,
+                            effective_soundcloud_overrides=esco,
                             channel_tracker=channel_tracker,
                         )
                     ),

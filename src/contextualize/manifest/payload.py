@@ -42,6 +42,7 @@ def build_payload(
     arena_overrides: dict | None = None,
     atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
+    soundcloud_overrides: dict[str, Any] | None = None,
 ) -> PayloadResult:
     payload, input_refs, trace_items, base, skipped, impact = build_payload_impl(
         components,
@@ -61,6 +62,7 @@ def build_payload(
         arena_overrides=arena_overrides,
         atproto_overrides=atproto_overrides,
         discord_overrides=discord_overrides,
+        soundcloud_overrides=soundcloud_overrides,
     )
     return PayloadResult(payload, input_refs, trace_items, base, skipped, impact)
 
@@ -77,6 +79,7 @@ def _prepare_manifest_payload(
     dict | None,
     dict[str, Any] | None,
     dict | None,
+    dict[str, Any] | None,
 ]:
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a mapping with 'config' and 'components'")
@@ -113,11 +116,13 @@ def _prepare_manifest_payload(
         _resolve_arena_config,
         _resolve_atproto_config,
         _resolve_discord_config,
+        _resolve_soundcloud_config,
     )
 
     arena_overrides = _resolve_arena_config(cfg)
     atproto_overrides = _resolve_atproto_config(cfg)
     discord_overrides = _resolve_discord_config(cfg)
+    soundcloud_overrides = _resolve_soundcloud_config(cfg)
 
     return (
         comps,
@@ -129,6 +134,7 @@ def _prepare_manifest_payload(
         arena_overrides,
         atproto_overrides,
         discord_overrides,
+        soundcloud_overrides,
     )
 
 
@@ -168,6 +174,7 @@ def render_manifest(
         arena_overrides,
         atproto_overrides,
         discord_overrides,
+        soundcloud_overrides,
     ) = _prepare_manifest_payload(data, base_dir_default)
 
     effective_ttl = cache_ttl if cache_ttl is not None else manifest_cache_ttl
@@ -190,6 +197,7 @@ def render_manifest(
         arena_overrides=arena_overrides,
         atproto_overrides=atproto_overrides,
         discord_overrides=discord_overrides,
+        soundcloud_overrides=soundcloud_overrides,
     )
 
 
@@ -220,6 +228,7 @@ def render_manifest_data(
         arena_overrides,
         atproto_overrides,
         discord_overrides,
+        soundcloud_overrides,
     ) = _prepare_manifest_payload(data, manifest_cwd)
 
     effective_ttl = cache_ttl if cache_ttl is not None else manifest_cache_ttl
@@ -242,4 +251,5 @@ def render_manifest_data(
         arena_overrides=arena_overrides,
         atproto_overrides=atproto_overrides,
         discord_overrides=discord_overrides,
+        soundcloud_overrides=soundcloud_overrides,
     )

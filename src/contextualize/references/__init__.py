@@ -19,6 +19,7 @@ from .url import URLReference, create_url_reference
 from .arena import ArenaReference, is_arena_url
 from .atproto import AtprotoReference, is_atproto_url
 from .discord import DiscordReference, is_discord_url
+from .soundcloud import SoundCloudReference, is_soundcloud_url
 from .youtube import YouTubeReference, is_youtube_url
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "ArenaReference",
     "AtprotoReference",
     "DiscordReference",
+    "SoundCloudReference",
     "YouTubeReference",
     "CommandReference",
     "ShellReference",
@@ -41,6 +43,7 @@ __all__ = [
     "is_arena_url",
     "is_atproto_url",
     "is_discord_url",
+    "is_soundcloud_url",
     "is_youtube_url",
     "remove_ansi",
     "strip_content_type",

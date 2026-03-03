@@ -6,6 +6,7 @@ import os
 import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from ..concurrency import run_indexed_tasks_fail_fast
 from ..utils import brace_expand, count_tokens
@@ -42,6 +43,12 @@ from .discord import (
     split_discord_document_by_utc_day,
     with_discord_document_rendered,
 )
+from .soundcloud import (
+    SoundCloudReference,
+    build_soundcloud_settings,
+    is_soundcloud_url,
+    resolve_soundcloud_url,
+)
 from .youtube import YouTubeReference, is_youtube_url
 
 
@@ -63,6 +70,7 @@ def create_file_references(
     arena_overrides: dict | None = None,
     discord_overrides: dict | None = None,
     atproto_overrides: dict | None = None,
+    soundcloud_overrides: dict[str, Any] | None = None,
 ):
     """
     Build a list of file references from the specified paths.
@@ -177,6 +185,32 @@ def create_file_references(
             for document in atproto_documents:
                 file_references.append(
                     AtprotoReference(
+                        target,
+                        document=document,
+                        format=format,
+                        label=label,
+                        label_suffix=label_suffix,
+                        include_token_count=include_token_count,
+                        token_target=token_target,
+                        inject=inject,
+                        depth=depth,
+                        trace_collector=trace_collector,
+                    )
+                )
+            continue
+
+        if is_soundcloud_url(target):
+            soundcloud_settings = build_soundcloud_settings(soundcloud_overrides)
+            soundcloud_documents = resolve_soundcloud_url(
+                target,
+                settings=soundcloud_settings,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+            )
+            for document in soundcloud_documents:
+                file_references.append(
+                    SoundCloudReference(
                         target,
                         document=document,
                         format=format,

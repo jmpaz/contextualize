@@ -32,6 +32,10 @@ def split_path_and_symbols(raw_path: str) -> tuple[str, list[str]]:
 _SPEC_OPTION_RE = re.compile(r'(filename|params|root|wrap)=(?:"([^"]*)"|([^"]*))')
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _URL_PREFIXES = ("http://", "https://")
+_SOUNDCLOUD_URN_RE = re.compile(
+    r"^soundcloud:(tracks|playlists|users):[^/\s?#]+$",
+    flags=re.IGNORECASE,
+)
 RAW_PREFIX = "raw:"
 
 
@@ -164,6 +168,8 @@ def looks_like_windows_drive(spec: str) -> bool:
 
 def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
     if spec.startswith("at://"):
+        return spec, []
+    if _SOUNDCLOUD_URN_RE.match(spec.strip()):
         return spec, []
     if is_http_url(spec) or looks_like_windows_drive(spec):
         return spec, []

@@ -40,6 +40,12 @@ from ..references.discord import (
     resolve_discord_url,
     split_discord_document_by_utc_day,
 )
+from ..references.soundcloud import (
+    build_soundcloud_settings,
+    is_soundcloud_url,
+    resolve_soundcloud_url,
+    soundcloud_settings_cache_key,
+)
 from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
@@ -110,6 +116,9 @@ class ResolvedItem:
     atproto_settings_key: tuple[Any, ...] | None = None
     atproto_route_kind: str | None = None
     atproto_scope_id: str | None = None
+    soundcloud_kind: str | None = None
+    soundcloud_scope_id: str | None = None
+    soundcloud_settings_key: tuple[Any, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -395,6 +404,7 @@ def build_hydration_plan_data(
     arena_overrides = _resolve_arena_config(cfg)
     atproto_overrides = _resolve_atproto_config(cfg)
     discord_overrides = _resolve_discord_config(cfg)
+    soundcloud_overrides = _resolve_soundcloud_config(cfg)
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
@@ -405,6 +415,7 @@ def build_hydration_plan_data(
     atproto_target_kinds = _manifest_atproto_target_kinds(components)
     group_atproto_by_kind = len(atproto_target_kinds) > 1
     has_discord_channels = _manifest_has_discord_channels(components)
+    has_soundcloud_sources = _manifest_has_soundcloud_sources(components)
     use_external_root = context_cfg["path_strategy"] == "on-disk" and has_local_sources
 
     used_paths: set[str] = set()
@@ -425,6 +436,7 @@ def build_hydration_plan_data(
             bool,
             bool,
             str | None,
+            tuple[Any, ...] | None,
             tuple[Any, ...] | None,
             tuple[Any, ...] | None,
             tuple[Any, ...] | None,
@@ -473,6 +485,9 @@ def build_hydration_plan_data(
         )
         component_discord_overrides = parse_discord_config_mapping(
             comp.get("discord"), prefix=f"component '{comp_name}'.discord"
+        )
+        component_soundcloud_overrides = _parse_soundcloud_config_mapping(
+            comp.get("soundcloud"), prefix=f"component '{comp_name}'.soundcloud"
         )
 
         if (
@@ -537,6 +552,7 @@ def build_hydration_plan_data(
                     tuple[Any, ...] | None,
                     tuple[Any, ...] | None,
                     tuple[Any, ...] | None,
+                    tuple[Any, ...] | None,
                 ],
                 tuple[
                     str,
@@ -545,6 +561,7 @@ def build_hydration_plan_data(
                     dict | None,
                     dict[str, Any] | None,
                     dict | None,
+                    dict[str, Any] | None,
                 ],
             ] = {}
 
@@ -587,6 +604,15 @@ def build_hydration_plan_data(
                     component_discord_overrides,
                     file_discord_overrides,
                 )
+                file_soundcloud_overrides = _parse_soundcloud_config_mapping(
+                    file_opts.get("soundcloud"),
+                    prefix=f"component '{comp_name}' file[{spec_index}].soundcloud",
+                )
+                effective_soundcloud_overrides = _merge_soundcloud_overrides(
+                    soundcloud_overrides,
+                    component_soundcloud_overrides,
+                    file_soundcloud_overrides,
+                )
                 arena_overrides_key = _arena_overrides_cache_key(
                     effective_arena_overrides
                 )
@@ -595,6 +621,9 @@ def build_hydration_plan_data(
                 )
                 discord_overrides_key = _discord_overrides_cache_key(
                     effective_discord_overrides
+                )
+                soundcloud_overrides_key = _soundcloud_overrides_cache_key(
+                    effective_soundcloud_overrides
                 )
 
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
@@ -608,6 +637,7 @@ def build_hydration_plan_data(
                     arena_overrides_key,
                     atproto_overrides_key,
                     discord_overrides_key,
+                    soundcloud_overrides_key,
                 )
                 if (
                     spec_cache_key not in resolved_spec_cache
@@ -620,6 +650,7 @@ def build_hydration_plan_data(
                         effective_arena_overrides,
                         effective_atproto_overrides,
                         effective_discord_overrides,
+                        effective_soundcloud_overrides,
                     )
 
                 prepared_specs.append(
@@ -637,7 +668,7 @@ def build_hydration_plan_data(
                 (
                     index,
                     (
-                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, eao=effective_arena_overrides, eatpo=effective_atproto_overrides, edo=effective_discord_overrides: (
+                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, eao=effective_arena_overrides, eatpo=effective_atproto_overrides, edo=effective_discord_overrides, esco=effective_soundcloud_overrides: (
                             _resolve_spec_items(
                                 rs,
                                 base_dir,
@@ -651,6 +682,7 @@ def build_hydration_plan_data(
                                 arena_overrides=eao,
                                 atproto_overrides=eatpo,
                                 discord_overrides=edo,
+                                soundcloud_overrides=esco,
                                 group_atproto_by_kind=group_atproto_by_kind,
                             )
                         )
@@ -665,6 +697,7 @@ def build_hydration_plan_data(
                         effective_arena_overrides,
                         effective_atproto_overrides,
                         effective_discord_overrides,
+                        effective_soundcloud_overrides,
                     ),
                 ) in enumerate(pending_by_key.items())
             ]
@@ -680,6 +713,10 @@ def build_hydration_plan_data(
                 from ..references.atproto import warmup_atproto_network_stack
 
                 warmup_atproto_network_stack()
+            if tasks and has_soundcloud_sources:
+                from ..references.soundcloud import warmup_soundcloud_network_stack
+
+                warmup_soundcloud_network_stack()
             pending_keys = list(pending_by_key.keys())
             for task_index, result_items in run_indexed_tasks_fail_fast(
                 tasks, max_workers=spec_jobs
@@ -892,6 +929,8 @@ def build_hydration_plan_data(
                 atproto_overrides=atproto_overrides,
                 include_discord_defaults=has_discord_channels,
                 discord_overrides=discord_overrides,
+                include_soundcloud_defaults=has_soundcloud_sources,
+                soundcloud_overrides=soundcloud_overrides,
             ),
             "components": normalized_components,
         }
@@ -1466,6 +1505,176 @@ def _atproto_overrides_cache_key(
     return tuple((key, value) for key, value in sorted(overrides.items()))
 
 
+def _parse_soundcloud_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{prefix} must be a mapping")
+
+    allowed_keys = {"max-items", "artist", "comments", "media"}
+    unknown_keys = sorted(str(key) for key in raw.keys() if key not in allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"{prefix} has invalid keys: {', '.join(unknown_keys)}")
+
+    result: dict[str, Any] = {}
+
+    if "max-items" in raw:
+        value = raw.get("max-items")
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value <= 0:
+                raise ValueError(f"{prefix}.max-items must be >= 1 or 'all'")
+            result["max_items"] = value
+        elif isinstance(value, str) and value.strip().lower() == "all":
+            result["max_items"] = "all"
+        else:
+            raise ValueError(f"{prefix}.max-items must be a positive integer or 'all'")
+
+    artist_cfg = raw.get("artist")
+    if artist_cfg is not None:
+        if not isinstance(artist_cfg, dict):
+            raise ValueError(f"{prefix}.artist must be a mapping")
+        allowed_artist_keys = {"tracks", "playlists", "reposts"}
+        unknown_artist = sorted(
+            str(key) for key in artist_cfg.keys() if key not in allowed_artist_keys
+        )
+        if unknown_artist:
+            raise ValueError(
+                f"{prefix}.artist has invalid keys: {', '.join(unknown_artist)}"
+            )
+        for config_key, result_key in (
+            ("tracks", "artist_tracks_filter"),
+            ("playlists", "artist_playlists_filter"),
+            ("reposts", "artist_reposts_filter"),
+        ):
+            if config_key not in artist_cfg:
+                continue
+            value = artist_cfg.get(config_key)
+            if not isinstance(value, str) or value.strip().lower() not in {
+                "include",
+                "exclude",
+                "only",
+            }:
+                raise ValueError(
+                    f"{prefix}.artist.{config_key} must be one of: include, exclude, only"
+                )
+            result[result_key] = value.strip().lower()
+
+        only_modes = [
+            mode
+            for mode in (
+                result.get("artist_tracks_filter"),
+                result.get("artist_playlists_filter"),
+                result.get("artist_reposts_filter"),
+            )
+            if mode == "only"
+        ]
+        if len(only_modes) > 1:
+            raise ValueError(
+                f"{prefix}.artist can set at most one of tracks/playlists/reposts to 'only'"
+            )
+
+    comments_cfg = raw.get("comments")
+    if comments_cfg is not None:
+        if not isinstance(comments_cfg, dict):
+            raise ValueError(f"{prefix}.comments must be a mapping")
+        allowed_comment_keys = {"enabled", "max-items", "sort", "nesting-depth"}
+        unknown_comments = sorted(
+            str(key) for key in comments_cfg.keys() if key not in allowed_comment_keys
+        )
+        if unknown_comments:
+            raise ValueError(
+                f"{prefix}.comments has invalid keys: {', '.join(unknown_comments)}"
+            )
+
+        if "enabled" in comments_cfg:
+            value = comments_cfg.get("enabled")
+            if not isinstance(value, bool):
+                raise ValueError(f"{prefix}.comments.enabled must be a boolean")
+            result["include_comments"] = value
+
+        if "max-items" in comments_cfg:
+            value = comments_cfg.get("max-items")
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{prefix}.comments.max-items must be >= 1")
+            result["comments_max_items"] = value
+
+        if "sort" in comments_cfg:
+            value = comments_cfg.get("sort")
+            if not isinstance(value, str) or value.strip().lower() not in {
+                "created-desc",
+                "created-asc",
+                "track-desc",
+                "track-asc",
+            }:
+                raise ValueError(
+                    f"{prefix}.comments.sort must be one of: created-desc, created-asc, track-desc, track-asc"
+                )
+            result["comments_sort"] = value.strip().lower()
+
+        if "nesting-depth" in comments_cfg:
+            value = comments_cfg.get("nesting-depth")
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value > 1
+            ):
+                raise ValueError(f"{prefix}.comments.nesting-depth must be 0 or 1")
+            result["comments_nesting_depth"] = value
+
+    media_cfg = raw.get("media")
+    if media_cfg is not None:
+        if not isinstance(media_cfg, dict):
+            raise ValueError(f"{prefix}.media must be a mapping")
+        allowed_media_keys = {"describe-artwork", "mode"}
+        unknown_media = sorted(
+            str(key) for key in media_cfg.keys() if key not in allowed_media_keys
+        )
+        if unknown_media:
+            raise ValueError(
+                f"{prefix}.media has invalid keys: {', '.join(unknown_media)}"
+            )
+
+        if "describe-artwork" in media_cfg:
+            value = media_cfg.get("describe-artwork")
+            if not isinstance(value, bool):
+                raise ValueError(f"{prefix}.media.describe-artwork must be a boolean")
+            result["include_artwork_descriptions"] = value
+
+        if "mode" in media_cfg:
+            value = media_cfg.get("mode")
+            if not isinstance(value, str) or value.strip().lower() not in {"describe"}:
+                raise ValueError(f"{prefix}.media.mode must be 'describe'")
+            result["media_mode"] = value.strip().lower()
+
+    return result or None
+
+
+def _resolve_soundcloud_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    return _parse_soundcloud_config_mapping(
+        cfg.get("soundcloud"),
+        prefix="config.soundcloud",
+    )
+
+
+def _merge_soundcloud_overrides(
+    *overrides: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    merged: dict[str, Any] = {}
+    for item in overrides:
+        if item:
+            merged.update(item)
+    return merged or None
+
+
+def _soundcloud_overrides_cache_key(
+    overrides: dict[str, Any] | None,
+) -> tuple[Any, ...] | None:
+    if not overrides:
+        return None
+    return tuple((key, value) for key, value in sorted(overrides.items()))
+
+
 def _resolve_discord_config(cfg: dict[str, Any]) -> dict | None:
     return parse_discord_config_mapping(cfg.get("discord"), prefix="config.discord")
 
@@ -1488,6 +1697,10 @@ def _discord_settings_cache_key(settings: Any) -> tuple[Any, ...]:
 
 def _atproto_settings_cache_key(settings: Any) -> tuple[Any, ...]:
     return atproto_settings_cache_key(settings)
+
+
+def _soundcloud_settings_cache_key(settings: Any) -> tuple[Any, ...]:
+    return soundcloud_settings_cache_key(settings)
 
 
 def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
@@ -1641,7 +1854,11 @@ def _find_global_subpath_prefix(
         for file_spec, force_git, _root in all_specs:
             raw_spec, file_opts = coerce_file_spec(file_spec)
             raw_spec, _ = split_spec_symbols(raw_spec)
-            if is_http_url(raw_spec) or is_atproto_url(os.path.expanduser(raw_spec)):
+            if (
+                is_http_url(raw_spec)
+                or is_atproto_url(os.path.expanduser(raw_spec))
+                or is_soundcloud_url(os.path.expanduser(raw_spec))
+            ):
                 continue
             try:
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
@@ -1750,9 +1967,30 @@ def _manifest_has_discord_channels(components: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _manifest_has_soundcloud_sources(components: list[dict[str, Any]]) -> bool:
+    for comp in components:
+        files = comp.get("files")
+        if not files or not isinstance(files, list):
+            continue
+        for file_spec in files:
+            raw_spec, _ = coerce_file_spec(file_spec)
+            spec = os.path.expanduser(raw_spec)
+            if is_soundcloud_url(spec):
+                return True
+            if not is_http_url(spec):
+                continue
+            opts = parse_target_spec(spec)
+            target = opts.get("target", spec)
+            if is_soundcloud_url(target):
+                return True
+    return False
+
+
 def _is_external_spec(raw_spec: str) -> bool:
     spec = os.path.expanduser(raw_spec)
     if is_atproto_url(spec):
+        return True
+    if is_soundcloud_url(spec):
         return True
     if is_http_url(spec):
         return True
@@ -1841,9 +2079,21 @@ def _resolve_spec_items(
     arena_overrides: dict | None = None,
     atproto_overrides: dict[str, Any] | None = None,
     discord_overrides: dict | None = None,
+    soundcloud_overrides: dict[str, Any] | None = None,
     group_atproto_by_kind: bool = False,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
+
+    if is_soundcloud_url(spec):
+        alias = alias_hint if isinstance(alias_hint, str) else None
+        return _resolve_soundcloud_items(
+            spec,
+            alias,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            soundcloud_overrides=soundcloud_overrides,
+        )
 
     if is_atproto_url(spec):
         alias = alias_hint if isinstance(alias_hint, str) else None
@@ -1947,6 +2197,16 @@ def _resolve_spec_items(
                 refresh_cache=refresh_cache,
                 atproto_overrides=atproto_overrides,
                 group_atproto_by_kind=group_atproto_by_kind,
+            )
+
+        if is_soundcloud_url(url):
+            return _resolve_soundcloud_items(
+                url,
+                alias,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+                soundcloud_overrides=soundcloud_overrides,
             )
 
         return [
@@ -2103,6 +2363,58 @@ def _resolve_youtube_item(
         manifest_spec=url,
         alias=alias if isinstance(alias, str) else None,
     )
+
+
+def _resolve_soundcloud_items(
+    url: str,
+    alias: Any | None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    soundcloud_overrides: dict[str, Any] | None = None,
+) -> list[ResolvedItem]:
+    settings = build_soundcloud_settings(soundcloud_overrides)
+    settings_key = _soundcloud_settings_cache_key(settings)
+    documents = resolve_soundcloud_url(
+        url,
+        settings=settings,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+
+    alias_prefix: str | None = None
+    if isinstance(alias, str) and alias.strip():
+        raw_alias = alias.strip()
+        if raw_alias.endswith(".md"):
+            raw_alias = raw_alias[:-3]
+        alias_prefix = _sanitize_path_segment(raw_alias, fallback="soundcloud")
+
+    items: list[ResolvedItem] = []
+    for document in documents:
+        context_subpath = document.context_subpath
+        if alias_prefix:
+            context_subpath = f"{alias_prefix}/{context_subpath}"
+        scope_id = document.scope_id or url
+        items.append(
+            ResolvedItem(
+                source_type="soundcloud",
+                source_ref="soundcloud.com",
+                source_rev=None,
+                source_path=document.urn,
+                context_subpath=context_subpath,
+                content=document.rendered,
+                manifest_spec=url,
+                alias=alias if isinstance(alias, str) else None,
+                source_created=document.source_created,
+                source_modified=document.source_modified,
+                soundcloud_kind=document.kind,
+                soundcloud_scope_id=scope_id,
+                soundcloud_settings_key=settings_key,
+            )
+        )
+    return items
 
 
 def _parse_atproto_frontmatter(content: str) -> dict[str, Any] | None:
@@ -2985,9 +3297,11 @@ def _build_identity_key(
         item.source_path,
         item.atproto_scope_id if item.source_type == "atproto" else None,
         item.context_subpath if item.source_type == "atproto" else None,
+        item.soundcloud_scope_id if item.source_type == "soundcloud" else None,
         item.arena_settings_key if item.source_type == "arena" else None,
         item.atproto_settings_key if item.source_type == "atproto" else None,
         item.discord_settings_key if item.source_type == "discord" else None,
+        item.soundcloud_settings_key if item.source_type == "soundcloud" else None,
         ranges_key,
         symbols_key,
     )
@@ -3052,6 +3366,8 @@ def _build_external_path(
     if item.source_type == "atproto":
         return prefix / subpath if prefix.parts else subpath
     if item.source_type == "discord":
+        return prefix / subpath if prefix.parts else subpath
+    if item.source_type == "soundcloud":
         return prefix / subpath if prefix.parts else subpath
     return (
         prefix
@@ -3175,7 +3491,7 @@ def _build_manifest_file_entry(
     comment: str | None,
     extras: dict[str, Any],
 ) -> dict[str, Any] | str:
-    key = "url" if item.source_type in {"http", "atproto"} else "path"
+    key = "url" if item.source_type in {"http", "atproto", "soundcloud"} else "path"
     entry = {key: item.manifest_spec}
     entry.update({k: v for k, v in extras.items() if k not in {"range", "symbols"}})
     if range_spec:
@@ -3383,6 +3699,8 @@ def _build_normalized_config(
     atproto_overrides: dict[str, Any] | None,
     include_discord_defaults: bool,
     discord_overrides: dict[str, Any] | None,
+    include_soundcloud_defaults: bool,
+    soundcloud_overrides: dict[str, Any] | None,
 ) -> dict[str, Any]:
     normalized = dict(cfg)
     if include_root:
@@ -3533,6 +3851,31 @@ def _build_normalized_config(
         media["mode"] = discord_settings.media_mode
         discord["media"] = media
         normalized["discord"] = discord
+    if include_soundcloud_defaults:
+        soundcloud_settings = build_soundcloud_settings(soundcloud_overrides)
+        soundcloud = dict(cfg.get("soundcloud") or {})
+        artist = dict(soundcloud.get("artist") or {})
+        comments = dict(soundcloud.get("comments") or {})
+        media = dict(soundcloud.get("media") or {})
+
+        soundcloud["max-items"] = (
+            "all"
+            if soundcloud_settings.max_items is None
+            else soundcloud_settings.max_items
+        )
+        artist["tracks"] = soundcloud_settings.artist_tracks_filter
+        artist["playlists"] = soundcloud_settings.artist_playlists_filter
+        artist["reposts"] = soundcloud_settings.artist_reposts_filter
+        comments["enabled"] = soundcloud_settings.include_comments
+        comments["max-items"] = soundcloud_settings.comments_max_items
+        comments["sort"] = soundcloud_settings.comments_sort
+        comments["nesting-depth"] = soundcloud_settings.comments_nesting_depth
+        media["describe-artwork"] = soundcloud_settings.include_artwork_descriptions
+        media["mode"] = soundcloud_settings.media_mode
+        soundcloud["artist"] = artist
+        soundcloud["comments"] = comments
+        soundcloud["media"] = media
+        normalized["soundcloud"] = soundcloud
     return normalized
 
 

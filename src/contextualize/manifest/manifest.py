@@ -18,6 +18,7 @@ _DEFAULT_KEYS = {
     "arena",
     "atproto",
     "discord",
+    "soundcloud",
 }
 _GROUP_KEYS = {"group", "components", *_DEFAULT_KEYS}
 

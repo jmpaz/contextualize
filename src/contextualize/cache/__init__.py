@@ -23,6 +23,17 @@ from .discord import (
     store_api_json,
     store_rendered,
 )
+from .soundcloud import (
+    SOUNDCLOUD_CACHE_ROOT,
+    get_cached_api_json as get_cached_soundcloud_api_json,
+    get_cached_client_token as get_cached_soundcloud_client_token,
+    get_cached_media_bytes as get_cached_soundcloud_media_bytes,
+    get_cached_rendered as get_cached_soundcloud_rendered,
+    store_api_json as store_soundcloud_api_json,
+    store_client_token as store_soundcloud_client_token,
+    store_media_bytes as store_soundcloud_media_bytes,
+    store_rendered as store_soundcloud_rendered,
+)
 from .url import (
     DEFAULT_TTL,
     URL_CACHE_ROOT,
@@ -42,6 +53,7 @@ __all__ = [
     "ARENA_CACHE_ROOT",
     "ATPROTO_CACHE_ROOT",
     "DISCORD_CACHE_ROOT",
+    "SOUNDCLOUD_CACHE_ROOT",
     "DEFAULT_TTL",
     "URL_CACHE_ROOT",
     "YOUTUBE_CACHE_ROOT",
@@ -55,6 +67,10 @@ __all__ = [
     "get_cached_channel",
     "get_cached_rendered",
     "get_cached_transcript",
+    "get_cached_soundcloud_api_json",
+    "get_cached_soundcloud_client_token",
+    "get_cached_soundcloud_media_bytes",
+    "get_cached_soundcloud_rendered",
     "is_expired",
     "normalize_url",
     "parse_duration",
@@ -68,4 +84,8 @@ __all__ = [
     "store_channel",
     "store_rendered",
     "store_transcript",
+    "store_soundcloud_api_json",
+    "store_soundcloud_client_token",
+    "store_soundcloud_media_bytes",
+    "store_soundcloud_rendered",
 ]
