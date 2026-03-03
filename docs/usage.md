@@ -36,6 +36,16 @@ contextualize --prompt "what has changed in this patch?" shell "git diff --stage
 
 ## Commands
 
+### `auth`
+
+Provider authentication helpers, generally unnecessary for public data.
+
+```
+contextualize auth [PROVIDER] [--timeout INT] [--no-browser] [--logout]
+```
+
+Tokens are stored in contextualize cache and may alternatively be set with environment variables.
+
 ### `cat`
 
 Collect file contents, with optional wrapping and labels.

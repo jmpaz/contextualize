@@ -25,14 +25,18 @@ from .discord import (
 )
 from .soundcloud import (
     SOUNDCLOUD_CACHE_ROOT,
+    clear_cached_user_token as clear_cached_soundcloud_user_token,
     get_cached_api_json as get_cached_soundcloud_api_json,
     get_cached_client_token as get_cached_soundcloud_client_token,
+    get_cached_user_access_token as get_cached_soundcloud_user_access_token,
+    get_cached_user_token_record as get_cached_soundcloud_user_token_record,
     get_cached_media_bytes as get_cached_soundcloud_media_bytes,
     get_cached_rendered as get_cached_soundcloud_rendered,
     store_api_json as store_soundcloud_api_json,
     store_client_token as store_soundcloud_client_token,
     store_media_bytes as store_soundcloud_media_bytes,
     store_rendered as store_soundcloud_rendered,
+    store_user_token as store_soundcloud_user_token,
 )
 from .url import (
     DEFAULT_TTL,
@@ -71,9 +75,12 @@ __all__ = [
     "get_cached_soundcloud_client_token",
     "get_cached_soundcloud_media_bytes",
     "get_cached_soundcloud_rendered",
+    "get_cached_soundcloud_user_access_token",
+    "get_cached_soundcloud_user_token_record",
     "is_expired",
     "normalize_url",
     "parse_duration",
+    "clear_cached_soundcloud_user_token",
     "store_atproto_api_json",
     "store_atproto_identity",
     "store_atproto_media_bytes",
@@ -88,4 +95,5 @@ __all__ = [
     "store_soundcloud_client_token",
     "store_soundcloud_media_bytes",
     "store_soundcloud_rendered",
+    "store_soundcloud_user_token",
 ]

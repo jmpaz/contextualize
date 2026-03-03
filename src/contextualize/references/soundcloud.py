@@ -619,11 +619,70 @@ def _exchange_client_credentials_token(
     return token.strip(), max(60, expires_in)
 
 
+def _expires_within(value: str, *, seconds: int) -> bool:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return parsed <= (datetime.now(timezone.utc) + timedelta(seconds=max(0, seconds)))
+
+
+def _refresh_cached_user_token() -> _AuthContext | None:
+    from ..cache.soundcloud import (
+        clear_cached_user_token,
+        get_cached_user_token_record,
+        store_user_token,
+    )
+    from .soundcloud_auth import (
+        load_soundcloud_client_credentials,
+        refresh_access_token,
+    )
+
+    record = get_cached_user_token_record()
+    if record is None:
+        return None
+
+    access_token = record.get("access_token")
+    if isinstance(access_token, str) and access_token.strip():
+        expires_at = record.get("expires_at")
+        if isinstance(expires_at, str) and not _expires_within(expires_at, seconds=120):
+            return _AuthContext(access_token=access_token.strip(), has_user_token=True)
+
+    refresh_token = record.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        clear_cached_user_token()
+        return None
+
+    try:
+        creds = load_soundcloud_client_credentials()
+        refreshed = refresh_access_token(
+            creds,
+            refresh_token=refresh_token.strip(),
+        )
+    except Exception as exc:
+        _log(f"  soundcloud user token refresh failed: {exc}")
+        clear_cached_user_token()
+        return None
+
+    store_user_token(
+        access_token=refreshed.access_token,
+        refresh_token=refreshed.refresh_token,
+        expires_in_seconds=refreshed.expires_in,
+        token_type=refreshed.token_type,
+        scope=refreshed.scope,
+    )
+    return _AuthContext(access_token=refreshed.access_token, has_user_token=True)
+
+
 def _build_auth_context() -> _AuthContext:
     _load_dotenv()
     token = (os.environ.get("SOUNDCLOUD_ACCESS_TOKEN") or "").strip()
     if token:
         return _AuthContext(access_token=token, has_user_token=True)
+
+    refreshed_user = _refresh_cached_user_token()
+    if refreshed_user is not None:
+        return refreshed_user
 
     client_id = (os.environ.get("SOUNDCLOUD_CLIENT_ID") or "").strip()
     client_secret = (os.environ.get("SOUNDCLOUD_CLIENT_SECRET") or "").strip()
