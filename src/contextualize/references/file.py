@@ -172,8 +172,3 @@ class FileReference:
             return os.path.splitext(self.path)[1]
         else:
             return self._label_style
-
-    # Legacy alias
-    def get_contents(self):
-        """Legacy method - returns cached output."""
-        return self.output

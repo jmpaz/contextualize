@@ -39,10 +39,6 @@ def build_payload(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
-    arena_overrides: dict | None = None,
-    atproto_overrides: dict[str, Any] | None = None,
-    discord_overrides: dict | None = None,
-    soundcloud_overrides: dict[str, Any] | None = None,
 ) -> PayloadResult:
     payload, input_refs, trace_items, base, skipped, impact = build_payload_impl(
         components,
@@ -59,10 +55,6 @@ def build_payload(
         use_cache=use_cache,
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
-        arena_overrides=arena_overrides,
-        atproto_overrides=atproto_overrides,
-        discord_overrides=discord_overrides,
-        soundcloud_overrides=soundcloud_overrides,
     )
     return PayloadResult(payload, input_refs, trace_items, base, skipped, impact)
 
@@ -76,10 +68,6 @@ def _prepare_manifest_payload(
     str,
     list[str],
     timedelta | None,
-    dict | None,
-    dict[str, Any] | None,
-    dict | None,
-    dict[str, Any] | None,
 ]:
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a mapping with 'config' and 'components'")
@@ -112,18 +100,6 @@ def _prepare_manifest_payload(
         elif isinstance(raw_ttl, (int, float)):
             manifest_cache_ttl = timedelta(days=raw_ttl)
 
-    from .hydrate import (
-        _resolve_arena_config,
-        _resolve_atproto_config,
-        _resolve_discord_config,
-        _resolve_soundcloud_config,
-    )
-
-    arena_overrides = _resolve_arena_config(cfg)
-    atproto_overrides = _resolve_atproto_config(cfg)
-    discord_overrides = _resolve_discord_config(cfg)
-    soundcloud_overrides = _resolve_soundcloud_config(cfg)
-
     return (
         comps,
         base_dir,
@@ -131,10 +107,6 @@ def _prepare_manifest_payload(
         link_scope_default,
         link_skip_default,
         manifest_cache_ttl,
-        arena_overrides,
-        atproto_overrides,
-        discord_overrides,
-        soundcloud_overrides,
     )
 
 
@@ -171,10 +143,6 @@ def render_manifest(
         link_scope_default,
         link_skip_default,
         manifest_cache_ttl,
-        arena_overrides,
-        atproto_overrides,
-        discord_overrides,
-        soundcloud_overrides,
     ) = _prepare_manifest_payload(data, base_dir_default)
 
     effective_ttl = cache_ttl if cache_ttl is not None else manifest_cache_ttl
@@ -194,10 +162,6 @@ def render_manifest(
         use_cache=use_cache,
         cache_ttl=effective_ttl,
         refresh_cache=refresh_cache,
-        arena_overrides=arena_overrides,
-        atproto_overrides=atproto_overrides,
-        discord_overrides=discord_overrides,
-        soundcloud_overrides=soundcloud_overrides,
     )
 
 
@@ -225,10 +189,6 @@ def render_manifest_data(
         link_scope_default,
         link_skip_default,
         manifest_cache_ttl,
-        arena_overrides,
-        atproto_overrides,
-        discord_overrides,
-        soundcloud_overrides,
     ) = _prepare_manifest_payload(data, manifest_cwd)
 
     effective_ttl = cache_ttl if cache_ttl is not None else manifest_cache_ttl
@@ -248,8 +208,4 @@ def render_manifest_data(
         use_cache=use_cache,
         cache_ttl=effective_ttl,
         refresh_cache=refresh_cache,
-        arena_overrides=arena_overrides,
-        atproto_overrides=atproto_overrides,
-        discord_overrides=discord_overrides,
-        soundcloud_overrides=soundcloud_overrides,
     )

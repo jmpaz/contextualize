@@ -48,3 +48,19 @@ contextualize cat https://modelcontextprotocol.io/llms.txt
 ```
 
 Details and more examples are available in [`docs/usage.md`](docs/usage.md).
+
+## Plugins
+
+`contextualize` can load provider plugins from local directories:
+
+- `~/.config/contextualize/plugins`
+- any extra paths listed in `CONTEXTUALIZE_PLUGIN_DIRS` (path-separated)
+
+Installed Python packages can also provide plugins via the
+`contextualize.plugins` entry-point group.
+
+Each plugin repo should include a `plugin.yaml` manifest and a Python module
+with `PLUGIN_API_VERSION`, `PLUGIN_NAME`, `PLUGIN_PRIORITY`,
+`can_resolve(target, context)`, and `resolve(target, context)`.
+Plugins may also export `register_auth_command(group)` to add
+`contextualize auth <provider>` commands.

@@ -1879,13 +1879,6 @@ def auth_atproto(logout_requested: bool, timeout: int, no_browser: bool) -> None
     help="Render maps only for named components or groups.",
 )
 @click.option(
-    "-m",
-    "--map-compatible",
-    "map_mode",
-    is_flag=True,
-    help="Render codemaps when possible; otherwise include file contents.",
-)
-@click.option(
     "--exclude",
     multiple=True,
     help="Exclude named components or groups from the manifest output.",
@@ -1939,7 +1932,6 @@ def payload_cmd(
     inject,
     trace,
     exclude,
-    map_mode,
     map_components,
     use_cache,
     refresh_cache,
@@ -1998,6 +1990,7 @@ def payload_cmd(
 
     exclude_keys_list = parse_keys(exclude)
     map_keys_list = parse_keys(map_components)
+    map_mode = bool(map_keys_list)
     overlap = sorted(set(exclude_keys_list) & set(map_keys_list))
     if overlap:
         names = ", ".join(overlap)
@@ -2659,62 +2652,16 @@ def cat_cmd(
     set_refresh_videos(refresh_videos)
     set_refresh_audio(refresh_audio)
 
-    def _env_flag(name: str) -> bool:
-        return (os.environ.get(name) or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-
-    arena_global_chrono_merge = _env_flag("ARENA_MERGE_SORT")
-    arena_merge_order = (
-        (os.environ.get("ARENA_BLOCK_SORT") or os.environ.get("ARENA_SORT") or "desc")
-        .strip()
-        .lower()
-    )
-
-    def _discord_scope_from_range_env() -> str | None:
-        from .references.discord import parse_discord_url
-
-        candidates: list[tuple[str, dict[str, str]]] = []
-        for env_key in ("DISCORD_START_MESSAGE", "DISCORD_END_MESSAGE"):
-            raw = (os.environ.get(env_key) or "").strip()
-            if not raw:
-                continue
-            parsed = parse_discord_url(raw)
-            if not parsed or parsed.get("kind") != "message":
-                raise click.ClickException(
-                    f"{env_key} must be a Discord message URL when using `contextualize cat -`."
-                )
-            candidates.append((env_key, parsed))
-        if not candidates:
-            return None
-
-        first = candidates[0][1]
-        guild_id = first["guild_id"]
-        channel_id = first["channel_id"]
-        for env_key, parsed in candidates[1:]:
-            if parsed["guild_id"] != guild_id or parsed["channel_id"] != channel_id:
-                raise click.ClickException(
-                    f"{env_key} must reference the same Discord channel as DISCORD_START_MESSAGE."
-                )
-        return f"https://discord.com/channels/{guild_id}/{channel_id}"
-
     stdin_data = ctx.obj.get("stdin_data", "")
     if len(paths) == 1 and paths[0] == "-":
         paths = ()
     if not paths:
-        discord_scope = _discord_scope_from_range_env()
-        if discord_scope:
-            paths = (discord_scope,)
+        stdin_urls = _extract_stdin_urls(stdin_data)
+        if stdin_urls:
+            paths = stdin_urls
         else:
-            stdin_urls = _extract_stdin_urls(stdin_data)
-            if stdin_urls:
-                paths = stdin_urls
-            else:
-                click.echo(ctx.get_help())
-                ctx.exit()
+            click.echo(ctx.get_help())
+            ctx.exit()
 
     ctx.obj["format"] = format  # for segmentation
 
@@ -2883,31 +2830,6 @@ def cat_cmd(
                     add_file_refs([path])
             else:
                 add_file_refs([p])
-
-    if arena_global_chrono_merge:
-        from .references.arena import ArenaReference
-
-        arena_slots = [
-            i for i, ref in enumerate(refs) if isinstance(ref, ArenaReference)
-        ]
-        if len(arena_slots) > 1:
-            arena_refs = [refs[i] for i in arena_slots]
-            if arena_merge_order == "random":
-                import random
-
-                random.shuffle(arena_refs)
-            else:
-                reverse = arena_merge_order not in {"date-asc"}
-                arena_refs.sort(
-                    key=lambda ref: (
-                        ref.block.get("connected_at")
-                        or ref.block.get("created_at")
-                        or ""
-                    ),
-                    reverse=reverse,
-                )
-            for idx, ref in zip(arena_slots, arena_refs, strict=False):
-                refs[idx] = ref
 
     skipped_paths = [os.path.abspath(p) for p in link_skip] if link_skip else []
     trace_items = []

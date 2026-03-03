@@ -666,9 +666,6 @@ class URLReference:
         self.file_content = text
         return text
 
-    def get_contents(self) -> str:
-        return self.output
-
 
 def create_url_reference(
     url: str,

@@ -173,6 +173,8 @@ def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
         return spec, []
     if is_http_url(spec) or looks_like_windows_drive(spec):
         return spec, []
+    if "://" in spec:
+        return spec, []
     from ..git.target import parse_git_target
 
     if parse_git_target(spec):

@@ -3,54 +3,19 @@
 from __future__ import annotations
 
 import os
-import sys
-from dataclasses import dataclass, field, replace
+import re
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
-from threading import Lock
 
 from ..concurrency import run_indexed_tasks_fail_fast
 from ..git.cache import ensure_repo, expand_git_paths
 from ..git.target import parse_git_target
-from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
+from ..runtime import get_payload_spec_jobs
 from ..render.links import add_markdown_link_refs
-from .hydrate import (
-    _merge_arena_overrides,
-    _merge_atproto_overrides,
-    _merge_discord_overrides,
-    _merge_soundcloud_overrides,
-    _parse_arena_config_mapping,
-    _parse_atproto_config_mapping,
-    _parse_soundcloud_config_mapping,
-)
-from ..references.discord import parse_discord_config_mapping
 from .manifest import coerce_file_spec, component_selectors
-from ..references import URLReference, YouTubeReference, create_file_references
-from ..references.arena import is_arena_url
-from ..references.atproto import (
-    AtprotoReference,
-    build_atproto_settings,
-    is_atproto_url,
-    resolve_atproto_url,
-)
-from ..references.discord import (
-    DiscordResolutionError,
-    DiscordReference,
-    build_discord_settings,
-    is_discord_url,
-    render_discord_document_with_metadata,
-    resolve_discord_url,
-    split_discord_document_by_utc_day,
-    with_discord_document_rendered,
-)
-from ..references.soundcloud import (
-    SoundCloudReference,
-    build_soundcloud_settings,
-    is_soundcloud_url,
-    resolve_soundcloud_url,
-)
+from ..references import create_file_references
 from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
-from ..references.youtube import is_youtube_url
 from ..utils import wrap_text
 
 
@@ -81,79 +46,8 @@ class _MapReference:
         self.is_map = True
 
 
-class _TraceReference:
-    def __init__(self, path: str, content: str):
-        self.path = path
-        self.file_content = content
-        self.original_file_content = content
-
-
 _DEFAULT_MAP_TOKENS = 10000
-_MIN_MAP_NONEMPTY_LINES = 2
-
-
-def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
-    recurse_users = settings.recurse_users
-    recurse_key: tuple[str, ...] | None
-    if recurse_users is None:
-        recurse_key = None
-    else:
-        recurse_key = tuple(sorted(str(v) for v in recurse_users))
-    return (
-        settings.max_depth,
-        settings.sort_order,
-        settings.max_blocks_per_channel,
-        settings.include_descriptions,
-        settings.include_comments,
-        settings.include_link_image_descriptions,
-        settings.include_pdf_content,
-        settings.include_media_descriptions,
-        recurse_key,
-    )
-
-
-def _arena_channel_identity(
-    channel: dict[str, Any], settings_key: tuple[Any, ...]
-) -> tuple[Any, ...] | None:
-    slug = channel.get("slug")
-    if isinstance(slug, str) and slug:
-        return ("arena-channel", f"slug:{slug}", settings_key)
-    channel_id = channel.get("id")
-    if channel_id is not None:
-        return ("arena-channel", f"id:{channel_id}", settings_key)
-    return None
-
-
-def _arena_channel_depth(channel_path: str, root_slug: str) -> int:
-    parts = [p for p in channel_path.split("/") if p]
-    if parts and parts[0] == root_slug:
-        parts = parts[1:]
-    return len(parts)
-
-
-@dataclass
-class _ArenaChannelTracker:
-    canonical: dict[tuple[Any, ...], tuple[int, int]]
-    counter: int = 0
-    lock: Lock = field(default_factory=Lock)
-
-    def should_expand(self, identity: tuple[Any, ...], *, depth: int) -> bool:
-        with self.lock:
-            rank = (depth, self.counter)
-            self.counter += 1
-            current = self.canonical.get(identity)
-            if current is None or rank < current:
-                self.canonical[identity] = rank
-                return True
-            return False
-
-    def observe(self, identity: tuple[Any, ...], *, depth: int) -> None:
-        with self.lock:
-            rank = (depth, self.counter)
-            self.counter += 1
-            current = self.canonical.get(identity)
-            if current is None or rank < current:
-                self.canonical[identity] = rank
+_EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 @dataclass
@@ -163,20 +57,6 @@ class _SpecResolution:
     trace_items: list[Any]
     skipped_paths: set[str]
     skip_impact: dict[str, Any]
-
-
-def _arena_channel_label(block: dict[str, Any], fallback: str) -> str:
-    slug = block.get("slug")
-    if isinstance(slug, str) and slug:
-        owner = block.get("owner") or block.get("user") or {}
-        owner_slug = owner.get("slug")
-        if isinstance(owner_slug, str) and owner_slug:
-            return f"https://are.na/{owner_slug}/{slug}"
-        return f"https://are.na/channel/{slug}"
-    channel_id = block.get("id")
-    if channel_id is not None:
-        return f"https://www.are.na/block/{channel_id}"
-    return fallback
 
 
 def _format_comment(value: Any) -> str | None:
@@ -200,447 +80,6 @@ def _combine_comment(comment: str | None, output: str) -> str:
     return output
 
 
-def _wrapped_url_reference(
-    url: str,
-    *,
-    filename: Optional[str],
-    wrap: Optional[str],
-    inject: bool,
-    depth: int,
-    label_suffix: str | None,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-) -> _SimpleReference:
-    url_ref = URLReference(
-        url,
-        format="raw",
-        label=filename or url,
-        inject=inject,
-        depth=depth,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-    label = filename or url
-    if label_suffix:
-        label = f"{label} {label_suffix}"
-    wrapped = wrap_text(url_ref.output, wrap or "md", label)
-    return _SimpleReference(
-        wrapped,
-        path=url_ref.path,
-        content=url_ref.file_content,
-    )
-
-
-def _wrapped_arena_references(
-    url: str,
-    *,
-    filename: Optional[str],
-    wrap: Optional[str],
-    inject: bool,
-    depth: int,
-    label_suffix: str | None,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-    arena_overrides: dict | None = None,
-    channel_tracker: _ArenaChannelTracker | None = None,
-) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
-    from ..references.arena import (
-        ArenaReference,
-        build_arena_settings,
-        extract_block_id,
-        extract_channel_slug,
-        is_arena_channel_url,
-        resolve_channel,
-        warmup_arena_network_stack,
-        _fetch_block,
-    )
-
-    settings = build_arena_settings(arena_overrides)
-    settings_key = _arena_settings_cache_key(settings)
-
-    refs: list[_SimpleReference] = []
-    trace_inputs: list[Any] = []
-    channel_trace_items: list[tuple[str, str, int]] = []
-
-    def _append_channel_blocks(
-        flat_blocks: list[tuple[str, dict[str, Any]]], slug: str
-    ) -> list[str]:
-        root_label = url
-        channel_contents: list[str] = []
-        observed_flattened_channels: set[tuple[str, int]] = set()
-        emitted_channel_edges: set[tuple[str, str, int]] = set()
-
-        def _append_channel_edge(child: str, parent: str, depth_value: int) -> None:
-            edge = (child, parent, depth_value)
-            if edge in emitted_channel_edges:
-                return
-            emitted_channel_edges.add(edge)
-            channel_trace_items.append(edge)
-
-        block_entries: list[tuple[int, str, dict[str, Any]]] = []
-        for block_index, (channel_path, block) in enumerate(flat_blocks):
-            channel_slug_path = block.get("_channel_slug_path")
-            if isinstance(channel_slug_path, list):
-                for idx, nested_slug in enumerate(channel_slug_path[1:], start=1):
-                    if not isinstance(nested_slug, str) or not nested_slug:
-                        continue
-                    nested_depth = idx - 1
-                    if channel_tracker is not None:
-                        observe_key = (nested_slug, nested_depth)
-                        if observe_key in observed_flattened_channels:
-                            continue
-                        observed_flattened_channels.add(observe_key)
-                        channel_tracker.observe(
-                            ("arena-channel", f"slug:{nested_slug}", settings_key),
-                            depth=nested_depth,
-                        )
-                    parent_slug = channel_slug_path[idx - 1]
-                    parent_label = (
-                        root_label
-                        if idx == 1
-                        else f"https://www.are.na/channel/{parent_slug}"
-                    )
-                    child_label = f"https://www.are.na/channel/{nested_slug}"
-                    _append_channel_edge(child_label, parent_label, idx)
-            block_type = block.get("type", "")
-            is_channel = block_type == "Channel" or block.get("base_type") == "Channel"
-            channel_identity = (
-                _arena_channel_identity(block, settings_key) if is_channel else None
-            )
-            if channel_tracker is not None and channel_identity is not None:
-                channel_tracker.observe(
-                    channel_identity,
-                    depth=_arena_channel_depth(channel_path, slug),
-                )
-                nested_contents = block.get("_nested_contents")
-                if isinstance(nested_contents, list) and nested_contents:
-                    child_depth = _arena_channel_depth(channel_path, slug) + 1
-                    parent_label = (
-                        root_label
-                        if child_depth == 1
-                        else f"{root_label}#{channel_path.rsplit('/', 1)[-1]}"
-                    )
-                    child_label = _arena_channel_label(
-                        block, f"{root_label}#{channel_path}"
-                    )
-                    _append_channel_edge(child_label, parent_label, child_depth)
-            block_entries.append((block_index, channel_path, block))
-
-        def _render_channel_block(
-            channel_path: str, block: dict[str, Any]
-        ) -> tuple[_SimpleReference, str]:
-            arena_ref = ArenaReference(
-                url,
-                block=block,
-                channel_path=channel_path,
-                format="raw",
-                inject=inject,
-                depth=depth,
-                include_descriptions=settings.include_descriptions,
-                include_comments=settings.include_comments,
-                include_link_image_descriptions=settings.include_link_image_descriptions,
-                include_pdf_content=settings.include_pdf_content,
-                include_media_descriptions=settings.include_media_descriptions,
-            )
-            label = filename or arena_ref.get_label()
-            if label_suffix:
-                label = f"{label} {label_suffix}"
-            wrapped = wrap_text(arena_ref.output, wrap or "md", label)
-            simple_ref = _SimpleReference(
-                wrapped,
-                path=arena_ref.path,
-                trace_path=arena_ref.trace_path,
-                content=arena_ref.file_content,
-            )
-            return simple_ref, arena_ref.file_content
-
-        tasks = [
-            (
-                block_index,
-                (lambda p=channel_path, b=block: _render_channel_block(p, b)),
-            )
-            for block_index, channel_path, block in block_entries
-        ]
-        for _, (simple_ref, block_content) in run_indexed_tasks_fail_fast(
-            tasks,
-            max_workers=get_payload_media_jobs(),
-        ):
-            refs.append(simple_ref)
-            if block_content:
-                channel_contents.append(block_content)
-        return channel_contents
-
-    if is_arena_channel_url(url):
-        slug = extract_channel_slug(url)
-        if slug:
-            warmup_arena_network_stack()
-            root_identity = ("arena-channel", f"slug:{slug}", settings_key)
-            should_expand = True
-            if channel_tracker is not None:
-                should_expand = channel_tracker.should_expand(root_identity, depth=0)
-
-            resolve_settings = settings
-            if not should_expand and settings.max_depth > 0:
-                resolve_settings = replace(settings, max_depth=0)
-
-            metadata, flat_blocks = resolve_channel(
-                slug,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-                settings=resolve_settings,
-            )
-            channel_contents = _append_channel_blocks(flat_blocks, slug)
-            trace_inputs.append(
-                _TraceReference(
-                    url,
-                    "\n\n".join(channel_contents)
-                    if channel_contents
-                    else (metadata.get("title") or metadata.get("slug") or slug),
-                )
-            )
-    else:
-        block_id = extract_block_id(url)
-        if block_id is not None:
-            block = _fetch_block(block_id)
-            arena_ref = ArenaReference(
-                url,
-                block=block,
-                format="raw",
-                inject=inject,
-                depth=depth,
-                include_descriptions=settings.include_descriptions,
-                include_comments=settings.include_comments,
-                include_link_image_descriptions=settings.include_link_image_descriptions,
-                include_pdf_content=settings.include_pdf_content,
-                include_media_descriptions=settings.include_media_descriptions,
-            )
-            label = filename or arena_ref.get_label()
-            if label_suffix:
-                label = f"{label} {label_suffix}"
-            wrapped = wrap_text(arena_ref.output, wrap or "md", label)
-            refs.append(
-                _SimpleReference(
-                    wrapped,
-                    path=arena_ref.path,
-                    trace_path=arena_ref.trace_path,
-                    content=arena_ref.file_content,
-                )
-            )
-            trace_inputs.append(refs[-1])
-    return refs, trace_inputs, channel_trace_items
-
-
-def _wrapped_youtube_reference(
-    url: str,
-    *,
-    filename: Optional[str],
-    wrap: Optional[str],
-    inject: bool,
-    depth: int,
-    label_suffix: str | None,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-) -> _SimpleReference:
-    yt_ref = YouTubeReference(
-        url,
-        format="raw",
-        label=filename or url,
-        inject=inject,
-        depth=depth,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-    label = filename or url
-    if label_suffix:
-        label = f"{label} {label_suffix}"
-    wrapped = wrap_text(yt_ref.output, wrap or "md", label)
-    return _SimpleReference(
-        wrapped,
-        path=yt_ref.path,
-        content=yt_ref.file_content,
-    )
-
-
-def _wrapped_discord_references(
-    url: str,
-    *,
-    filename: Optional[str],
-    wrap: Optional[str],
-    inject: bool,
-    depth: int,
-    label_suffix: str | None,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-    discord_overrides: dict | None = None,
-) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
-    settings = build_discord_settings(discord_overrides)
-    try:
-        documents = resolve_discord_url(
-            url,
-            settings=settings,
-            use_cache=use_cache,
-            cache_ttl=cache_ttl,
-            refresh_cache=refresh_cache,
-        )
-    except ValueError as exc:
-        if isinstance(exc, DiscordResolutionError) and exc.is_skippable:
-            print(
-                f"Warning: skipping Discord URL: {url} ({exc})",
-                file=sys.stderr,
-                flush=True,
-            )
-            return [], [], []
-        raise
-
-    refs: list[_SimpleReference] = []
-    trace_inputs: list[Any] = []
-    trace_items: list[tuple[str, str, int]] = []
-
-    for document in documents:
-        day_documents = split_discord_document_by_utc_day(document, settings=settings)
-        prepared_documents = [
-            with_discord_document_rendered(
-                day_document,
-                rendered=render_discord_document_with_metadata(
-                    day_document,
-                    settings=settings,
-                    source_url=url,
-                    include_message_bounds=False,
-                ),
-            )
-            for day_document in day_documents
-        ]
-        for prepared_document in prepared_documents:
-            discord_ref = DiscordReference(
-                url,
-                document=prepared_document,
-                format="raw",
-                inject=inject,
-                depth=depth,
-            )
-            label = filename or discord_ref.get_label()
-            if label_suffix:
-                label = f"{label} {label_suffix}"
-            wrapped = wrap_text(discord_ref.output, wrap or "md", label)
-            simple_ref = _SimpleReference(
-                wrapped,
-                path=discord_ref.path,
-                trace_path=discord_ref.trace_path,
-                content=discord_ref.file_content,
-            )
-            refs.append(simple_ref)
-            trace_inputs.append(simple_ref)
-
-            if prepared_document.thread_id and prepared_document.parent_channel_id:
-                parent_trace = f"discord/{prepared_document.guild_id}/{prepared_document.parent_channel_id}"
-                trace_items.append((discord_ref.trace_path, parent_trace, 1))
-
-    return refs, trace_inputs, trace_items
-
-
-def _wrapped_atproto_references(
-    url: str,
-    *,
-    filename: Optional[str],
-    wrap: Optional[str],
-    inject: bool,
-    depth: int,
-    label_suffix: str | None,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-    atproto_overrides: dict[str, Any] | None = None,
-) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
-    settings = build_atproto_settings(atproto_overrides)
-    documents = resolve_atproto_url(
-        url,
-        settings=settings,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-
-    refs: list[_SimpleReference] = []
-    trace_inputs: list[Any] = []
-    trace_items: list[tuple[str, str, int]] = []
-    for document in documents:
-        atproto_ref = AtprotoReference(
-            url,
-            document=document,
-            format="raw",
-            inject=inject,
-            depth=depth,
-        )
-        label = filename or atproto_ref.get_label()
-        if label_suffix:
-            label = f"{label} {label_suffix}"
-        wrapped = wrap_text(atproto_ref.output, wrap or "md", label)
-        simple_ref = _SimpleReference(
-            wrapped,
-            path=atproto_ref.path,
-            trace_path=atproto_ref.trace_path,
-            content=atproto_ref.file_content,
-        )
-        refs.append(simple_ref)
-        trace_inputs.append(simple_ref)
-    return refs, trace_inputs, trace_items
-
-
-def _wrapped_soundcloud_references(
-    url: str,
-    *,
-    filename: Optional[str],
-    wrap: Optional[str],
-    inject: bool,
-    depth: int,
-    label_suffix: str | None,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-    soundcloud_overrides: dict[str, Any] | None = None,
-) -> tuple[list[_SimpleReference], list[Any], list[tuple[str, str, int]]]:
-    settings = build_soundcloud_settings(soundcloud_overrides)
-    documents = resolve_soundcloud_url(
-        url,
-        settings=settings,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-
-    refs: list[_SimpleReference] = []
-    trace_inputs: list[Any] = []
-    trace_items: list[tuple[str, str, int]] = []
-    for document in documents:
-        soundcloud_ref = SoundCloudReference(
-            url,
-            document=document,
-            format="raw",
-            inject=inject,
-            depth=depth,
-        )
-        label = filename or soundcloud_ref.get_label()
-        if label_suffix:
-            label = f"{label} {label_suffix}"
-        wrapped = wrap_text(soundcloud_ref.output, wrap or "md", label)
-        simple_ref = _SimpleReference(
-            wrapped,
-            path=soundcloud_ref.path,
-            trace_path=soundcloud_ref.trace_path,
-            content=soundcloud_ref.file_content,
-        )
-        refs.append(simple_ref)
-        trace_inputs.append(simple_ref)
-    return refs, trace_inputs, trace_items
-
-
 def _resolve_spec_to_paths(
     raw_spec: str,
     base_dir: str,
@@ -658,6 +97,8 @@ def _resolve_spec_to_paths(
         repo_dir = ensure_repo(tgt)
         paths = [repo_dir] if not tgt.path else expand_git_paths(repo_dir, tgt.path)
     else:
+        if _EXTERNAL_SCHEME_RE.match(spec) and parse_git_target(spec) is None:
+            return []
         tgt = parse_git_target(spec)
         if tgt:
             repo_dir = ensure_repo(tgt)
@@ -712,11 +153,6 @@ def _generate_repo_map_output(
     return result["repo_map"]
 
 
-def _map_output_is_compatible(output: str) -> bool:
-    lines = [line for line in output.splitlines() if line.strip()]
-    return len(lines) >= _MIN_MAP_NONEMPTY_LINES
-
-
 def _build_map_reference(
     label: str,
     output: str,
@@ -749,22 +185,48 @@ def _resolve_spec_to_seed_refs(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
-    arena_overrides: dict | None = None,
-    atproto_overrides: dict[str, Any] | None = None,
-    discord_overrides: dict | None = None,
-    soundcloud_overrides: dict[str, Any] | None = None,
-    channel_tracker: _ArenaChannelTracker | None = None,
 ) -> tuple[List[Any], List[Any], List[tuple[str, str, int]]]:
     spec = os.path.expanduser(raw_spec)
+    opts = parse_target_spec(spec)
+    target = opts.get("target", spec)
+    filename = file_opts.get("filename") or opts.get("filename")
+    wrap = file_opts.get("wrap") or opts.get("wrap")
     seed_refs: List[Any] = []
     trace_inputs: List[Any] = []
-    channel_trace_items: list[tuple[str, str, int]] = []
+
+    def _append_wrapped_ref(ref: Any, default_path: str) -> None:
+        if filename:
+            effective_label = filename
+        elif hasattr(ref, "get_label") and callable(getattr(ref, "get_label")):
+            effective_label = ref.get_label()  # type: ignore[call-arg]
+        else:
+            effective_label = getattr(ref, "trace_path", None) or getattr(
+                ref, "path", default_path
+            )
+        if label_suffix:
+            effective_label = f"{effective_label} {label_suffix}"
+        wrapped = wrap_text(ref.output, wrap or "md", effective_label)
+        content = getattr(ref, "file_content", None)
+        if not isinstance(content, str):
+            content = ""
+            if hasattr(ref, "read") and callable(getattr(ref, "read")):
+                try:
+                    read_value = ref.read()  # type: ignore[call-arg]
+                except Exception:
+                    read_value = ""
+                if isinstance(read_value, str):
+                    content = read_value
+        simple_ref = _SimpleReference(
+            wrapped,
+            path=getattr(ref, "path", default_path),
+            trace_path=getattr(ref, "trace_path", None),
+            content=content,
+        )
+        seed_refs.append(simple_ref)
+        trace_inputs.append(simple_ref)
 
     if is_http_url(spec):
-        opts = parse_target_spec(spec)
-        url = opts.get("target", spec)
-        filename = file_opts.get("filename") or opts.get("filename")
-        wrap = file_opts.get("wrap") or opts.get("wrap")
+        url = target
 
         tgt = parse_git_url_target(url)
         if tgt:
@@ -788,159 +250,39 @@ def _resolve_spec_to_seed_refs(
                     refresh_cache=refresh_cache,
                 )["refs"]
                 seed_refs.extend(refs)
-        elif is_atproto_url(url):
-            atproto_refs, atproto_trace_inputs, atproto_trace_items = (
-                _wrapped_atproto_references(
-                    url,
-                    filename=filename,
-                    wrap=wrap,
-                    inject=inject,
-                    depth=depth,
-                    label_suffix=label_suffix,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                    atproto_overrides=atproto_overrides,
-                )
-            )
-            seed_refs.extend(atproto_refs)
-            trace_inputs.extend(atproto_trace_inputs)
-            channel_trace_items.extend(atproto_trace_items)
-        elif is_youtube_url(url):
-            seed_refs.append(
-                _wrapped_youtube_reference(
-                    url,
-                    filename=filename,
-                    wrap=wrap,
-                    inject=inject,
-                    depth=depth,
-                    label_suffix=label_suffix,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                )
-            )
-        elif is_arena_url(url):
-            arena_refs, arena_trace_inputs, arena_trace_items = (
-                _wrapped_arena_references(
-                    url,
-                    filename=filename,
-                    wrap=wrap,
-                    inject=inject,
-                    depth=depth,
-                    label_suffix=label_suffix,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                    arena_overrides=arena_overrides,
-                    channel_tracker=channel_tracker,
-                )
-            )
-            seed_refs.extend(arena_refs)
-            trace_inputs.extend(arena_trace_inputs)
-            channel_trace_items.extend(arena_trace_items)
-        elif is_discord_url(url):
-            discord_refs, discord_trace_inputs, discord_trace_items = (
-                _wrapped_discord_references(
-                    url,
-                    filename=filename,
-                    wrap=wrap,
-                    inject=inject,
-                    depth=depth,
-                    label_suffix=label_suffix,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                    discord_overrides=discord_overrides,
-                )
-            )
-            seed_refs.extend(discord_refs)
-            trace_inputs.extend(discord_trace_inputs)
-            channel_trace_items.extend(discord_trace_items)
-        elif is_soundcloud_url(url):
-            soundcloud_refs, soundcloud_trace_inputs, soundcloud_trace_items = (
-                _wrapped_soundcloud_references(
-                    url,
-                    filename=filename,
-                    wrap=wrap,
-                    inject=inject,
-                    depth=depth,
-                    label_suffix=label_suffix,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                    soundcloud_overrides=soundcloud_overrides,
-                )
-            )
-            seed_refs.extend(soundcloud_refs)
-            trace_inputs.extend(soundcloud_trace_inputs)
-            channel_trace_items.extend(soundcloud_trace_items)
-        else:
-            seed_refs.append(
-                _wrapped_url_reference(
-                    url,
-                    filename=filename,
-                    wrap=wrap,
-                    inject=inject,
-                    depth=depth,
-                    label_suffix=label_suffix,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                )
-            )
-        if (
-            not is_arena_url(url)
-            and not is_discord_url(url)
-            and not is_atproto_url(url)
-            and not is_soundcloud_url(url)
-        ):
-            trace_inputs.extend([r for r in seed_refs if hasattr(r, "path")])
-        return seed_refs, trace_inputs, channel_trace_items
+                trace_inputs.extend([ref for ref in refs if hasattr(ref, "path")])
+            return seed_refs, trace_inputs, []
 
-    if is_soundcloud_url(spec):
-        filename = file_opts.get("filename")
-        wrap = file_opts.get("wrap")
-        soundcloud_refs, soundcloud_trace_inputs, soundcloud_trace_items = (
-            _wrapped_soundcloud_references(
-                spec,
-                filename=filename,
-                wrap=wrap,
-                inject=inject,
-                depth=depth,
-                label_suffix=label_suffix,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-                soundcloud_overrides=soundcloud_overrides,
-            )
-        )
-        seed_refs.extend(soundcloud_refs)
-        trace_inputs.extend(soundcloud_trace_inputs)
-        channel_trace_items.extend(soundcloud_trace_items)
-        return seed_refs, trace_inputs, channel_trace_items
+        refs = create_file_references(
+            [url],
+            ignore_patterns=None,
+            format="raw",
+            label="relative",
+            inject=inject,
+            depth=depth,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        )["refs"]
+        for ref in refs:
+            _append_wrapped_ref(ref, url)
+        return seed_refs, trace_inputs, []
 
-    if is_atproto_url(spec):
-        filename = file_opts.get("filename")
-        wrap = file_opts.get("wrap")
-        atproto_refs, atproto_trace_inputs, atproto_trace_items = (
-            _wrapped_atproto_references(
-                spec,
-                filename=filename,
-                wrap=wrap,
-                inject=inject,
-                depth=depth,
-                label_suffix=label_suffix,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-                atproto_overrides=atproto_overrides,
-            )
-        )
-        seed_refs.extend(atproto_refs)
-        trace_inputs.extend(atproto_trace_inputs)
-        channel_trace_items.extend(atproto_trace_items)
-        return seed_refs, trace_inputs, channel_trace_items
+    if _EXTERNAL_SCHEME_RE.match(target) and parse_git_target(target) is None:
+        refs = create_file_references(
+            [target],
+            ignore_patterns=None,
+            format="raw",
+            label="relative",
+            inject=inject,
+            depth=depth,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        )["refs"]
+        for ref in refs:
+            _append_wrapped_ref(ref, target)
+        return seed_refs, trace_inputs, []
 
     tgt = parse_git_target(spec)
     if tgt:
@@ -981,7 +323,7 @@ def _resolve_spec_to_seed_refs(
             seed_refs.extend(refs)
 
     trace_inputs.extend([r for r in seed_refs if hasattr(r, "path")])
-    return seed_refs, trace_inputs, channel_trace_items
+    return seed_refs, trace_inputs, []
 
 
 def _render_attachment_block(
@@ -1039,11 +381,6 @@ def _resolve_spec(
     use_cache: bool,
     cache_ttl: timedelta | None,
     refresh_cache: bool,
-    effective_arena_overrides: dict | None,
-    effective_atproto_overrides: dict[str, Any] | None,
-    effective_discord_overrides: dict | None,
-    effective_soundcloud_overrides: dict[str, Any] | None,
-    channel_tracker: _ArenaChannelTracker | None,
 ) -> _SpecResolution:
     if map_component:
         map_paths = _resolve_spec_to_paths(
@@ -1053,20 +390,19 @@ def _resolve_spec(
         )
         if map_paths:
             map_output = _generate_repo_map_output(map_paths, token_target=token_target)
-            if _map_output_is_compatible(map_output):
-                map_ref = _build_map_reference(
-                    raw_spec,
-                    map_output,
-                    label_suffix=item_comment,
-                    token_target=token_target,
-                )
-                return _SpecResolution(
-                    refs=[map_ref],
-                    input_refs=[map_ref],
-                    trace_items=[],
-                    skipped_paths=set(),
-                    skip_impact={},
-                )
+            map_ref = _build_map_reference(
+                raw_spec,
+                map_output,
+                label_suffix=item_comment,
+                token_target=token_target,
+            )
+            return _SpecResolution(
+                refs=[map_ref],
+                input_refs=[map_ref],
+                trace_items=[],
+                skipped_paths=set(),
+                skip_impact={},
+            )
 
     seed_refs, spec_trace_inputs, arena_channel_trace_items = (
         _resolve_spec_to_seed_refs(
@@ -1080,11 +416,6 @@ def _resolve_spec(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
-            arena_overrides=effective_arena_overrides,
-            atproto_overrides=effective_atproto_overrides,
-            discord_overrides=effective_discord_overrides,
-            soundcloud_overrides=effective_soundcloud_overrides,
-            channel_tracker=channel_tracker,
         )
     )
 
@@ -1159,10 +490,6 @@ def build_payload_impl(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
-    arena_overrides: dict | None = None,
-    atproto_overrides: dict[str, Any] | None = None,
-    discord_overrides: dict | None = None,
-    soundcloud_overrides: dict[str, Any] | None = None,
 ):
     parts: List[str] = []
     all_input_refs = []
@@ -1175,7 +502,6 @@ def build_payload_impl(
     if overlap:
         names = ", ".join(overlap)
         raise ValueError(f"Components cannot be both mapped and excluded: {names}")
-    channel_tracker = _ArenaChannelTracker(canonical={})
     spec_jobs = get_payload_spec_jobs()
 
     for comp in components:
@@ -1216,20 +542,6 @@ def build_payload_impl(
 
         comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
         comp_link_scope = (comp.get("link-scope", link_scope_default) or "all").lower()
-        component_arena_overrides = _parse_arena_config_mapping(
-            comp.get("arena"), prefix=f"component '{name}'.arena"
-        )
-        component_atproto_overrides = _parse_atproto_config_mapping(
-            comp.get("atproto"),
-            prefix=f"component '{name}'.atproto",
-        )
-        component_discord_overrides = parse_discord_config_mapping(
-            comp.get("discord"), prefix=f"component '{name}'.discord"
-        )
-        component_soundcloud_overrides = _parse_soundcloud_config_mapping(
-            comp.get("soundcloud"),
-            prefix=f"component '{name}'.soundcloud",
-        )
 
         comp_link_skip = comp.get("link-skip", link_skip_default)
         if comp_link_skip is None:
@@ -1252,42 +564,6 @@ def build_payload_impl(
             spec, file_opts = coerce_file_spec(spec)
             raw_spec = spec
             item_comment = _format_comment(file_opts.get("comment"))
-            file_arena_overrides = _parse_arena_config_mapping(
-                file_opts.get("arena"),
-                prefix=f"component '{name}' file[{spec_index}].arena",
-            )
-            effective_arena_overrides = _merge_arena_overrides(
-                arena_overrides,
-                component_arena_overrides,
-                file_arena_overrides,
-            )
-            file_atproto_overrides = _parse_atproto_config_mapping(
-                file_opts.get("atproto"),
-                prefix=f"component '{name}' file[{spec_index}].atproto",
-            )
-            effective_atproto_overrides = _merge_atproto_overrides(
-                atproto_overrides,
-                component_atproto_overrides,
-                file_atproto_overrides,
-            )
-            file_discord_overrides = parse_discord_config_mapping(
-                file_opts.get("discord"),
-                prefix=f"component '{name}' file[{spec_index}].discord",
-            )
-            effective_discord_overrides = _merge_discord_overrides(
-                discord_overrides,
-                component_discord_overrides,
-                file_discord_overrides,
-            )
-            file_soundcloud_overrides = _parse_soundcloud_config_mapping(
-                file_opts.get("soundcloud"),
-                prefix=f"component '{name}' file[{spec_index}].soundcloud",
-            )
-            effective_soundcloud_overrides = _merge_soundcloud_overrides(
-                soundcloud_overrides,
-                component_soundcloud_overrides,
-                file_soundcloud_overrides,
-            )
 
             per_file_link_depth = file_opts.get("link-depth")
             per_file_link_scope = (
@@ -1309,7 +585,7 @@ def build_payload_impl(
             spec_tasks.append(
                 (
                     spec_index,
-                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, eao=effective_arena_overrides, eatpo=effective_atproto_overrides, edo=effective_discord_overrides, esco=effective_soundcloud_overrides: (
+                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip: (
                         _resolve_spec(
                             raw_spec=rs,
                             file_opts=fo,
@@ -1327,11 +603,6 @@ def build_payload_impl(
                             use_cache=use_cache,
                             cache_ttl=cache_ttl,
                             refresh_cache=refresh_cache,
-                            effective_arena_overrides=eao,
-                            effective_atproto_overrides=eatpo,
-                            effective_discord_overrides=edo,
-                            effective_soundcloud_overrides=esco,
-                            channel_tracker=channel_tracker,
                         )
                     ),
                 )

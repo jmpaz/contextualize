@@ -1,4 +1,4 @@
-from .factory import concat_refs, create_file_references, resolve
+from .factory import concat_refs, create_file_references
 from .file import FileReference
 from .helpers import (
     DISALLOWED_CONTENT_TYPES,
@@ -14,37 +14,20 @@ from .helpers import (
     split_path_and_symbols,
     strip_content_type,
 )
-from .shell import CommandReference, ShellReference, create_command_references
+from .shell import CommandReference, create_command_references
 from .url import URLReference, create_url_reference
-from .arena import ArenaReference, is_arena_url
-from .atproto import AtprotoReference, is_atproto_url
-from .discord import DiscordReference, is_discord_url
-from .soundcloud import SoundCloudReference, is_soundcloud_url
-from .youtube import YouTubeReference, is_youtube_url
 
 __all__ = [
     "Reference",
-    "resolve",
     "FileReference",
     "URLReference",
-    "ArenaReference",
-    "AtprotoReference",
-    "DiscordReference",
-    "SoundCloudReference",
-    "YouTubeReference",
     "CommandReference",
-    "ShellReference",
     "create_file_references",
     "create_command_references",
     "create_url_reference",
     "concat_refs",
     "split_path_and_symbols",
     "is_utf8_file",
-    "is_arena_url",
-    "is_atproto_url",
-    "is_discord_url",
-    "is_soundcloud_url",
-    "is_youtube_url",
     "remove_ansi",
     "strip_content_type",
     "content_disposition_filename",

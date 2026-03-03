@@ -236,3 +236,4 @@ contextualize -p "usage examples:" \
 contextualize --before -wp "Please help me understand the following:"
 ```
 in this chain, `--before` prepends its corresponding prompt string to the output of its incoming pipe; `-w` wraps the incoming text in a code fence.
+

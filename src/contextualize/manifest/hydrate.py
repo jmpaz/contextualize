@@ -6,9 +6,8 @@ import os
 import re
 import shutil
 import stat
-import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -17,39 +16,33 @@ from ..concurrency import run_indexed_tasks_fail_fast
 from ..git.cache import ensure_repo, expand_git_paths
 from ..git.target import parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
-from ..references import URLReference, YouTubeReference, create_file_references
-from ..references.arena import is_arena_channel_url, is_arena_url
+from ..plugins.reference import PluginReference
+from ..references import URLReference, create_file_references
+from ..references.arena import is_arena_channel_url
 from ..references.atproto import (
     atproto_settings_cache_key,
     build_atproto_settings,
     is_atproto_url,
     parse_atproto_target,
-    resolve_atproto_url,
 )
 from ..references.discord import (
-    DiscordResolutionError,
     build_discord_settings,
-    discord_document_timestamps,
     discord_overrides_cache_key,
     discord_settings_cache_key,
     is_discord_url,
     merge_discord_overrides,
-    parse_discord_url,
     parse_discord_config_mapping,
-    render_discord_document_with_metadata,
-    resolve_discord_url,
-    split_discord_document_by_utc_day,
 )
 from ..references.soundcloud import (
     build_soundcloud_settings,
     is_soundcloud_url,
-    resolve_soundcloud_url,
     soundcloud_settings_cache_key,
 )
-from ..runtime import get_payload_media_jobs, get_payload_spec_jobs
+from ..runtime import get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
     is_http_url,
+    looks_like_windows_drive,
     parse_timestamp_or_duration_value,
     parse_gist_url,
     parse_git_url_target,
@@ -57,7 +50,6 @@ from ..references.helpers import (
     resolve_symbol_ranges,
     split_spec_symbols,
 )
-from ..references.youtube import extract_video_id, is_youtube_url
 from ..utils import extract_ranges
 from .manifest import (
     GROUP_BASE_KEY,
@@ -65,6 +57,8 @@ from .manifest import (
     coerce_file_spec,
     normalize_components,
 )
+
+_EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 @dataclass(frozen=True)
@@ -104,6 +98,11 @@ class ResolvedItem:
     source_modified: str | None = None
     dir_created: str | None = None
     dir_modified: str | None = None
+    plugin_name: str | None = None
+    plugin_metadata: dict[str, Any] | None = None
+    plugin_dedupe_mode: str | None = None
+    plugin_dedupe_key: str | None = None
+    plugin_dedupe_rank: int | None = None
     arena_kind: str | None = None
     arena_channel_id: str | None = None
     arena_depth: int | None = None
@@ -134,16 +133,7 @@ class HydratePlan:
 
 
 @dataclass(frozen=True)
-class _ArenaPendingWrite:
-    rel_path: Path
-    content: str
-    should_write: bool
-    item: ResolvedItem
-    encounter_index: int
-
-
-@dataclass(frozen=True)
-class _AtprotoPendingWrite:
+class _PluginPendingWrite:
     rel_path: Path
     content: str
     should_write: bool
@@ -425,10 +415,8 @@ def build_hydration_plan_data(
     file_timestamps: dict[Path, tuple[float, float]] = {}
     index_components: dict[str, list[dict[str, Any]]] = {}
     normalized_components: list[dict[str, Any]] = []
-    arena_pending: dict[tuple[Any, ...], list[_ArenaPendingWrite]] = {}
-    arena_seen_counter = 0
-    atproto_pending: dict[tuple[Any, ...], list[_AtprotoPendingWrite]] = {}
-    atproto_seen_counter = 0
+    plugin_pending: dict[tuple[Any, ...], list[_PluginPendingWrite]] = {}
+    plugin_seen_counter = 0
     resolved_spec_cache: dict[
         tuple[
             str,
@@ -809,49 +797,18 @@ def build_hydration_plan_data(
                     skip_external_root=skip_external_root,
                     external_root_prefix=spec_root,
                 )
-                arena_identity = _arena_pending_key(item, ranges, symbols)
-                if arena_identity:
-                    arena_pending.setdefault(arena_identity, []).append(
-                        _ArenaPendingWrite(
+                plugin_identity = _plugin_pending_key(item, ranges, symbols)
+                if plugin_identity is not None:
+                    plugin_pending.setdefault(plugin_identity, []).append(
+                        _PluginPendingWrite(
                             rel_path=rel_path,
                             content=content,
                             should_write=should_write,
                             item=item,
-                            encounter_index=arena_seen_counter,
+                            encounter_index=plugin_seen_counter,
                         )
                     )
-                    arena_seen_counter += 1
-                    index_components.setdefault(comp_name, []).append(
-                        _build_index_entry(
-                            rel_path,
-                            item,
-                            ranges,
-                            symbols,
-                            content,
-                        )
-                    )
-                    normalized_files.append(
-                        _build_manifest_file_entry(
-                            item,
-                            range_spec,
-                            symbols,
-                            spec_comment,
-                            file_opts,
-                        )
-                    )
-                    continue
-                atproto_identity = _atproto_pending_key(item, ranges, symbols)
-                if atproto_identity:
-                    atproto_pending.setdefault(atproto_identity, []).append(
-                        _AtprotoPendingWrite(
-                            rel_path=rel_path,
-                            content=content,
-                            should_write=should_write,
-                            item=item,
-                            encounter_index=atproto_seen_counter,
-                        )
-                    )
-                    atproto_seen_counter += 1
+                    plugin_seen_counter += 1
                     index_components.setdefault(comp_name, []).append(
                         _build_index_entry(
                             rel_path,
@@ -942,15 +899,8 @@ def build_hydration_plan_data(
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
 
-    _materialize_arena_pending(
-        arena_pending,
-        context_dir,
-        files_to_write,
-        files_to_symlink,
-        file_timestamps,
-    )
-    _materialize_atproto_pending(
-        atproto_pending,
+    _materialize_plugin_pending(
+        plugin_pending,
         context_dir,
         files_to_write,
         files_to_symlink,
@@ -1854,10 +1804,12 @@ def _find_global_subpath_prefix(
         for file_spec, force_git, _root in all_specs:
             raw_spec, file_opts = coerce_file_spec(file_spec)
             raw_spec, _ = split_spec_symbols(raw_spec)
-            if (
-                is_http_url(raw_spec)
-                or is_atproto_url(os.path.expanduser(raw_spec))
-                or is_soundcloud_url(os.path.expanduser(raw_spec))
+            target = parse_target_spec(os.path.expanduser(raw_spec)).get(
+                "target", raw_spec
+            )
+            if isinstance(target, str) and (
+                is_http_url(target)
+                or (_has_explicit_scheme(target) and parse_git_target(target) is None)
             ):
                 continue
             try:
@@ -1986,15 +1938,26 @@ def _manifest_has_soundcloud_sources(components: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _has_explicit_scheme(spec: str) -> bool:
+    if looks_like_windows_drive(spec):
+        return False
+    return _EXTERNAL_SCHEME_RE.match(spec) is not None
+
+
 def _is_external_spec(raw_spec: str) -> bool:
     spec = os.path.expanduser(raw_spec)
-    if is_atproto_url(spec):
+    target = parse_target_spec(spec).get("target", spec)
+    if not isinstance(target, str):
+        target = spec
+    if is_atproto_url(target):
         return True
-    if is_soundcloud_url(spec):
+    if is_soundcloud_url(target):
         return True
-    if is_http_url(spec):
+    if is_http_url(target):
         return True
-    return parse_git_target(spec) is not None
+    if parse_git_target(target) is not None:
+        return True
+    return _has_explicit_scheme(target)
 
 
 def _parse_comment(value: Any) -> str | None:
@@ -2065,6 +2028,187 @@ def _merge_symbols(primary: list[str] | None, extra: list[str]) -> list[str] | N
     return merged or None
 
 
+def _plugin_alias_prefix(alias: Any | None, *, fallback: str) -> str | None:
+    if not isinstance(alias, str):
+        return None
+    raw = alias.strip()
+    if not raw:
+        return None
+    if raw.endswith(".md"):
+        raw = raw[:-3]
+    if raw.endswith(".yaml"):
+        raw = raw[:-5]
+    return _sanitize_path_segment(raw, fallback=fallback)
+
+
+def _ensure_markdown_suffix(path: str) -> str:
+    if path.endswith(".md") or path.endswith(".yaml"):
+        return path
+    return f"{path}.md"
+
+
+def _plugin_context_subpath(
+    *,
+    metadata: dict[str, Any],
+    ref: PluginReference,
+    source_type: str,
+    alias: Any | None,
+    total_refs: int,
+) -> str:
+    raw_context = metadata.get("context_subpath")
+    if isinstance(raw_context, str) and raw_context.strip():
+        base = raw_context.strip().lstrip("/")
+    else:
+        label = metadata.get("label")
+        if not isinstance(label, str) or not label.strip():
+            label = ref.trace_path or ref.path or "item"
+        cleaned = label.strip().lstrip("/")
+        if "/" in cleaned:
+            base = cleaned
+        else:
+            fallback_name = _sanitize_path_segment(cleaned, fallback="item")
+            plugin_slug = source_type.replace("plugin:", "", 1)
+            base = f"{plugin_slug}/{fallback_name}.md"
+    base = _ensure_markdown_suffix(base)
+    alias_prefix = _plugin_alias_prefix(alias, fallback="plugin")
+    if alias_prefix is None:
+        return base
+
+    if total_refs == 1:
+        suffix = Path(base).suffix or ".md"
+        return f"{alias_prefix}{suffix}"
+    return f"{alias_prefix}/{base}"
+
+
+def _plugin_dedupe_fields(
+    metadata: dict[str, Any],
+) -> tuple[str | None, str | None, int | None]:
+    dedupe = metadata.get("hydrate_dedupe")
+    if not isinstance(dedupe, dict):
+        return None, None, None
+    mode_raw = dedupe.get("mode")
+    key_raw = dedupe.get("key")
+    rank_raw = dedupe.get("rank")
+    mode = mode_raw.strip() if isinstance(mode_raw, str) else None
+    key = key_raw.strip() if isinstance(key_raw, str) else None
+    rank: int | None = None
+    if isinstance(rank_raw, int):
+        rank = rank_raw
+    elif isinstance(rank_raw, str):
+        try:
+            rank = int(rank_raw.strip())
+        except ValueError:
+            rank = None
+    return mode, key, rank
+
+
+def _resolve_external_items_via_refs(
+    target: str,
+    *,
+    alias: Any | None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    arena_overrides: dict | None = None,
+    atproto_overrides: dict[str, Any] | None = None,
+    discord_overrides: dict | None = None,
+    soundcloud_overrides: dict[str, Any] | None = None,
+) -> list[ResolvedItem]:
+    refs = create_file_references(
+        [target],
+        ignore_patterns=None,
+        format="raw",
+        text_only=True,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+        arena_overrides=arena_overrides,
+        atproto_overrides=atproto_overrides,
+        discord_overrides=discord_overrides,
+        soundcloud_overrides=soundcloud_overrides,
+    )["refs"]
+
+    plugin_refs = [ref for ref in refs if isinstance(ref, PluginReference)]
+    plugin_count = len(plugin_refs)
+    items: list[ResolvedItem] = []
+    for ref in refs:
+        if isinstance(ref, PluginReference):
+            metadata = dict(ref.document.metadata or {})
+            plugin_name_raw = metadata.get("plugin_name") or metadata.get("provider")
+            if isinstance(plugin_name_raw, str) and plugin_name_raw.strip():
+                plugin_name = plugin_name_raw.strip()
+            else:
+                plugin_name = "unknown"
+            source_type = f"plugin:{plugin_name}"
+            source_ref = metadata.get("source_ref")
+            if not isinstance(source_ref, str) or not source_ref.strip():
+                source_ref = plugin_name
+            source_path = metadata.get("source_path")
+            if not isinstance(source_path, str) or not source_path.strip():
+                source_path = ref.path
+            context_subpath = _plugin_context_subpath(
+                metadata=metadata,
+                ref=ref,
+                source_type=source_type,
+                alias=alias,
+                total_refs=plugin_count if plugin_count > 0 else len(refs),
+            )
+            dedupe_mode, dedupe_key, dedupe_rank = _plugin_dedupe_fields(metadata)
+            items.append(
+                ResolvedItem(
+                    source_type=source_type,
+                    source_ref=source_ref,
+                    source_rev=None,
+                    source_path=source_path,
+                    context_subpath=context_subpath,
+                    content=ref.file_content,
+                    manifest_spec=target,
+                    alias=alias if isinstance(alias, str) else None,
+                    source_created=metadata.get("source_created")
+                    if isinstance(metadata.get("source_created"), str)
+                    else None,
+                    source_modified=metadata.get("source_modified")
+                    if isinstance(metadata.get("source_modified"), str)
+                    else None,
+                    dir_created=metadata.get("dir_created")
+                    if isinstance(metadata.get("dir_created"), str)
+                    else None,
+                    dir_modified=metadata.get("dir_modified")
+                    if isinstance(metadata.get("dir_modified"), str)
+                    else None,
+                    plugin_name=plugin_name,
+                    plugin_metadata=metadata,
+                    plugin_dedupe_mode=dedupe_mode,
+                    plugin_dedupe_key=dedupe_key,
+                    plugin_dedupe_rank=dedupe_rank,
+                )
+            )
+            continue
+
+        if is_http_url(target):
+            origin, url_path = _split_url_path(target)
+            context_path = _apply_filename_hint(url_path, alias)
+            items.append(
+                ResolvedItem(
+                    source_type="http",
+                    source_ref=origin,
+                    source_rev=None,
+                    source_path=url_path,
+                    context_subpath=context_path,
+                    content=ref.file_content,
+                    manifest_spec=target,
+                    alias=alias if isinstance(alias, str) else None,
+                )
+            )
+            continue
+        raise ValueError(f"Unsupported external reference type for target: {target}")
+
+    if not items:
+        raise ValueError(f"No plugin could resolve external target: {target}")
+
+    return items
+
+
 def _resolve_spec_items(
     raw_spec: str,
     base_dir: str,
@@ -2083,34 +2227,14 @@ def _resolve_spec_items(
     group_atproto_by_kind: bool = False,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
+    spec_opts = parse_target_spec(spec)
+    target = spec_opts.get("target", spec)
+    if not isinstance(target, str):
+        target = spec
+    alias = alias_hint or spec_opts.get("filename")
 
-    if is_soundcloud_url(spec):
-        alias = alias_hint if isinstance(alias_hint, str) else None
-        return _resolve_soundcloud_items(
-            spec,
-            alias,
-            use_cache=use_cache,
-            cache_ttl=cache_ttl,
-            refresh_cache=refresh_cache,
-            soundcloud_overrides=soundcloud_overrides,
-        )
-
-    if is_atproto_url(spec):
-        alias = alias_hint if isinstance(alias_hint, str) else None
-        return _resolve_atproto_items(
-            spec,
-            alias,
-            use_cache=use_cache,
-            cache_ttl=cache_ttl,
-            refresh_cache=refresh_cache,
-            atproto_overrides=atproto_overrides,
-            group_atproto_by_kind=group_atproto_by_kind,
-        )
-
-    if is_http_url(spec):
-        opts = parse_target_spec(spec)
-        url = opts.get("target", spec)
-        alias = alias_hint or opts.get("filename")
+    if is_http_url(target):
+        url = target
 
         if force_git:
             tgt = parse_git_target(url)
@@ -2157,76 +2281,37 @@ def _resolve_spec_items(
                     for fname, raw_url in gist_files
                 ]
 
-        if is_youtube_url(url):
-            return [
-                _resolve_youtube_item(
-                    url,
-                    alias,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                )
-            ]
-
-        if is_arena_url(url):
-            return _resolve_arena_items(
-                url,
-                alias,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-                arena_overrides=arena_overrides,
-            )
-
-        if is_discord_url(url):
-            return _resolve_discord_items(
-                url,
-                alias,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-                discord_overrides=discord_overrides,
-            )
-
-        if is_atproto_url(url):
-            return _resolve_atproto_items(
-                url,
-                alias,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-                atproto_overrides=atproto_overrides,
-                group_atproto_by_kind=group_atproto_by_kind,
-            )
-
-        if is_soundcloud_url(url):
-            return _resolve_soundcloud_items(
-                url,
-                alias,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-                soundcloud_overrides=soundcloud_overrides,
-            )
-
-        return [
-            _resolve_http_item(
-                url,
-                alias,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-            )
-        ]
-
-    tgt = parse_git_target(spec)
-    if tgt:
-        return _resolve_git_items(
-            tgt, component_name, alias=alias_hint, gitignore=gitignore
+        return _resolve_external_items_via_refs(
+            url,
+            alias=alias,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            arena_overrides=arena_overrides,
+            atproto_overrides=atproto_overrides,
+            discord_overrides=discord_overrides,
+            soundcloud_overrides=soundcloud_overrides,
         )
 
-    base = "" if os.path.isabs(spec) else base_dir
-    paths = expand_git_paths(base, spec)
+    tgt = parse_git_target(target)
+    if tgt:
+        return _resolve_git_items(tgt, component_name, alias=alias, gitignore=gitignore)
+
+    if _has_explicit_scheme(target):
+        return _resolve_external_items_via_refs(
+            target,
+            alias=alias,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            arena_overrides=arena_overrides,
+            atproto_overrides=atproto_overrides,
+            discord_overrides=discord_overrides,
+            soundcloud_overrides=soundcloud_overrides,
+        )
+
+    base = "" if os.path.isabs(target) else base_dir
+    paths = expand_git_paths(base, target)
     resolved: list[ResolvedItem] = []
 
     ignore_cache: dict[str, list[str] | None] = {}
@@ -2303,785 +2388,6 @@ def _resolve_git_items(
                 )
             )
     return resolved
-
-
-def _resolve_http_item(
-    url: str,
-    alias: Any | None,
-    *,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-) -> ResolvedItem:
-    url_ref = URLReference(
-        url,
-        format="raw",
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-    origin, url_path = _split_url_path(url)
-    context_path = _apply_filename_hint(url_path, alias)
-    return ResolvedItem(
-        source_type="http",
-        source_ref=origin,
-        source_rev=None,
-        source_path=url_path,
-        context_subpath=context_path,
-        content=url_ref.file_content,
-        manifest_spec=url,
-        alias=alias if isinstance(alias, str) else None,
-    )
-
-
-def _resolve_youtube_item(
-    url: str,
-    alias: Any | None,
-    *,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-) -> ResolvedItem:
-    video_id = extract_video_id(url)
-    yt_ref = YouTubeReference(
-        url,
-        format="raw",
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-    filename = f"youtube-{video_id}.md"
-    if alias and isinstance(alias, str):
-        filename = alias if alias.endswith(".md") else f"{alias}.md"
-    return ResolvedItem(
-        source_type="youtube",
-        source_ref="youtube.com",
-        source_rev=None,
-        source_path=video_id or url,
-        context_subpath=filename,
-        content=yt_ref.file_content,
-        manifest_spec=url,
-        alias=alias if isinstance(alias, str) else None,
-    )
-
-
-def _resolve_soundcloud_items(
-    url: str,
-    alias: Any | None,
-    *,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-    soundcloud_overrides: dict[str, Any] | None = None,
-) -> list[ResolvedItem]:
-    settings = build_soundcloud_settings(soundcloud_overrides)
-    settings_key = _soundcloud_settings_cache_key(settings)
-    documents = resolve_soundcloud_url(
-        url,
-        settings=settings,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-
-    alias_prefix: str | None = None
-    if isinstance(alias, str) and alias.strip():
-        raw_alias = alias.strip()
-        if raw_alias.endswith(".md"):
-            raw_alias = raw_alias[:-3]
-        alias_prefix = _sanitize_path_segment(raw_alias, fallback="soundcloud")
-
-    items: list[ResolvedItem] = []
-    for document in documents:
-        context_subpath = document.context_subpath
-        if alias_prefix:
-            context_subpath = f"{alias_prefix}/{context_subpath}"
-        scope_id = document.scope_id or url
-        items.append(
-            ResolvedItem(
-                source_type="soundcloud",
-                source_ref="soundcloud.com",
-                source_rev=None,
-                source_path=document.urn,
-                context_subpath=context_subpath,
-                content=document.rendered,
-                manifest_spec=url,
-                alias=alias if isinstance(alias, str) else None,
-                source_created=document.source_created,
-                source_modified=document.source_modified,
-                soundcloud_kind=document.kind,
-                soundcloud_scope_id=scope_id,
-                soundcloud_settings_key=settings_key,
-            )
-        )
-    return items
-
-
-def _parse_atproto_frontmatter(content: str) -> dict[str, Any] | None:
-    if not content.startswith("---\n"):
-        return None
-    end = content.find("\n---\n", 4)
-    if end == -1:
-        return None
-    block = content[4:end]
-    try:
-        import yaml
-
-        parsed = yaml.safe_load(block)
-    except Exception:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return parsed
-
-
-def _atproto_metadata_str(metadata: dict[str, Any], key: str) -> str | None:
-    value = metadata.get(key)
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip()
-    return cleaned or None
-
-
-def _parse_atproto_timestamp(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    cleaned = value.strip()
-    if not cleaned:
-        return None
-    if cleaned.endswith("Z"):
-        cleaned = f"{cleaned[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(cleaned)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _format_atproto_timestamp(value: datetime | None) -> str:
-    if value is None:
-        return "0000-00-00T000000Z"
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
-
-
-def _atproto_post_id_from_uri(uri: str) -> str:
-    cleaned = uri.strip().rstrip("/")
-    if not cleaned:
-        return "post"
-    leaf = cleaned.rsplit("/", 1)[-1].strip()
-    if not leaf:
-        return _sanitize_path_segment(cleaned, fallback="post")
-    return _sanitize_path_segment(leaf, fallback="post")
-
-
-def _atproto_source_root(context_subpath: str) -> Path:
-    path = _split_subpath(context_subpath)
-    parts = list(path.parts)
-    if len(parts) >= 3 and parts[0] == "atproto":
-        return Path(*parts[:3])
-    return path.parent
-
-
-_ATPROTO_KIND_DIRS: dict[str, str] = {
-    "profile": "profiles",
-    "post": "posts",
-    "feed": "feeds",
-    "list": "lists",
-    "starter-pack": "starter-packs",
-    "labeler": "labelers",
-    "record": "records",
-}
-
-
-def _atproto_kind_dir(kind: str) -> str:
-    return _ATPROTO_KIND_DIRS.get(kind, "records")
-
-
-def _atproto_entity_slug(
-    *,
-    url: str,
-    documents: list[Any],
-    parsed_target: Any,
-) -> str:
-    for document in documents:
-        root = _atproto_source_root(document.context_subpath)
-        name = root.name.strip()
-        if name:
-            return name
-    if parsed_target is not None:
-        for candidate in (
-            getattr(parsed_target, "actor", None),
-            getattr(parsed_target, "rkey", None),
-            getattr(parsed_target, "repo", None),
-            getattr(parsed_target, "uri", None),
-        ):
-            if isinstance(candidate, str) and candidate.strip():
-                return _sanitize_path_segment(candidate, fallback="atproto")
-    return _sanitize_path_segment(url, fallback="atproto")
-
-
-def _atproto_route_kind(metadata: dict[str, Any]) -> str:
-    lineage_role = _atproto_metadata_str(metadata, "lineage_role")
-    reply_root_uri = _atproto_metadata_str(metadata, "reply_root_uri")
-    reply_to_uri = _atproto_metadata_str(metadata, "reply_to_uri")
-    if lineage_role == "root_anchor" or reply_root_uri or reply_to_uri:
-        return "replies"
-    entry_type = _atproto_metadata_str(metadata, "entry_type") or "post"
-    if entry_type == "repost":
-        return "reposts"
-    if entry_type == "like":
-        return "likes"
-    return "posts"
-
-
-def _atproto_document_timestamp(
-    document: Any,
-    metadata: dict[str, Any],
-) -> datetime | None:
-    for value in (
-        _atproto_metadata_str(metadata, "created_at"),
-        document.source_created,
-        document.source_modified,
-        _atproto_metadata_str(metadata, "activity_at"),
-    ):
-        parsed = _parse_atproto_timestamp(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _resolve_atproto_items(
-    url: str,
-    alias: Any | None,
-    *,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-    atproto_overrides: dict[str, Any] | None = None,
-    group_atproto_by_kind: bool = False,
-) -> list[ResolvedItem]:
-    settings = build_atproto_settings(atproto_overrides)
-    settings_key = _atproto_settings_cache_key(settings)
-    documents = resolve_atproto_url(
-        url,
-        settings=settings,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-    )
-    parsed_target = parse_atproto_target(url)
-    target_kind = parsed_target.kind if parsed_target is not None else "record"
-    source_entity = _atproto_entity_slug(
-        url=url,
-        documents=documents,
-        parsed_target=parsed_target,
-    )
-    if group_atproto_by_kind:
-        base_root = Path(_atproto_kind_dir(target_kind)) / source_entity
-    else:
-        base_root = Path(source_entity)
-
-    alias_prefix: str | None = None
-    if isinstance(alias, str) and alias.strip():
-        raw_alias = alias.strip()
-        if raw_alias.endswith(".md"):
-            raw_alias = raw_alias[:-3]
-        alias_prefix = _sanitize_path_segment(raw_alias, fallback="atproto")
-    posts_flat_mode = (
-        settings.replies_filter == "exclude"
-        and settings.reposts_filter == "exclude"
-        and settings.likes_filter == "exclude"
-    )
-
-    routed_docs: dict[int, dict[str, Any]] = {}
-    uri_timestamps: dict[str, datetime] = {}
-    bucket_timestamps: dict[str, datetime] = {}
-    for index, document in enumerate(documents):
-        metadata = _parse_atproto_frontmatter(document.rendered)
-        if not isinstance(metadata, dict):
-            continue
-        uri = _atproto_metadata_str(metadata, "uri")
-        if not uri:
-            continue
-        if _atproto_metadata_str(metadata, "entry_type") is None:
-            continue
-        route_kind = _atproto_route_kind(metadata)
-        timestamp = _atproto_document_timestamp(document, metadata)
-        filename = f"{_format_atproto_timestamp(timestamp)}_{_atproto_post_id_from_uri(uri)}.md"
-        reply_root_uri = _atproto_metadata_str(metadata, "reply_root_uri")
-        reply_to_uri = _atproto_metadata_str(metadata, "reply_to_uri")
-        bucket_uri = None
-        if route_kind == "replies":
-            bucket_uri = reply_root_uri or reply_to_uri or uri
-        routed_docs[index] = {
-            "uri": uri,
-            "route_kind": route_kind,
-            "filename": filename,
-            "bucket_uri": bucket_uri,
-        }
-        if timestamp is not None:
-            existing = uri_timestamps.get(uri)
-            if existing is None or timestamp < existing:
-                uri_timestamps[uri] = timestamp
-            if route_kind == "replies" and isinstance(bucket_uri, str) and bucket_uri:
-                bucket_existing = bucket_timestamps.get(bucket_uri)
-                if bucket_existing is None or timestamp < bucket_existing:
-                    bucket_timestamps[bucket_uri] = timestamp
-
-    items: list[ResolvedItem] = []
-    for index, document in enumerate(documents):
-        route_data = routed_docs.get(index)
-        if route_data:
-            route_kind = str(route_data["route_kind"])
-            filename = str(route_data["filename"])
-            if route_kind == "posts":
-                if posts_flat_mode:
-                    routed_subpath = base_root / filename
-                else:
-                    routed_subpath = base_root / "posts" / filename
-            elif route_kind == "replies":
-                bucket_uri = str(
-                    route_data.get("bucket_uri") or route_data.get("uri") or ""
-                ).strip()
-                root_timestamp = uri_timestamps.get(bucket_uri)
-                fallback_timestamp = bucket_timestamps.get(bucket_uri)
-                bucket_timestamp = _format_atproto_timestamp(
-                    root_timestamp or fallback_timestamp
-                )
-                bucket_name = (
-                    f"{bucket_timestamp}_{_atproto_post_id_from_uri(bucket_uri)}"
-                )
-                routed_subpath = base_root / "replies" / bucket_name / filename
-            else:
-                routed_subpath = base_root / route_kind / filename
-            context_subpath = routed_subpath.as_posix()
-            atproto_route_kind = route_kind
-        else:
-            source_root = _atproto_source_root(document.context_subpath)
-            original_subpath = _split_subpath(document.context_subpath)
-            try:
-                relative_subpath = original_subpath.relative_to(source_root)
-            except ValueError:
-                relative_subpath = Path(original_subpath.name)
-            context_subpath = (base_root / relative_subpath).as_posix()
-            atproto_route_kind = None
-        if alias_prefix:
-            context_subpath = f"{alias_prefix}/{context_subpath}"
-
-        uri = document.uri
-        source_path = uri.replace("at://", "", 1) if uri.startswith("at://") else uri
-        items.append(
-            ResolvedItem(
-                source_type="atproto",
-                source_ref="atproto",
-                source_rev=None,
-                source_path=source_path or document.trace_path,
-                context_subpath=context_subpath,
-                content=document.rendered,
-                manifest_spec=url,
-                alias=alias if isinstance(alias, str) else None,
-                source_created=document.source_created,
-                source_modified=document.source_modified,
-                atproto_kind=document.kind,
-                atproto_settings_key=settings_key,
-                atproto_route_kind=atproto_route_kind,
-                atproto_scope_id=url,
-            )
-        )
-    return items
-
-
-def _resolve_arena_items(
-    url: str,
-    alias: Any | None,
-    *,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-    arena_overrides: dict | None = None,
-) -> list[ResolvedItem]:
-    from ..cache.arena import get_cached_block_render
-    from ..references.arena import (
-        _attachment_media_kind,
-        _fetch_block,
-        _render_block,
-        _render_channel_stub,
-        build_arena_settings,
-        extract_block_id,
-        extract_channel_slug,
-        resolve_channel,
-        warmup_arena_network_stack,
-    )
-    from ..references.arena import (
-        _log as _arena_log,
-    )
-
-    settings = build_arena_settings(arena_overrides)
-    settings_key = _arena_settings_cache_key(settings)
-
-    block_id = extract_block_id(url)
-    if block_id is not None:
-        block = _fetch_block(block_id)
-        text = (
-            _render_block(
-                block,
-                include_descriptions=settings.include_descriptions,
-                include_comments=settings.include_comments,
-                include_link_image_descriptions=settings.include_link_image_descriptions,
-                include_pdf_content=settings.include_pdf_content,
-                include_media_descriptions=settings.include_media_descriptions,
-            )
-            or ""
-        )
-        filename = f"arena-block-{block_id}.md"
-        if alias and isinstance(alias, str):
-            filename = alias if alias.endswith(".md") else f"{alias}.md"
-        return [
-            ResolvedItem(
-                source_type="arena",
-                source_ref="are.na",
-                source_rev=None,
-                source_path=str(block_id),
-                context_subpath=filename,
-                content=text,
-                manifest_spec=url,
-                alias=alias if isinstance(alias, str) else None,
-                source_created=block.get("connected_at") or block.get("created_at"),
-                source_modified=block.get("updated_at"),
-                arena_kind="block",
-                arena_depth=0,
-                arena_settings_key=settings_key,
-            )
-        ]
-
-    slug = extract_channel_slug(url)
-    if not slug:
-        raise ValueError(f"Could not parse Are.na URL: {url}")
-
-    warmup_arena_network_stack()
-    metadata, flat = resolve_channel(
-        slug,
-        use_cache=use_cache,
-        cache_ttl=cache_ttl,
-        refresh_cache=refresh_cache,
-        settings=settings,
-    )
-
-    items: list[ResolvedItem] = []
-    dir_name = alias if isinstance(alias, str) else slug
-    ch_created = metadata.get("created_at")
-    ch_updated = metadata.get("updated_at")
-
-    total = len(flat)
-    media_jobs = get_payload_media_jobs()
-
-    def _render_channel_item(
-        idx: int, channel_path: str, block: dict[str, Any]
-    ) -> ResolvedItem | None:
-        block_type = block.get("type", "")
-        is_channel = block_type == "Channel" or block.get("base_type") == "Channel"
-
-        if is_channel:
-            rendered = _render_channel_stub(block)
-        else:
-            if block_type in ("Image", "Attachment"):
-                from ..runtime import (
-                    get_refresh_audio,
-                    get_refresh_images,
-                    get_refresh_media,
-                    get_refresh_videos,
-                )
-
-                block_id = block.get("id")
-                updated_at = block.get("updated_at") or ""
-                refresh_for_block = False
-                if block_type == "Image":
-                    refresh_for_block = get_refresh_images() or get_refresh_media()
-                elif block_type == "Attachment":
-                    attachment = block.get("attachment") or {}
-                    filename = attachment.get("filename") or ""
-                    content_type = attachment.get("content_type") or ""
-                    extension = attachment.get("file_extension") or ""
-                    media_kind = _attachment_media_kind(
-                        filename=filename,
-                        extension=extension,
-                        content_type=content_type,
-                    )
-                    refresh_for_block = get_refresh_media() or (
-                        media_kind == "image"
-                        and get_refresh_images()
-                        or media_kind == "video"
-                        and get_refresh_videos()
-                        or media_kind == "audio"
-                        and get_refresh_audio()
-                    )
-                if not (
-                    block_id
-                    and updated_at
-                    and get_cached_block_render(block_id, updated_at) is not None
-                    and not refresh_for_block
-                ):
-                    block_title = block.get("title") or f"block-{block_id}"
-                    _arena_log(
-                        f"  rendering {block_type.lower()} ({idx}/{total}): {block_title[:60]}"
-                    )
-            rendered = _render_block(
-                block,
-                include_descriptions=settings.include_descriptions,
-                include_comments=settings.include_comments,
-                include_link_image_descriptions=settings.include_link_image_descriptions,
-                include_pdf_content=settings.include_pdf_content,
-                include_media_descriptions=settings.include_media_descriptions,
-            )
-        if rendered is None:
-            return None
-
-        bid = block.get("id", "unknown")
-        ch_slug = block.get("slug", "")
-        label = ch_slug or str(bid)
-        channel_parts = [part for part in channel_path.split("/") if part]
-        if channel_parts and channel_parts[0] == slug:
-            channel_parts = channel_parts[1:]
-        arena_depth = len(channel_parts)
-        channel_subdir = "/".join(channel_parts)
-        context_subpath = (
-            f"{dir_name}/{channel_subdir}/{label}.md"
-            if channel_subdir
-            else f"{dir_name}/{label}.md"
-        )
-        channel_id = None
-        if is_channel:
-            raw_id = block.get("id")
-            if raw_id is not None:
-                channel_id = str(raw_id)
-            elif ch_slug:
-                channel_id = ch_slug
-        return ResolvedItem(
-            source_type="arena",
-            source_ref="are.na",
-            source_rev=None,
-            source_path=f"{slug}/{label}",
-            context_subpath=context_subpath,
-            content=rendered,
-            manifest_spec=url,
-            alias=alias if isinstance(alias, str) else None,
-            source_created=block.get("connected_at") or block.get("created_at"),
-            source_modified=block.get("updated_at"),
-            dir_created=ch_created,
-            dir_modified=ch_updated,
-            arena_kind="channel" if is_channel else "block",
-            arena_channel_id=channel_id,
-            arena_depth=arena_depth,
-            arena_settings_key=settings_key,
-        )
-
-    tasks = [
-        (
-            idx - 1,
-            (lambda i=idx, cp=channel_path, b=block: _render_channel_item(i, cp, b)),
-        )
-        for idx, (channel_path, block) in enumerate(flat, 1)
-    ]
-    for _, rendered_item in run_indexed_tasks_fail_fast(tasks, max_workers=media_jobs):
-        if rendered_item is not None:
-            items.append(rendered_item)
-
-    return items
-
-
-def _sanitize_discord_segment(value: str, fallback: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip().lower())
-    cleaned = cleaned.strip("-._")
-    return cleaned or fallback
-
-
-def _discord_scope_parts(
-    documents: list[Any],
-    *,
-    alias: Any | None,
-    ext: str,
-) -> dict[int, list[str]]:
-    alias_prefix: str | None = None
-    if isinstance(alias, str) and alias.strip():
-        alias_raw = alias.strip()
-        if alias_raw.endswith(ext):
-            alias_raw = alias_raw[: -len(ext)]
-        alias_prefix = _sanitize_discord_segment(alias_raw, "discord")
-
-    channel_index = next(
-        (idx for idx, document in enumerate(documents) if document.kind == "channel"),
-        None,
-    )
-    channel_doc = documents[channel_index] if channel_index is not None else None
-    channel_slug = (
-        _sanitize_discord_segment(
-            str(channel_doc.channel_name or channel_doc.channel_id),
-            "channel",
-        )
-        if channel_doc is not None
-        else None
-    )
-
-    candidates: list[dict[str, Any]] = []
-    for index, document in enumerate(documents):
-        if channel_doc is not None and index == channel_index:
-            parts = [channel_slug or "channel"]
-        elif (
-            channel_doc is not None
-            and document.thread_id
-            and document.parent_channel_id == channel_doc.channel_id
-        ):
-            parts = [
-                channel_slug or "channel",
-                _sanitize_discord_segment(
-                    str(document.thread_name or document.thread_id),
-                    "thread",
-                ),
-            ]
-        elif document.thread_id:
-            parts = [
-                _sanitize_discord_segment(
-                    str(document.thread_name or document.thread_id),
-                    "thread",
-                )
-            ]
-        else:
-            parts = [
-                _sanitize_discord_segment(
-                    str(document.channel_name or document.channel_id),
-                    "channel",
-                )
-            ]
-
-        if alias_prefix:
-            parts = [alias_prefix, *parts]
-
-        candidates.append(
-            {
-                "index": index,
-                "parts": parts,
-                "fallback_id": str(document.thread_id or document.channel_id or index),
-            }
-        )
-
-    counts: dict[tuple[tuple[str, ...], str], int] = {}
-    for candidate in candidates:
-        parent = tuple(candidate["parts"][:-1])
-        slug = candidate["parts"][-1]
-        key = (parent, slug)
-        counts[key] = counts.get(key, 0) + 1
-
-    used: dict[tuple[str, ...], set[str]] = {}
-    resolved: dict[int, list[str]] = {}
-    for candidate in candidates:
-        base_parts = list(candidate["parts"])
-        parent = tuple(base_parts[:-1])
-        slug = base_parts[-1]
-        key = (parent, slug)
-        if counts.get(key, 0) > 1:
-            slug = _sanitize_discord_segment(
-                f"{slug}-{candidate['fallback_id']}",
-                slug,
-            )
-        parent_used = used.setdefault(parent, set())
-        chosen = slug
-        counter = 2
-        while chosen in parent_used:
-            chosen = f"{slug}__{counter}"
-            counter += 1
-        parent_used.add(chosen)
-        resolved[int(candidate["index"])] = [*base_parts[:-1], chosen]
-
-    return resolved
-
-
-def _resolve_discord_items(
-    url: str,
-    alias: Any | None,
-    *,
-    use_cache: bool = True,
-    cache_ttl: timedelta | None = None,
-    refresh_cache: bool = False,
-    discord_overrides: dict | None = None,
-) -> list[ResolvedItem]:
-    settings = build_discord_settings(discord_overrides)
-    settings_key = _discord_settings_cache_key(settings)
-    try:
-        documents = resolve_discord_url(
-            url,
-            settings=settings,
-            use_cache=use_cache,
-            cache_ttl=cache_ttl,
-            refresh_cache=refresh_cache,
-        )
-    except ValueError as exc:
-        if isinstance(exc, DiscordResolutionError) and exc.is_skippable:
-            print(
-                f"Warning: skipping Discord URL: {url} ({exc})",
-                file=sys.stderr,
-                flush=True,
-            )
-            return []
-        raise
-
-    ext = ".yaml" if settings.format == "yaml" else ".md"
-    items: list[ResolvedItem] = []
-    parsed = parse_discord_url(url)
-    target_message_id = (
-        parsed.get("message_id") if parsed and parsed.get("kind") == "message" else None
-    )
-    scope_paths = _discord_scope_parts(documents, alias=alias, ext=ext)
-
-    for index, document in enumerate(documents):
-        day_documents = split_discord_document_by_utc_day(document, settings=settings)
-        scope_parts = scope_paths.get(index) or ["discord"]
-        scope_path = "/".join(scope_parts)
-
-        for day_document in day_documents:
-            source_created, source_modified = discord_document_timestamps(day_document)
-            date_utc = source_created[:10] if source_created else None
-            day_slug = date_utc or "undated"
-            context_subpath = f"{scope_path}/{day_slug}{ext}"
-
-            source_path_parts = [day_document.guild_id, day_document.channel_id]
-            if day_document.thread_id:
-                source_path_parts.append(day_document.thread_id)
-            if target_message_id:
-                source_path_parts.append(f"message-{target_message_id}")
-            source_path_parts.append(f"day-{day_slug}")
-            source_path = "/".join(source_path_parts)
-
-            content = render_discord_document_with_metadata(
-                day_document,
-                settings=settings,
-                source_url=url,
-            )
-
-            scope_id = day_document.thread_id or day_document.channel_id
-            depth = 1 if day_document.thread_id else 0
-
-            items.append(
-                ResolvedItem(
-                    source_type="discord",
-                    source_ref="discord.com",
-                    source_rev=None,
-                    source_path=source_path,
-                    context_subpath=context_subpath,
-                    content=content,
-                    manifest_spec=url,
-                    alias=alias if isinstance(alias, str) else None,
-                    source_created=source_created,
-                    source_modified=source_modified,
-                    discord_kind=day_document.kind,
-                    discord_scope_id=scope_id,
-                    discord_depth=depth,
-                    discord_settings_key=settings_key,
-                )
-            )
-
-    return items
 
 
 def _resolve_gist_item(
@@ -3295,13 +2601,11 @@ def _build_identity_key(
         item.source_ref,
         item.source_rev,
         item.source_path,
+        item.context_subpath if item.source_type.startswith("plugin:") else None,
+        item.plugin_name if item.source_type.startswith("plugin:") else None,
+        item.plugin_dedupe_key if item.source_type.startswith("plugin:") else None,
         item.atproto_scope_id if item.source_type == "atproto" else None,
-        item.context_subpath if item.source_type == "atproto" else None,
         item.soundcloud_scope_id if item.source_type == "soundcloud" else None,
-        item.arena_settings_key if item.source_type == "arena" else None,
-        item.atproto_settings_key if item.source_type == "atproto" else None,
-        item.discord_settings_key if item.source_type == "discord" else None,
-        item.soundcloud_settings_key if item.source_type == "soundcloud" else None,
         ranges_key,
         symbols_key,
     )
@@ -3361,13 +2665,7 @@ def _build_external_path(
             / _build_git_external_root(item.source_ref, item.source_rev, item.alias)
             / subpath
         )
-    if item.source_type == "arena":
-        return prefix / subpath if prefix.parts else subpath
-    if item.source_type == "atproto":
-        return prefix / subpath if prefix.parts else subpath
-    if item.source_type == "discord":
-        return prefix / subpath if prefix.parts else subpath
-    if item.source_type == "soundcloud":
+    if item.source_type.startswith("plugin:"):
         return prefix / subpath if prefix.parts else subpath
     return (
         prefix
@@ -3491,7 +2789,14 @@ def _build_manifest_file_entry(
     comment: str | None,
     extras: dict[str, Any],
 ) -> dict[str, Any] | str:
-    key = "url" if item.source_type in {"http", "atproto", "soundcloud"} else "path"
+    is_url = (
+        item.source_type == "http"
+        or item.source_type.startswith("plugin:")
+        or is_http_url(item.manifest_spec)
+        or is_atproto_url(item.manifest_spec)
+        or is_soundcloud_url(item.manifest_spec)
+    )
+    key = "url" if is_url else "path"
     entry = {key: item.manifest_spec}
     entry.update({k: v for k, v in extras.items() if k not in {"range", "symbols"}})
     if range_spec:
@@ -3505,126 +2810,45 @@ def _build_manifest_file_entry(
     return entry
 
 
-def _arena_identity(item: ResolvedItem) -> tuple[Any, ...] | None:
-    if item.source_type != "arena":
-        return None
-    settings_key = item.arena_settings_key or ()
-    if item.arena_kind == "channel" and item.arena_channel_id:
-        return ("arena-channel", item.arena_channel_id, settings_key)
-    leaf = item.source_path.rsplit("/", 1)[-1]
-    if leaf.isdigit():
-        return ("arena-block", leaf, settings_key)
-    return None
-
-
-def _arena_pending_key(
+def _plugin_pending_key(
     item: ResolvedItem,
     ranges: list[tuple[int, int]] | None,
     symbols: list[str] | None,
 ) -> tuple[Any, ...] | None:
-    arena_identity = _arena_identity(item)
-    if arena_identity is None:
+    if not item.source_type.startswith("plugin:"):
         return None
-    ranges_key = tuple(tuple(r) for r in ranges) if ranges else None
-    symbols_key = tuple(symbols) if symbols else None
-    return (*arena_identity, ranges_key, symbols_key)
-
-
-def _arena_rank(item: ResolvedItem, encounter_index: int) -> tuple[int, int]:
-    depth = item.arena_depth if item.arena_depth is not None else 10**9
-    return (depth, encounter_index)
-
-
-def _materialize_arena_pending(
-    arena_pending: dict[tuple[Any, ...], list[_ArenaPendingWrite]],
-    context_dir: Path,
-    files_to_write: list[tuple[Path, str]],
-    files_to_symlink: list[tuple[Path, Path]],
-    file_timestamps: dict[Path, tuple[float, float]],
-) -> None:
-    for occurrences in arena_pending.values():
-        canonical = min(
-            occurrences,
-            key=lambda occ: _arena_rank(occ.item, occ.encounter_index),
-        )
-        canonical_path = context_dir / canonical.rel_path
-
-        writer = canonical
-        if not writer.should_write:
-            writer = next(
-                (
-                    occ
-                    for occ in occurrences
-                    if occ.rel_path == canonical.rel_path and occ.should_write
-                ),
-                writer,
-            )
-
-        if writer.should_write:
-            files_to_write.append((canonical_path, writer.content))
-            file_ts = _item_file_ts(writer.item)
-            if file_ts:
-                file_timestamps[canonical_path] = file_ts
-            dir_ts = _item_dir_ts(writer.item)
-            if dir_ts:
-                file_timestamps.setdefault(canonical_path.parent, dir_ts)
-
-        for occ in occurrences:
-            if occ.rel_path == canonical.rel_path:
-                continue
-            files_to_symlink.append((context_dir / occ.rel_path, canonical_path))
-
-
-_ATPROTO_ROUTE_PRIORITY: dict[str, int] = {
-    "posts": 0,
-    "replies": 1,
-    "reposts": 2,
-    "likes": 3,
-}
-
-
-def _atproto_pending_key(
-    item: ResolvedItem,
-    ranges: list[tuple[int, int]] | None,
-    symbols: list[str] | None,
-) -> tuple[Any, ...] | None:
-    if item.source_type != "atproto":
+    if item.plugin_dedupe_mode != "canonical_symlink":
         return None
-    route_kind = item.atproto_route_kind
-    if route_kind not in _ATPROTO_ROUTE_PRIORITY:
-        return None
-    source_scope = item.atproto_scope_id
-    if not isinstance(source_scope, str) or not source_scope:
+    if not item.plugin_dedupe_key:
         return None
     ranges_key = tuple(tuple(r) for r in ranges) if ranges else None
     symbols_key = tuple(symbols) if symbols else None
     return (
-        "atproto-post",
-        source_scope,
-        item.atproto_settings_key or (),
-        item.source_path,
+        item.source_type,
+        item.plugin_dedupe_key,
         ranges_key,
         symbols_key,
     )
 
 
-def _atproto_rank(item: ResolvedItem, encounter_index: int) -> tuple[int, int]:
-    route_kind = item.atproto_route_kind or ""
-    priority = _ATPROTO_ROUTE_PRIORITY.get(route_kind, 99)
-    return (priority, encounter_index)
+def _plugin_rank(item: ResolvedItem, encounter_index: int) -> tuple[int, int]:
+    rank = item.plugin_dedupe_rank
+    if rank is None:
+        rank = 10**9
+    return (rank, encounter_index)
 
 
-def _materialize_atproto_pending(
-    atproto_pending: dict[tuple[Any, ...], list[_AtprotoPendingWrite]],
+def _materialize_plugin_pending(
+    plugin_pending: dict[tuple[Any, ...], list[_PluginPendingWrite]],
     context_dir: Path,
     files_to_write: list[tuple[Path, str]],
     files_to_symlink: list[tuple[Path, Path]],
     file_timestamps: dict[Path, tuple[float, float]],
 ) -> None:
-    for occurrences in atproto_pending.values():
+    for occurrences in plugin_pending.values():
         canonical = min(
             occurrences,
-            key=lambda occ: _atproto_rank(occ.item, occ.encounter_index),
+            key=lambda occ: _plugin_rank(occ.item, occ.encounter_index),
         )
         canonical_path = context_dir / canonical.rel_path
 

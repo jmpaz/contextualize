@@ -78,7 +78,7 @@ def test_html_get_uses_markdown_converter_when_head_probe_fails(monkeypatch) -> 
     ref = URLReference(url=url, format="raw", use_cache=False)
 
     assert ref.read() == "# converted markdown"
-    assert ref.get_contents() == "# converted markdown"
+    assert ref.output == "# converted markdown"
 
 
 def test_raw_prefix_bypasses_html_markdown_converter(monkeypatch) -> None:
@@ -106,7 +106,7 @@ def test_raw_prefix_bypasses_html_markdown_converter(monkeypatch) -> None:
     ref = URLReference(url=f"raw:{url}", format="raw", use_cache=False)
 
     assert ref.read() == "<html><body>raw html</body></html>"
-    assert ref.get_contents() == "<html><body>raw html</body></html>"
+    assert ref.output == "<html><body>raw html</body></html>"
 
 
 def test_normalize_markdown_converter_output_unescapes_overescaped_markdown() -> None:
