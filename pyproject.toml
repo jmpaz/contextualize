@@ -17,6 +17,8 @@ dependencies = [
   "requests>=2.25.0",
   "markitdown[all]>=0.1.4",
   "lexrpc>=2.1",
+  "pyjwt>=2.10.1",
+  "cryptography>=46.0.0",
 ]
 
 [project.urls]

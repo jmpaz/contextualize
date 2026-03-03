@@ -536,9 +536,11 @@ source = { editable = "." }
 dependencies = [
     { name = "aider-chat" },
     { name = "anthropic" },
+    { name = "cryptography" },
     { name = "lexrpc" },
     { name = "markitdown", extra = ["all"] },
     { name = "pathspec" },
+    { name = "pyjwt" },
     { name = "pyperclip" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -549,9 +551,11 @@ dependencies = [
 requires-dist = [
     { name = "aider-chat", specifier = ">=0.86.1" },
     { name = "anthropic", specifier = "==0.42.0" },
+    { name = "cryptography", specifier = ">=46.0.0" },
     { name = "lexrpc", specifier = ">=2.1" },
     { name = "markitdown", extras = ["all"], specifier = ">=0.1.4" },
     { name = "pathspec" },
+    { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "pyperclip", specifier = ">=1.8.2" },
     { name = "pyyaml" },
     { name = "requests", specifier = ">=2.25.0" },

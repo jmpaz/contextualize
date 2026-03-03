@@ -41,10 +41,13 @@ contextualize --prompt "what has changed in this patch?" shell "git diff --stage
 Provider authentication helpers, generally unnecessary for public data.
 
 ```
-contextualize auth [PROVIDER] [--timeout INT] [--no-browser] [--logout]
+contextualize auth PROVIDER [provider options]
 ```
 
-Tokens are stored in contextualize cache and may alternatively be set with environment variables.
+Providers:
+- `arena` (`--token`, `--logout`)
+- `atproto` (`--timeout`, `--no-browser`, `--logout`)
+- `soundcloud` (`--timeout`, `--no-browser`, `--logout`)
 
 ### `cat`
 

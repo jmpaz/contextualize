@@ -666,14 +666,11 @@ def _documents_from_cached_payload(payload: Any) -> list[AtprotoDocument] | None
     return documents
 
 
-def _resolution_cache_identity(
-    url: str, settings: AtprotoSettings, auth_mode: str
-) -> str:
+def _resolution_cache_identity(url: str, settings: AtprotoSettings) -> str:
     payload = {
         "v": 2,
         "url": url,
         "settings": atproto_settings_cache_key(settings),
-        "auth_mode": auth_mode,
     }
     return "atproto-resolve:" + json.dumps(
         payload, sort_keys=True, separators=(",", ":")
@@ -706,9 +703,212 @@ class _ClientContext:
     auth_mode: str
 
 
+def _oauth_record_expired(
+    record: dict[str, Any], *, min_valid_seconds: int = 0
+) -> bool:
+    expires_at = record.get("expires_at")
+    if not isinstance(expires_at, str) or not expires_at.strip():
+        return True
+    try:
+        parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return parsed <= (datetime.now(timezone.utc) + timedelta(seconds=min_valid_seconds))
+
+
+def _oauth_record_remaining_seconds(record: dict[str, Any]) -> int:
+    expires_at = record.get("expires_at")
+    if not isinstance(expires_at, str) or not expires_at.strip():
+        return 0
+    try:
+        parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    remaining = int((parsed - datetime.now(timezone.utc)).total_seconds())
+    return max(0, remaining)
+
+
+def _store_oauth_session_record(
+    record: dict[str, Any],
+    *,
+    auth_server_nonce: str | None = None,
+    expires_in_seconds: int | None = None,
+) -> None:
+    from ..cache.atproto import store_oauth_session
+
+    dpop_public_jwk = record.get("dpop_public_jwk")
+    if not isinstance(dpop_public_jwk, dict):
+        dpop_public_jwk = {}
+    store_oauth_session(
+        access_token=str(record.get("access_token") or "").strip(),
+        refresh_token=str(record.get("refresh_token") or "").strip() or None,
+        expires_in_seconds=max(
+            60,
+            int(expires_in_seconds)
+            if isinstance(expires_in_seconds, int)
+            else _oauth_record_remaining_seconds(record),
+        ),
+        token_type=str(record.get("token_type") or "DPoP").strip() or "DPoP",
+        scope=str(record.get("scope") or "").strip(),
+        client_id=str(record.get("client_id") or "").strip(),
+        auth_server=str(record.get("auth_server") or "").strip(),
+        resource_server=str(record.get("resource_server") or "").strip(),
+        dpop_private_key_pem=str(record.get("dpop_private_key_pem") or ""),
+        dpop_public_jwk={str(k): str(v) for k, v in dpop_public_jwk.items()},
+        auth_server_nonce=auth_server_nonce
+        or (str(record.get("auth_server_nonce") or "").strip() or None),
+        resource_server_nonce=str(record.get("resource_server_nonce") or "").strip()
+        or None,
+        subject_did=str(record.get("subject_did") or "").strip() or None,
+    )
+
+
+def _refresh_cached_oauth_session(*, force: bool = False) -> dict[str, Any] | None:
+    from ..cache.atproto import (
+        clear_cached_oauth_session,
+        get_cached_oauth_session_record,
+    )
+    from .atproto_auth import (
+        DPoPKeyPair,
+        load_atproto_oauth_config,
+        refresh_access_token,
+    )
+
+    record = get_cached_oauth_session_record()
+    if record is None:
+        return None
+    if not force and not _oauth_record_expired(record, min_valid_seconds=60):
+        return record
+
+    refresh_token = record.get("refresh_token")
+    private_key_pem = record.get("dpop_private_key_pem")
+    public_jwk = record.get("dpop_public_jwk")
+    if (
+        not isinstance(refresh_token, str)
+        or not refresh_token.strip()
+        or not isinstance(private_key_pem, str)
+        or not private_key_pem.strip()
+        or not isinstance(public_jwk, dict)
+        or not public_jwk
+    ):
+        clear_cached_oauth_session()
+        return None
+
+    try:
+        config = load_atproto_oauth_config()
+        token, auth_server_nonce = refresh_access_token(
+            config,
+            refresh_token=refresh_token.strip(),
+            key_pair=DPoPKeyPair(
+                private_key_pem=private_key_pem,
+                public_jwk={str(k): str(v) for k, v in public_jwk.items()},
+            ),
+            auth_server_nonce=str(record.get("auth_server_nonce") or "").strip()
+            or None,
+        )
+    except Exception as exc:
+        _log(f"  atproto oauth refresh failed: {exc}")
+        return None
+
+    refreshed = {
+        **record,
+        "access_token": token.access_token,
+        "refresh_token": token.refresh_token or refresh_token.strip(),
+        "token_type": token.token_type,
+        "scope": token.scope,
+        "subject_did": token.subject_did
+        or str(record.get("subject_did") or "").strip(),
+        "auth_server": config.authorization_server,
+        "resource_server": config.resource_server,
+        "auth_server_nonce": auth_server_nonce,
+    }
+    _store_oauth_session_record(
+        refreshed,
+        auth_server_nonce=auth_server_nonce,
+        expires_in_seconds=token.expires_in,
+    )
+    return refreshed
+
+
+def _build_oauth_client_context() -> _ClientContext | None:
+    record = _refresh_cached_oauth_session()
+    if record is None:
+        return None
+
+    access_token = str(record.get("access_token") or "").strip()
+    if not access_token:
+        return None
+    private_key_pem = str(record.get("dpop_private_key_pem") or "").strip()
+    public_jwk = record.get("dpop_public_jwk")
+    if not private_key_pem or not isinstance(public_jwk, dict) or not public_jwk:
+        return None
+
+    from .atproto_auth import AtprotoDPoPAuth
+    from lexrpc.client import Client
+
+    normalized_public_jwk = {str(k): str(v) for k, v in public_jwk.items()}
+    auth = AtprotoDPoPAuth(
+        access_token=access_token,
+        private_key_pem=private_key_pem,
+        public_jwk=normalized_public_jwk,
+        token_type=str(record.get("token_type") or "DPoP").strip() or "DPoP",
+        resource_nonce=str(record.get("resource_server_nonce") or "").strip() or None,
+    )
+    host = (
+        os.environ.get("ATPROTO_PUBLIC_HOST") or ""
+    ).strip() or _DEFAULT_PUBLIC_APPVIEW
+    return _ClientContext(
+        client=Client(address=host, timeout=30, auth=auth),
+        auth_mode="oauth",
+    )
+
+
 def _build_client_context() -> _ClientContext:
     _load_dotenv()
     from lexrpc.client import Client
+
+    env_access_token = (os.environ.get("ATPROTO_ACCESS_TOKEN") or "").strip()
+    env_refresh_token = (os.environ.get("ATPROTO_REFRESH_TOKEN") or "").strip()
+    if env_access_token:
+        pds_host = (os.environ.get("ATPROTO_PDS_HOST") or "").strip() or _DEFAULT_PDS
+        client = Client(
+            address=pds_host,
+            timeout=30,
+            access_token=env_access_token,
+            refresh_token=env_refresh_token or None,
+        )
+        get_session = (
+            getattr(
+                getattr(
+                    getattr(getattr(client, "com", None), "atproto", None),
+                    "server",
+                    None,
+                ),
+                "getSession",
+                None,
+            )
+            if env_refresh_token
+            else None
+        )
+        if callable(get_session):
+            try:
+                get_session()
+            except Exception as exc:
+                _log(
+                    "  atproto env-token auth failed, falling back to oauth/public mode: "
+                    f"{exc}"
+                )
+            else:
+                _log("  atproto auth mode: env-token")
+                return _ClientContext(client=client, auth_mode="env-token")
+        else:
+            _log("  atproto auth mode: env-token")
+            return _ClientContext(client=client, auth_mode="env-token")
+
+    oauth_context = _build_oauth_client_context()
+    if oauth_context is not None:
+        _log("  atproto auth mode: oauth")
+        return oauth_context
 
     identifier = (os.environ.get("ATPROTO_IDENTIFIER") or "").strip()
     password = (os.environ.get("ATPROTO_APP_PASSWORD") or "").strip()
@@ -734,9 +934,52 @@ def _build_client_context() -> _ClientContext:
 
 
 def _client_call(label: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    from .atproto_auth import extract_dpop_nonce_from_http_error
+
     try:
         return fn(*args, **kwargs)
     except Exception as exc:
+        nonce = extract_dpop_nonce_from_http_error(exc)
+        if nonce:
+            client = getattr(fn, "client", None)
+            requests_kwargs = getattr(client, "requests_kwargs", None)
+            auth = (
+                requests_kwargs.get("auth")
+                if isinstance(requests_kwargs, dict)
+                else None
+            )
+            update_nonce = getattr(auth, "update_nonce", None)
+            if callable(update_nonce):
+                try:
+                    update_nonce(nonce)
+                    return fn(*args, **kwargs)
+                except Exception as retry_exc:
+                    raise ValueError(
+                        f"ATProto {label} failed: {retry_exc}"
+                    ) from retry_exc
+        response = getattr(exc, "response", None)
+        request_url = str(getattr(response, "url", "") or "")
+        if request_url.endswith("/xrpc/com.atproto.server.refreshSession"):
+            client = getattr(fn, "client", None)
+            requests_kwargs = getattr(client, "requests_kwargs", None)
+            auth = (
+                requests_kwargs.get("auth")
+                if isinstance(requests_kwargs, dict)
+                else None
+            )
+            update_token = getattr(auth, "update_token", None)
+            if callable(update_token):
+                refreshed = _refresh_cached_oauth_session(force=True)
+                if isinstance(refreshed, dict):
+                    refreshed_access = str(refreshed.get("access_token") or "").strip()
+                    if refreshed_access:
+                        try:
+                            update_token(refreshed_access)
+                            return fn(*args, **kwargs)
+                        except Exception as retry_exc:
+                            raise ValueError(
+                                f"ATProto {label} failed after OAuth refresh retry: {retry_exc}"
+                            ) from retry_exc
         raise ValueError(f"ATProto {label} failed: {exc}") from exc
 
 
@@ -3269,7 +3512,6 @@ def resolve_atproto_url(
     cache_identity = _resolution_cache_identity(
         url,
         effective_settings,
-        client_ctx.auth_mode,
     )
     if use_cache and not refresh_resolution_cache:
         cached_payload = get_cached_api_json(cache_identity, ttl=cache_ttl)

@@ -111,11 +111,23 @@ def _load_dotenv() -> None:
 
 
 def _get_auth_headers() -> dict[str, str]:
-    _load_dotenv()
-    token = os.environ.get("ARENA_ACCESS_TOKEN")
+    token = _resolve_arena_access_token()
     if token:
         return {"Authorization": f"Bearer {token}"}
     return {}
+
+
+def _resolve_arena_access_token() -> str | None:
+    from ..cache.arena import get_cached_user_access_token
+
+    _load_dotenv()
+    env_token = (os.environ.get("ARENA_ACCESS_TOKEN") or "").strip()
+    if env_token:
+        return env_token
+    cached = get_cached_user_access_token(min_valid_seconds=60)
+    if cached:
+        return cached
+    return None
 
 
 def _api_timeout_seconds() -> float:
