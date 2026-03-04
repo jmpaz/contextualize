@@ -1,30 +1,15 @@
 # Plugins
 
-`contextualize` automatically loads plugins from:
-
-- `~/.config/contextualize/plugins`
-- additional directories from `CONTEXTUALIZE_PLUGIN_DIRS` (path-separated)
-
-Installed Python packages may also expose plugins through the
+`contextualize` discovers plugins from installed Python packages through the
 `contextualize.plugins` entry-point group.
 
-Install the maintained provider bundle from GitHub with:
+Install the maintained provider bundle with:
 
 ```bash
 uv pip install "contextualize[plugins]"
 ```
 
-Each plugin is a local repo that contains `plugin.yaml`:
-
-```yaml
-name: my-plugin
-module: plugin
-api_version: "1"
-priority: 200
-enabled: true
-```
-
-The module exports:
+Each plugin module should export:
 
 - `PLUGIN_API_VERSION = "1"`
 - `PLUGIN_NAME = "my-plugin"`

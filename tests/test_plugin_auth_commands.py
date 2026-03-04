@@ -10,45 +10,36 @@ pytest.importorskip("pyperclip")
 CliRunner = click_testing.CliRunner
 
 
-def _plugin_root(tmp_path: Path) -> Path:
-    return tmp_path / "home" / ".config" / "contextualize" / "plugins"
+def _entrypoint(
+    *,
+    entrypoint_name: str,
+    entrypoint_value: str,
+    plugin_name: str,
+    register_auth: bool,
+) -> object:
+    class _FakeEntrypoint:
+        name = entrypoint_name
+        value = entrypoint_value
 
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = plugin_name
+            plugin.PLUGIN_PRIORITY = 300
+            plugin.can_resolve = lambda _target, _context: False
+            plugin.resolve = lambda _target, _context: []
+            if register_auth:
+                import click
 
-def _write_plugin(root: Path, name: str, *, register_auth: bool) -> None:
-    repo = root / name
-    repo.mkdir(parents=True, exist_ok=True)
-    (repo / "plugin.yaml").write_text(
-        "\n".join(
-            [
-                f"name: {name}",
-                "module: plugin",
-                "api_version: '1'",
-                "priority: 500",
-                "enabled: true",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    lines = [
-        "import click",
-        "PLUGIN_API_VERSION = '1'",
-        f"PLUGIN_NAME = '{name}'",
-        "PLUGIN_PRIORITY = 500",
-        "def can_resolve(target, context):",
-        "    return False",
-        "def resolve(target, context):",
-        "    return []",
-    ]
-    if register_auth:
-        lines.extend(
-            [
-                "def register_auth_command(group):",
-                "    @group.command('demo')",
-                "    def _auth_demo():",
-                "        click.echo('demo auth ok')",
-            ]
-        )
-    (repo / "plugin.py").write_text("\n".join(lines), encoding="utf-8")
+                def register_auth_command(group):
+                    @group.command("demo")
+                    def _auth_demo() -> None:
+                        click.echo("demo auth ok")
+
+                plugin.register_auth_command = register_auth_command
+            return plugin
+
+    return _FakeEntrypoint()
 
 
 def test_auth_placeholder_without_auth_plugins(monkeypatch, tmp_path: Path) -> None:
@@ -74,9 +65,21 @@ def test_auth_placeholder_lists_installed_plugins_and_sources(
 ) -> None:
     from contextualize import cli
     from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
 
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [
+            _entrypoint(
+                entrypoint_name="pkg-arena",
+                entrypoint_value="contextualize_plugins.arena:plugin",
+                plugin_name="arena",
+                register_auth=False,
+            )
+        ],
+    )
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    _write_plugin(_plugin_root(tmp_path), "arena", register_auth=False)
     clear_loaded_plugins_cache()
 
     runner = CliRunner()
@@ -84,7 +87,7 @@ def test_auth_placeholder_lists_installed_plugins_and_sources(
     assert auth_result.exit_code == 0
     assert "No loaded plugins expose authentication handlers." in auth_result.output
     assert "Installed plugins:" in auth_result.output
-    assert "- arena: path (" in auth_result.output
+    assert "- arena: package (contextualize_plugins.arena:plugin)" in auth_result.output
 
     missing_result = runner.invoke(cli.cli, ["auth", "arena"])
     assert missing_result.exit_code != 0
@@ -97,9 +100,21 @@ def test_auth_placeholder_lists_installed_plugins_and_sources(
 def test_external_plugin_registers_auth_command(monkeypatch, tmp_path: Path) -> None:
     from contextualize import cli
     from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
 
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [
+            _entrypoint(
+                entrypoint_name="demo-auth",
+                entrypoint_value="contextualize_plugins.demo_auth:plugin",
+                plugin_name="demo-auth",
+                register_auth=True,
+            )
+        ],
+    )
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    _write_plugin(_plugin_root(tmp_path), "demo-auth", register_auth=True)
     clear_loaded_plugins_cache()
 
     runner = CliRunner()
@@ -124,21 +139,17 @@ def test_auth_placeholder_renders_package_plugin_source(
     from contextualize.plugins import clear_loaded_plugins_cache
     from contextualize.plugins import loader as plugin_loader
 
-    class _FakeEntrypoint:
-        name = "pkg-arena"
-        value = "contextualize_plugins.arena:plugin"
-
-        def load(self):
-            plugin = types.SimpleNamespace()
-            plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "pkg-arena"
-            plugin.PLUGIN_PRIORITY = 300
-            plugin.can_resolve = lambda _target, _context: False
-            plugin.resolve = lambda _target, _context: []
-            return plugin
-
     monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_FakeEntrypoint()]
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [
+            _entrypoint(
+                entrypoint_name="pkg-arena",
+                entrypoint_value="contextualize_plugins.arena:plugin",
+                plugin_name="pkg-arena",
+                register_auth=False,
+            )
+        ],
     )
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     clear_loaded_plugins_cache()

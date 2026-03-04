@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from pathlib import Path
 from typing import Any, Callable, TypedDict
 
 PLUGIN_API_VERSION = "1"
-PLUGIN_DIRS_ENV = "CONTEXTUALIZE_PLUGIN_DIRS"
 PLUGIN_ENTRYPOINT_GROUP = "contextualize.plugins"
 
 
@@ -44,14 +42,3 @@ class LoadedPlugin:
     can_resolve: CanResolveFn
     resolve: ResolveFn
     register_auth_command: RegisterAuthCommandFn | None = None
-
-
-@dataclass(frozen=True)
-class ExternalPluginSpec:
-    name: str
-    module: str
-    api_version: str
-    priority: int
-    enabled: bool
-    repo_dir: Path
-    manifest_path: Path

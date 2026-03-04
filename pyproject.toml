@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 plugins = [
-  "cx-plugins @ git+https://github.com/jmpaz/cx-plugins.git@v0.1.0",
+  "cx-plugins @ git+https://github.com/jmpaz/cx-plugins.git@v0.1.1",
 ]
 
 [project.urls]

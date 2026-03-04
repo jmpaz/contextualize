@@ -1,49 +1,40 @@
 from __future__ import annotations
 
+import types
 from pathlib import Path
 
 from contextualize.manifest.build import _resolve_spec_to_seed_refs
 from contextualize.plugins import clear_loaded_plugins_cache
-
-
-def _write_plugin(root: Path, name: str) -> None:
-    repo = root / name
-    repo.mkdir(parents=True, exist_ok=True)
-    (repo / "plugin.yaml").write_text(
-        "\n".join(
-            [
-                f"name: {name}",
-                "module: plugin",
-                "api_version: '1'",
-                "priority: 500",
-                "enabled: true",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (repo / "plugin.py").write_text(
-        "\n".join(
-            [
-                "PLUGIN_API_VERSION = '1'",
-                f"PLUGIN_NAME = '{name}'",
-                "PLUGIN_PRIORITY = 500",
-                "def can_resolve(target, context):",
-                "    return target.startswith('demo://')",
-                "def resolve(target, context):",
-                "    return [{'source': target, 'label': 'demo/item.md', 'content': 'demo body'}]",
-            ]
-        ),
-        encoding="utf-8",
-    )
+from contextualize.plugins import loader as plugin_loader
 
 
 def test_manifest_build_routes_custom_scheme_through_plugins(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    plugins_root = tmp_path / "plugins"
-    monkeypatch.setenv("CONTEXTUALIZE_PLUGIN_DIRS", str(plugins_root))
-    _write_plugin(plugins_root, "demo")
+
+    class _DemoEntrypoint:
+        name = "demo"
+        value = "contextualize_plugins.demo:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "demo"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith("demo://")
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "demo/item.md",
+                    "content": "demo body",
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_DemoEntrypoint()]
+    )
     clear_loaded_plugins_cache()
 
     seed_refs, trace_inputs, trace_items = _resolve_spec_to_seed_refs(
