@@ -38,16 +38,13 @@ contextualize --prompt "what has changed in this patch?" shell "git diff --stage
 
 ### `auth`
 
-Provider authentication helpers, generally unnecessary for public data.
+Plugin-provided authentication helpers.
 
 ```
 contextualize auth PROVIDER [provider options]
 ```
 
-Providers:
-- `arena` (`--token`, `--logout`)
-- `atproto` (`--timeout`, `--no-browser`, `--logout`)
-- `soundcloud` (`--timeout`, `--no-browser`, `--logout`)
+Run `contextualize auth` to list available handlers from loaded plugins.
 
 ### `cat`
 
@@ -236,4 +233,3 @@ contextualize -p "usage examples:" \
 contextualize --before -wp "Please help me understand the following:"
 ```
 in this chain, `--before` prepends its corresponding prompt string to the output of its incoming pipe; `-w` wraps the incoming text in a code fence.
-

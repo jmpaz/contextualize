@@ -8,6 +8,12 @@
 Installed Python packages may also expose plugins through the
 `contextualize.plugins` entry-point group.
 
+Install the maintained provider bundle from GitHub with:
+
+```bash
+uv pip install "contextualize[plugins]"
+```
+
 Each plugin is a local repo that contains `plugin.yaml`:
 
 ```yaml

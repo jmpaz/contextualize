@@ -33,6 +33,7 @@ class PluginContext(TypedDict, total=False):
 
 CanResolveFn = Callable[[str, PluginContext], bool]
 ResolveFn = Callable[[str, PluginContext], list[PluginDocument]]
+RegisterAuthCommandFn = Callable[[Any], None]
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class LoadedPlugin:
     origin: str
     can_resolve: CanResolveFn
     resolve: ResolveFn
+    register_auth_command: RegisterAuthCommandFn | None = None
 
 
 @dataclass(frozen=True)
