@@ -16,34 +16,18 @@ from ..concurrency import run_indexed_tasks_fail_fast
 from ..git.cache import ensure_repo, expand_git_paths
 from ..git.target import parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
+from ..plugins import (
+    classify_plugin_target,
+    loaded_plugin_names,
+    normalize_manifest_plugin_config,
+)
 from ..plugins.reference import PluginReference
 from ..references import URLReference, create_file_references
-from ..references.arena import is_arena_channel_url
-from ..references.atproto import (
-    atproto_settings_cache_key,
-    build_atproto_settings,
-    is_atproto_url,
-    parse_atproto_target,
-)
-from ..references.discord import (
-    build_discord_settings,
-    discord_overrides_cache_key,
-    discord_settings_cache_key,
-    is_discord_url,
-    merge_discord_overrides,
-    parse_discord_config_mapping,
-)
-from ..references.soundcloud import (
-    build_soundcloud_settings,
-    is_soundcloud_url,
-    soundcloud_settings_cache_key,
-)
 from ..runtime import get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
     is_http_url,
     looks_like_windows_drive,
-    parse_timestamp_or_duration_value,
     parse_gist_url,
     parse_git_url_target,
     parse_target_spec,
@@ -185,14 +169,6 @@ def build_inline_hydration_plan(
         else:
             expanded.append(t)
 
-    atproto_target_kinds = {
-        kind
-        for target in expanded
-        for kind in [_atproto_target_kind_from_spec(target)]
-        if kind is not None
-    }
-    group_atproto_by_kind = len(atproto_target_kinds) > 1
-
     for target in expanded:
         items = _resolve_spec_items(
             target,
@@ -202,7 +178,6 @@ def build_inline_hydration_plan(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
-            group_atproto_by_kind=group_atproto_by_kind,
         )
         for item in items:
             subpath = _split_subpath(item.context_subpath)
@@ -391,21 +366,13 @@ def build_hydration_plan_data(
         raise ValueError("'components' must be a list")
     components = normalize_components(components)
 
-    arena_overrides = _resolve_arena_config(cfg)
-    atproto_overrides = _resolve_atproto_config(cfg)
-    discord_overrides = _resolve_discord_config(cfg)
-    soundcloud_overrides = _resolve_soundcloud_config(cfg)
+    plugin_overrides = _resolve_plugin_config(cfg)
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
     context_dir = context_cfg["dir"]
     has_local_sources = _manifest_has_local_sources(components)
-    has_arena_channels = _manifest_has_arena_channels(components)
-    has_atproto_sources = _manifest_has_atproto_sources(components)
-    atproto_target_kinds = _manifest_atproto_target_kinds(components)
-    group_atproto_by_kind = len(atproto_target_kinds) > 1
-    has_discord_channels = _manifest_has_discord_channels(components)
-    has_soundcloud_sources = _manifest_has_soundcloud_sources(components)
+    manifest_plugin_providers = _manifest_plugin_providers(components)
     use_external_root = context_cfg["path_strategy"] == "on-disk" and has_local_sources
 
     used_paths: set[str] = set()
@@ -417,20 +384,7 @@ def build_hydration_plan_data(
     normalized_components: list[dict[str, Any]] = []
     plugin_pending: dict[tuple[Any, ...], list[_PluginPendingWrite]] = {}
     plugin_seen_counter = 0
-    resolved_spec_cache: dict[
-        tuple[
-            str,
-            bool,
-            bool,
-            bool,
-            str | None,
-            tuple[Any, ...] | None,
-            tuple[Any, ...] | None,
-            tuple[Any, ...] | None,
-            tuple[Any, ...] | None,
-        ],
-        list[ResolvedItem],
-    ] = {}
+    resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]] = {}
 
     global_strip_prefix: Path | None = None
     if context_cfg["path_strategy"] == "by-component":
@@ -464,18 +418,9 @@ def build_hydration_plan_data(
             comp.get(GROUP_BASE_KEY),
             context_cfg["path_strategy"],
         )
-        component_arena_overrides = _parse_arena_config_mapping(
-            comp.get("arena"), prefix=f"component '{comp_name}'.arena"
-        )
-        component_atproto_overrides = _parse_atproto_config_mapping(
-            comp.get("atproto"),
-            prefix=f"component '{comp_name}'.atproto",
-        )
-        component_discord_overrides = parse_discord_config_mapping(
-            comp.get("discord"), prefix=f"component '{comp_name}'.discord"
-        )
-        component_soundcloud_overrides = _parse_soundcloud_config_mapping(
-            comp.get("soundcloud"), prefix=f"component '{comp_name}'.soundcloud"
+        component_plugin_overrides = _parse_plugin_config_mapping(
+            comp,
+            prefix=f"component '{comp_name}'",
         )
 
         if (
@@ -532,25 +477,7 @@ def build_hydration_plan_data(
             spec_jobs = get_payload_spec_jobs()
             prepared_specs: list[dict[str, Any]] = []
             pending_by_key: dict[
-                tuple[
-                    str,
-                    bool,
-                    bool,
-                    str | None,
-                    tuple[Any, ...] | None,
-                    tuple[Any, ...] | None,
-                    tuple[Any, ...] | None,
-                    tuple[Any, ...] | None,
-                ],
-                tuple[
-                    str,
-                    Any | None,
-                    bool,
-                    dict | None,
-                    dict[str, Any] | None,
-                    dict | None,
-                    dict[str, Any] | None,
-                ],
+                tuple[Any, ...], tuple[str, Any | None, bool, dict[str, Any] | None]
             ] = {}
 
             for spec_index, (file_spec, force_git, spec_root) in enumerate(
@@ -565,53 +492,17 @@ def build_hydration_plan_data(
                 raw_spec, path_symbols = split_spec_symbols(raw_spec)
                 if path_symbols:
                     symbols_spec = _merge_symbols(symbols_spec, path_symbols)
-                file_arena_overrides = _parse_arena_config_mapping(
-                    file_opts.get("arena"),
-                    prefix=f"component '{comp_name}' file[{spec_index}].arena",
+                file_plugin_overrides = _parse_plugin_config_mapping(
+                    file_opts,
+                    prefix=f"component '{comp_name}' file[{spec_index}]",
                 )
-                effective_arena_overrides = _merge_arena_overrides(
-                    arena_overrides,
-                    component_arena_overrides,
-                    file_arena_overrides,
+                effective_plugin_overrides = _merge_plugin_overrides(
+                    plugin_overrides,
+                    component_plugin_overrides,
+                    file_plugin_overrides,
                 )
-                file_atproto_overrides = _parse_atproto_config_mapping(
-                    file_opts.get("atproto"),
-                    prefix=f"component '{comp_name}' file[{spec_index}].atproto",
-                )
-                effective_atproto_overrides = _merge_atproto_overrides(
-                    atproto_overrides,
-                    component_atproto_overrides,
-                    file_atproto_overrides,
-                )
-                file_discord_overrides = parse_discord_config_mapping(
-                    file_opts.get("discord"),
-                    prefix=f"component '{comp_name}' file[{spec_index}].discord",
-                )
-                effective_discord_overrides = _merge_discord_overrides(
-                    discord_overrides,
-                    component_discord_overrides,
-                    file_discord_overrides,
-                )
-                file_soundcloud_overrides = _parse_soundcloud_config_mapping(
-                    file_opts.get("soundcloud"),
-                    prefix=f"component '{comp_name}' file[{spec_index}].soundcloud",
-                )
-                effective_soundcloud_overrides = _merge_soundcloud_overrides(
-                    soundcloud_overrides,
-                    component_soundcloud_overrides,
-                    file_soundcloud_overrides,
-                )
-                arena_overrides_key = _arena_overrides_cache_key(
-                    effective_arena_overrides
-                )
-                atproto_overrides_key = _atproto_overrides_cache_key(
-                    effective_atproto_overrides
-                )
-                discord_overrides_key = _discord_overrides_cache_key(
-                    effective_discord_overrides
-                )
-                soundcloud_overrides_key = _soundcloud_overrides_cache_key(
-                    effective_soundcloud_overrides
+                plugin_overrides_key = _plugin_overrides_cache_key(
+                    effective_plugin_overrides
                 )
 
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
@@ -620,12 +511,8 @@ def build_hydration_plan_data(
                     raw_spec,
                     force_git,
                     comp_gitignore,
-                    group_atproto_by_kind,
                     cache_alias,
-                    arena_overrides_key,
-                    atproto_overrides_key,
-                    discord_overrides_key,
-                    soundcloud_overrides_key,
+                    plugin_overrides_key,
                 )
                 if (
                     spec_cache_key not in resolved_spec_cache
@@ -635,10 +522,7 @@ def build_hydration_plan_data(
                         raw_spec,
                         alias_hint,
                         force_git,
-                        effective_arena_overrides,
-                        effective_atproto_overrides,
-                        effective_discord_overrides,
-                        effective_soundcloud_overrides,
+                        effective_plugin_overrides,
                     )
 
                 prepared_specs.append(
@@ -656,7 +540,7 @@ def build_hydration_plan_data(
                 (
                     index,
                     (
-                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, eao=effective_arena_overrides, eatpo=effective_atproto_overrides, edo=effective_discord_overrides, esco=effective_soundcloud_overrides: (
+                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, epo=effective_plugin_overrides: (
                             _resolve_spec_items(
                                 rs,
                                 base_dir,
@@ -667,11 +551,7 @@ def build_hydration_plan_data(
                                 cache_ttl=context_cfg["cache_ttl"],
                                 refresh_cache=context_cfg["refresh_cache"],
                                 force_git=fg,
-                                arena_overrides=eao,
-                                atproto_overrides=eatpo,
-                                discord_overrides=edo,
-                                soundcloud_overrides=esco,
-                                group_atproto_by_kind=group_atproto_by_kind,
+                                plugin_overrides=epo,
                             )
                         )
                     ),
@@ -682,29 +562,10 @@ def build_hydration_plan_data(
                         raw_spec,
                         alias_hint,
                         force_git,
-                        effective_arena_overrides,
-                        effective_atproto_overrides,
-                        effective_discord_overrides,
-                        effective_soundcloud_overrides,
+                        effective_plugin_overrides,
                     ),
                 ) in enumerate(pending_by_key.items())
             ]
-            if tasks and any(
-                is_http_url(raw_spec) for raw_spec, *_ in pending_by_key.values()
-            ):
-                from ..references.arena import warmup_arena_network_stack
-
-                warmup_arena_network_stack()
-            if tasks and any(
-                is_atproto_url(raw_spec) for raw_spec, *_ in pending_by_key.values()
-            ):
-                from ..references.atproto import warmup_atproto_network_stack
-
-                warmup_atproto_network_stack()
-            if tasks and has_soundcloud_sources:
-                from ..references.soundcloud import warmup_soundcloud_network_stack
-
-                warmup_soundcloud_network_stack()
             pending_keys = list(pending_by_key.keys())
             for task_index, result_items in run_indexed_tasks_fail_fast(
                 tasks, max_workers=spec_jobs
@@ -880,14 +741,9 @@ def build_hydration_plan_data(
                 context_cfg,
                 base_dir,
                 include_root=has_local_sources,
-                include_arena_max_depth=has_arena_channels,
-                arena_overrides=arena_overrides,
-                include_atproto_defaults=has_atproto_sources,
-                atproto_overrides=atproto_overrides,
-                include_discord_defaults=has_discord_channels,
-                discord_overrides=discord_overrides,
-                include_soundcloud_defaults=has_soundcloud_sources,
-                soundcloud_overrides=soundcloud_overrides,
+                plugin_overrides=plugin_overrides,
+                include_plugin_defaults=bool(manifest_plugin_providers),
+                manifest_plugin_providers=manifest_plugin_providers,
             ),
             "components": normalized_components,
         }
@@ -1041,636 +897,162 @@ def _resolve_agents(
     return text, files
 
 
-def _parse_arena_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
+def _loaded_plugin_name_set() -> set[str]:
+    return {name for name in loaded_plugin_names() if name}
+
+
+def _parse_plugin_config_value(raw: Any, *, prefix: str) -> dict[str, Any] | None:
     if raw is None:
         return None
     if not isinstance(raw, dict):
         raise ValueError(f"{prefix} must be a mapping")
-
-    from ..references.arena import VALID_SORT_ORDERS
-
-    result: dict[str, Any] = {}
-
-    recurse_depth = raw.get("recurse-depth")
-    max_depth_alias = raw.get("max-depth")
-    if recurse_depth is not None and max_depth_alias is not None:
-        if recurse_depth != max_depth_alias:
-            raise ValueError(
-                f"{prefix}.recurse-depth and {prefix}.max-depth cannot differ"
-            )
-    if recurse_depth is None:
-        recurse_depth = max_depth_alias
-    if recurse_depth is not None:
-        if (
-            not isinstance(recurse_depth, int)
-            or isinstance(recurse_depth, bool)
-            or recurse_depth < 0
-        ):
-            raise ValueError(
-                f"{prefix}.recurse-depth (alias: max-depth) must be a non-negative integer"
-            )
-        result["max_depth"] = recurse_depth
-
-    block_sort = raw.get("block-sort")
-    sort_alias = raw.get("sort")
-    if block_sort is not None and sort_alias is not None:
-        left = str(block_sort).lower().strip()
-        right = str(sort_alias).lower().strip()
-        if left != right:
-            raise ValueError(f"{prefix}.block-sort and {prefix}.sort cannot differ")
-    if block_sort is None:
-        block_sort = sort_alias
-    if block_sort is not None:
-        if (
-            not isinstance(block_sort, str)
-            or block_sort.lower().strip() not in VALID_SORT_ORDERS
-        ):
-            raise ValueError(
-                f"{prefix}.block-sort (alias: sort) must be one of: "
-                + ", ".join(sorted(VALID_SORT_ORDERS))
-            )
-        result["sort_order"] = block_sort.lower().strip()
-
-    max_blocks_per_channel = raw.get("max-blocks-per-channel")
-    if max_blocks_per_channel is not None:
-        if (
-            not isinstance(max_blocks_per_channel, int)
-            or isinstance(max_blocks_per_channel, bool)
-            or max_blocks_per_channel <= 0
-        ):
-            raise ValueError(
-                f"{prefix}.max-blocks-per-channel must be a positive integer"
-            )
-        result["max_blocks_per_channel"] = max_blocks_per_channel
-
-    for config_key, result_key in (
-        ("connected-after", "connected_after"),
-        ("connected-before", "connected_before"),
-        ("created-after", "created_after"),
-        ("created-before", "created_before"),
-    ):
-        if config_key not in raw:
-            continue
-        value = raw[config_key]
-        parsed = _parse_iso_timestamp(value)
-        if parsed is None:
-            raise ValueError(
-                f"{prefix}.{config_key} is not a valid timestamp "
-                "(ISO, epoch, or relative duration)"
-            )
-        result[result_key] = parsed
-
-    allowed_keys = {
-        "recurse-depth",
-        "max-depth",
-        "block-sort",
-        "sort",
-        "max-blocks-per-channel",
-        "connected-after",
-        "connected-before",
-        "created-after",
-        "created-before",
-        "recurse-users",
-        "block",
-    }
-    unknown_keys = sorted(str(key) for key in raw.keys() if key not in allowed_keys)
-    if unknown_keys:
-        raise ValueError(f"{prefix} has invalid keys: {', '.join(unknown_keys)}")
-
-    has_connected_window = (
-        result.get("connected_after") is not None
-        or result.get("connected_before") is not None
-    )
-    has_created_window = (
-        result.get("created_after") is not None
-        or result.get("created_before") is not None
-    )
-    if has_connected_window and has_created_window:
-        raise ValueError(f"{prefix} cannot mix connected-* and created-* windows")
-
-    connected_after = result.get("connected_after")
-    connected_before = result.get("connected_before")
-    created_after = result.get("created_after")
-    created_before = result.get("created_before")
-    if (
-        isinstance(connected_after, datetime)
-        and isinstance(connected_before, datetime)
-        and connected_after > connected_before
-    ):
-        raise ValueError(
-            f"{prefix}.connected-after must be <= {prefix}.connected-before"
-        )
-    if (
-        isinstance(created_after, datetime)
-        and isinstance(created_before, datetime)
-        and created_after > created_before
-    ):
-        raise ValueError(f"{prefix}.created-after must be <= {prefix}.created-before")
-
-    block_cfg = raw.get("block")
-    if block_cfg is not None and not isinstance(block_cfg, dict):
-        raise ValueError(f"{prefix}.block must be a mapping")
-    block_cfg = block_cfg or {}
-    allowed_block_keys = {
-        "media-desc",
-        "link-image-desc",
-        "pdf-content",
-        "comments",
-        "description",
-    }
-    unknown_block_keys = sorted(
-        str(key) for key in block_cfg.keys() if key not in allowed_block_keys
-    )
-    if unknown_block_keys:
-        raise ValueError(
-            f"{prefix}.block has invalid keys: {', '.join(unknown_block_keys)}"
-        )
-
-    if "description" in block_cfg:
-        val = block_cfg["description"]
-        if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.block.description must be a boolean")
-        result["include_descriptions"] = val
-
-    if "comments" in block_cfg:
-        val = block_cfg["comments"]
-        if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.block.comments must be a boolean")
-        result["include_comments"] = val
-
-    if "link-image-desc" in block_cfg:
-        val = block_cfg["link-image-desc"]
-        if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.block.link-image-desc must be a boolean")
-        result["include_link_image_descriptions"] = val
-
-    if "pdf-content" in block_cfg:
-        val = block_cfg["pdf-content"]
-        if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.block.pdf-content must be a boolean")
-        result["include_pdf_content"] = val
-
-    if "media-desc" in block_cfg:
-        val = block_cfg["media-desc"]
-        if not isinstance(val, bool):
-            raise ValueError(f"{prefix}.block.media-desc must be a boolean")
-        result["include_media_descriptions"] = val
-
-    if "recurse-users" in raw:
-        val = raw["recurse-users"]
-        if isinstance(val, str):
-            val_lower = val.lower().strip()
-            if val_lower == "all":
-                result["recurse_users"] = None
-            elif val_lower in ("self", "author", "owner"):
-                result["recurse_users"] = {val_lower}
-            else:
-                result["recurse_users"] = {val_lower}
-        elif isinstance(val, list):
-            result["recurse_users"] = {str(v).strip().lower() for v in val if v}
-        else:
-            raise ValueError(
-                f"{prefix}.recurse-users must be a string or list of strings"
-            )
-
-    return result if result else None
+    return dict(raw)
 
 
-def _resolve_arena_config(cfg: dict[str, Any]) -> dict | None:
-    return _parse_arena_config_mapping(cfg.get("arena"), prefix="config.arena")
+def _resolve_plugin_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    plugin_names = _loaded_plugin_name_set()
+    if not plugin_names:
+        return None
 
-
-def _merge_arena_overrides(*overrides: dict[str, Any] | None) -> dict[str, Any] | None:
     merged: dict[str, Any] = {}
-    for item in overrides:
-        if item:
-            merged.update(item)
-    return merged or None
-
-
-def _arena_overrides_cache_key(
-    overrides: dict[str, Any] | None,
-) -> tuple[Any, ...] | None:
-    if not overrides:
-        return None
-
-    normalized: list[tuple[str, Any]] = []
-    for key, value in sorted(overrides.items()):
-        if isinstance(value, set):
-            normalized.append((key, tuple(sorted(value))))
-        else:
-            normalized.append((key, value))
-    return tuple(normalized)
-
-
-def _parse_iso_timestamp(value: Any) -> datetime | None:
-    return parse_timestamp_or_duration_value(value)
-
-
-def _parse_atproto_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise ValueError(f"{prefix} must be a mapping")
-
-    allowed_keys = {
-        "max-items",
-        "thread-depth",
-        "post-ancestors",
-        "quote-depth",
-        "max-replies",
-        "reply-quote-depth",
-        "replies",
-        "reposts",
-        "likes",
-        "created-after",
-        "created-before",
-        "include-media-descriptions",
-        "include-embed-media-descriptions",
-        "media-mode",
-        "include-lineage",
-    }
-    unknown_keys = sorted(str(key) for key in raw.keys() if key not in allowed_keys)
-    if unknown_keys:
-        raise ValueError(f"{prefix} has invalid keys: {', '.join(unknown_keys)}")
-
-    result: dict[str, Any] = {}
-
-    if "max-items" in raw:
-        value = raw["max-items"]
-        if isinstance(value, int) and not isinstance(value, bool):
-            if value <= 0:
-                raise ValueError(f"{prefix}.max-items must be >= 1 or 'all'")
-            result["max_items"] = value
-        elif isinstance(value, str) and value.strip().lower() == "all":
-            result["max_items"] = "all"
-        else:
-            raise ValueError(f"{prefix}.max-items must be a positive integer or 'all'")
-
-    if "thread-depth" in raw:
-        value = raw["thread-depth"]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"{prefix}.thread-depth must be >= 0")
-        result["thread_depth"] = value
-
-    if "post-ancestors" in raw:
-        value = raw["post-ancestors"]
-        if isinstance(value, int) and not isinstance(value, bool):
-            if value < 0:
-                raise ValueError(f"{prefix}.post-ancestors must be >= 0 or 'all'")
-            result["post_ancestors"] = value
-        elif isinstance(value, str) and value.strip().lower() == "all":
-            result["post_ancestors"] = "all"
-        else:
-            raise ValueError(
-                f"{prefix}.post-ancestors must be a non-negative integer or 'all'"
-            )
-
-    if "quote-depth" in raw:
-        value = raw["quote-depth"]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"{prefix}.quote-depth must be >= 0")
-        result["quote_depth"] = value
-
-    if "max-replies" in raw:
-        value = raw["max-replies"]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"{prefix}.max-replies must be >= 0")
-        result["max_replies"] = value
-
-    if "reply-quote-depth" in raw:
-        value = raw["reply-quote-depth"]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"{prefix}.reply-quote-depth must be >= 0")
-        result["reply_quote_depth"] = value
-
-    for config_key, result_key in (
-        ("replies", "replies_filter"),
-        ("reposts", "reposts_filter"),
-        ("likes", "likes_filter"),
-    ):
-        if config_key not in raw:
-            continue
-        value = raw[config_key]
-        if not isinstance(value, str) or value.strip().lower() not in {
-            "include",
-            "exclude",
-            "only",
-        }:
-            raise ValueError(
-                f"{prefix}.{config_key} must be one of: include, exclude, only"
-            )
-        result[result_key] = value.strip().lower()
-    only_modes = [
-        mode
-        for mode in (
-            result.get("replies_filter"),
-            result.get("reposts_filter"),
-            result.get("likes_filter"),
-        )
-        if mode == "only"
-    ]
-    if len(only_modes) > 1:
-        raise ValueError(
-            f"{prefix} can set at most one of replies/reposts/likes to 'only'"
-        )
-
-    for config_key, result_key in (
-        ("created-after", "created_after"),
-        ("created-before", "created_before"),
-    ):
-        if config_key not in raw:
-            continue
-        value = raw[config_key]
-        parsed = _parse_iso_timestamp(value)
-        if parsed is None:
-            raise ValueError(
-                f"{prefix}.{config_key} is not a valid timestamp "
-                "(ISO, epoch, or relative duration)"
-            )
-        result[result_key] = parsed
-
-    created_after = result.get("created_after")
-    created_before = result.get("created_before")
-    if (
-        isinstance(created_after, datetime)
-        and isinstance(created_before, datetime)
-        and created_after > created_before
-    ):
-        raise ValueError(f"{prefix}.created-after must be <= {prefix}.created-before")
-
-    if "include-media-descriptions" in raw:
-        value = raw["include-media-descriptions"]
-        if not isinstance(value, bool):
-            raise ValueError(f"{prefix}.include-media-descriptions must be a boolean")
-        result["include_media_descriptions"] = value
-
-    if "include-embed-media-descriptions" in raw:
-        value = raw["include-embed-media-descriptions"]
-        if not isinstance(value, bool):
-            raise ValueError(
-                f"{prefix}.include-embed-media-descriptions must be a boolean"
-            )
-        result["include_embed_media_descriptions"] = value
-
-    if "media-mode" in raw:
-        value = raw["media-mode"]
-        if not isinstance(value, str) or value.strip().lower() not in {
-            "describe",
-            "transcribe",
-        }:
-            raise ValueError(
-                f"{prefix}.media-mode must be one of: describe, transcribe"
-            )
-        result["media_mode"] = value.strip().lower()
-
-    if "include-lineage" in raw:
-        value = raw["include-lineage"]
-        if not isinstance(value, bool):
-            raise ValueError(f"{prefix}.include-lineage must be a boolean")
-        result["include_lineage"] = value
-
-    return result or None
-
-
-def _resolve_atproto_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
-    return _parse_atproto_config_mapping(cfg.get("atproto"), prefix="config.atproto")
-
-
-def _merge_atproto_overrides(
-    *overrides: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    merged: dict[str, Any] = {}
-    for item in overrides:
-        if item:
-            merged.update(item)
-    return merged or None
-
-
-def _atproto_overrides_cache_key(
-    overrides: dict[str, Any] | None,
-) -> tuple[Any, ...] | None:
-    if not overrides:
-        return None
-    return tuple((key, value) for key, value in sorted(overrides.items()))
-
-
-def _parse_soundcloud_config_mapping(raw: Any, *, prefix: str) -> dict[str, Any] | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise ValueError(f"{prefix} must be a mapping")
-
-    allowed_keys = {"max-items", "artist", "comments", "media"}
-    unknown_keys = sorted(str(key) for key in raw.keys() if key not in allowed_keys)
-    if unknown_keys:
-        raise ValueError(f"{prefix} has invalid keys: {', '.join(unknown_keys)}")
-
-    result: dict[str, Any] = {}
-
-    if "max-items" in raw:
-        value = raw.get("max-items")
-        if isinstance(value, int) and not isinstance(value, bool):
-            if value <= 0:
-                raise ValueError(f"{prefix}.max-items must be >= 1 or 'all'")
-            result["max_items"] = value
-        elif isinstance(value, str) and value.strip().lower() == "all":
-            result["max_items"] = "all"
-        else:
-            raise ValueError(f"{prefix}.max-items must be a positive integer or 'all'")
-
-    artist_cfg = raw.get("artist")
-    if artist_cfg is not None:
-        if not isinstance(artist_cfg, dict):
-            raise ValueError(f"{prefix}.artist must be a mapping")
-        allowed_artist_keys = {"tracks", "playlists", "reposts"}
-        unknown_artist = sorted(
-            str(key) for key in artist_cfg.keys() if key not in allowed_artist_keys
-        )
-        if unknown_artist:
-            raise ValueError(
-                f"{prefix}.artist has invalid keys: {', '.join(unknown_artist)}"
-            )
-        for config_key, result_key in (
-            ("tracks", "artist_tracks_filter"),
-            ("playlists", "artist_playlists_filter"),
-            ("reposts", "artist_reposts_filter"),
-        ):
-            if config_key not in artist_cfg:
+    plugins_cfg = cfg.get("plugins")
+    if plugins_cfg is not None:
+        if not isinstance(plugins_cfg, dict):
+            raise ValueError("'config.plugins' must be a mapping")
+        for plugin_name in plugin_names:
+            if plugin_name not in plugins_cfg:
                 continue
-            value = artist_cfg.get(config_key)
-            if not isinstance(value, str) or value.strip().lower() not in {
-                "include",
-                "exclude",
-                "only",
-            }:
-                raise ValueError(
-                    f"{prefix}.artist.{config_key} must be one of: include, exclude, only"
-                )
-            result[result_key] = value.strip().lower()
-
-        only_modes = [
-            mode
-            for mode in (
-                result.get("artist_tracks_filter"),
-                result.get("artist_playlists_filter"),
-                result.get("artist_reposts_filter"),
+            parsed = _parse_plugin_config_value(
+                plugins_cfg.get(plugin_name),
+                prefix=f"config.plugins.{plugin_name}",
             )
-            if mode == "only"
-        ]
-        if len(only_modes) > 1:
-            raise ValueError(
-                f"{prefix}.artist can set at most one of tracks/playlists/reposts to 'only'"
-            )
+            if parsed is not None:
+                merged[plugin_name] = parsed
 
-    comments_cfg = raw.get("comments")
-    if comments_cfg is not None:
-        if not isinstance(comments_cfg, dict):
-            raise ValueError(f"{prefix}.comments must be a mapping")
-        allowed_comment_keys = {"enabled", "max-items", "sort", "nesting-depth"}
-        unknown_comments = sorted(
-            str(key) for key in comments_cfg.keys() if key not in allowed_comment_keys
+    for plugin_name in plugin_names:
+        if plugin_name not in cfg:
+            continue
+        parsed = _parse_plugin_config_value(
+            cfg.get(plugin_name),
+            prefix=f"config.{plugin_name}",
         )
-        if unknown_comments:
-            raise ValueError(
-                f"{prefix}.comments has invalid keys: {', '.join(unknown_comments)}"
+        if parsed is not None:
+            merged[plugin_name] = parsed
+        else:
+            merged.pop(plugin_name, None)
+
+    return merged or None
+
+
+def _parse_plugin_config_mapping(
+    raw: Any,
+    *,
+    prefix: str,
+) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{prefix} must be a mapping")
+    plugin_names = _loaded_plugin_name_set()
+    if not plugin_names:
+        return None
+
+    result: dict[str, Any] = {}
+    plugins_block = raw.get("plugins")
+    if plugins_block is not None:
+        if not isinstance(plugins_block, dict):
+            raise ValueError(f"{prefix}.plugins must be a mapping")
+        for plugin_name in plugin_names:
+            if plugin_name not in plugins_block:
+                continue
+            parsed = _parse_plugin_config_value(
+                plugins_block.get(plugin_name),
+                prefix=f"{prefix}.plugins.{plugin_name}",
             )
+            if parsed is not None:
+                result[plugin_name] = parsed
 
-        if "enabled" in comments_cfg:
-            value = comments_cfg.get("enabled")
-            if not isinstance(value, bool):
-                raise ValueError(f"{prefix}.comments.enabled must be a boolean")
-            result["include_comments"] = value
-
-        if "max-items" in comments_cfg:
-            value = comments_cfg.get("max-items")
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ValueError(f"{prefix}.comments.max-items must be >= 1")
-            result["comments_max_items"] = value
-
-        if "sort" in comments_cfg:
-            value = comments_cfg.get("sort")
-            if not isinstance(value, str) or value.strip().lower() not in {
-                "created-desc",
-                "created-asc",
-                "track-desc",
-                "track-asc",
-            }:
-                raise ValueError(
-                    f"{prefix}.comments.sort must be one of: created-desc, created-asc, track-desc, track-asc"
-                )
-            result["comments_sort"] = value.strip().lower()
-
-        if "nesting-depth" in comments_cfg:
-            value = comments_cfg.get("nesting-depth")
-            if (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
-                or value > 1
-            ):
-                raise ValueError(f"{prefix}.comments.nesting-depth must be 0 or 1")
-            result["comments_nesting_depth"] = value
-
-    media_cfg = raw.get("media")
-    if media_cfg is not None:
-        if not isinstance(media_cfg, dict):
-            raise ValueError(f"{prefix}.media must be a mapping")
-        allowed_media_keys = {"describe-artwork", "mode"}
-        unknown_media = sorted(
-            str(key) for key in media_cfg.keys() if key not in allowed_media_keys
+    for plugin_name in plugin_names:
+        if plugin_name not in raw:
+            continue
+        parsed = _parse_plugin_config_value(
+            raw.get(plugin_name),
+            prefix=f"{prefix}.{plugin_name}",
         )
-        if unknown_media:
-            raise ValueError(
-                f"{prefix}.media has invalid keys: {', '.join(unknown_media)}"
-            )
-
-        if "describe-artwork" in media_cfg:
-            value = media_cfg.get("describe-artwork")
-            if not isinstance(value, bool):
-                raise ValueError(f"{prefix}.media.describe-artwork must be a boolean")
-            result["include_artwork_descriptions"] = value
-
-        if "mode" in media_cfg:
-            value = media_cfg.get("mode")
-            if not isinstance(value, str) or value.strip().lower() not in {"describe"}:
-                raise ValueError(f"{prefix}.media.mode must be 'describe'")
-            result["media_mode"] = value.strip().lower()
+        if parsed is not None:
+            result[plugin_name] = parsed
+        else:
+            result.pop(plugin_name, None)
 
     return result or None
 
 
-def _resolve_soundcloud_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
-    return _parse_soundcloud_config_mapping(
-        cfg.get("soundcloud"),
-        prefix="config.soundcloud",
-    )
-
-
-def _merge_soundcloud_overrides(
+def _merge_plugin_overrides(
     *overrides: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     merged: dict[str, Any] = {}
-    for item in overrides:
-        if item:
-            merged.update(item)
+    for mapping in overrides:
+        if not mapping:
+            continue
+        for plugin_name, plugin_overrides in mapping.items():
+            if not isinstance(plugin_overrides, dict):
+                raise ValueError(f"plugin override '{plugin_name}' must be a mapping")
+            current = merged.get(plugin_name)
+            if current is None:
+                merged[plugin_name] = dict(plugin_overrides)
+            else:
+                current.update(plugin_overrides)
     return merged or None
 
 
-def _soundcloud_overrides_cache_key(
+def _freeze_plugin_override_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(
+            (str(key), _freeze_plugin_override_value(item))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_plugin_override_value(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_plugin_override_value(item) for item in value))
+    if isinstance(value, datetime):
+        return ("datetime", value.isoformat())
+    if isinstance(value, timedelta):
+        return ("timedelta", int(value.total_seconds()))
+    return value
+
+
+def _plugin_overrides_cache_key(
     overrides: dict[str, Any] | None,
 ) -> tuple[Any, ...] | None:
     if not overrides:
         return None
-    return tuple((key, value) for key, value in sorted(overrides.items()))
-
-
-def _resolve_discord_config(cfg: dict[str, Any]) -> dict | None:
-    return parse_discord_config_mapping(cfg.get("discord"), prefix="config.discord")
-
-
-def _merge_discord_overrides(
-    *overrides: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    return merge_discord_overrides(*overrides)
-
-
-def _discord_overrides_cache_key(
-    overrides: dict[str, Any] | None,
-) -> tuple[Any, ...] | None:
-    return discord_overrides_cache_key(overrides)
-
-
-def _discord_settings_cache_key(settings: Any) -> tuple[Any, ...]:
-    return discord_settings_cache_key(settings)
-
-
-def _atproto_settings_cache_key(settings: Any) -> tuple[Any, ...]:
-    return atproto_settings_cache_key(settings)
-
-
-def _soundcloud_settings_cache_key(settings: Any) -> tuple[Any, ...]:
-    return soundcloud_settings_cache_key(settings)
-
-
-def _arena_settings_cache_key(settings: Any) -> tuple[Any, ...]:
-    recurse_users = settings.recurse_users
-    recurse_key: tuple[str, ...] | None
-    if recurse_users is None:
-        recurse_key = None
-    else:
-        recurse_key = tuple(sorted(str(v) for v in recurse_users))
-    return (
-        settings.max_depth,
-        settings.sort_order,
-        settings.max_blocks_per_channel,
-        settings.include_descriptions,
-        settings.include_comments,
-        settings.include_link_image_descriptions,
-        settings.include_pdf_content,
-        settings.include_media_descriptions,
-        recurse_key,
+    return tuple(
+        (name, _freeze_plugin_override_value(value))
+        for name, value in sorted(overrides.items())
     )
+
+
+def _plugin_target_from_spec(raw_spec: str) -> str:
+    spec = os.path.expanduser(raw_spec)
+    opts = parse_target_spec(spec)
+    target = opts.get("target", spec)
+    return target if isinstance(target, str) else spec
+
+
+def _manifest_plugin_providers(components: list[dict[str, Any]]) -> set[str]:
+    providers: set[str] = set()
+    for comp in components:
+        files = comp.get("files")
+        if not files or not isinstance(files, list):
+            continue
+        for file_spec in files:
+            raw_spec, _ = coerce_file_spec(file_spec)
+            descriptor = classify_plugin_target(_plugin_target_from_spec(raw_spec))
+            if not isinstance(descriptor, dict):
+                continue
+            provider = descriptor.get("provider")
+            if isinstance(provider, str) and provider:
+                providers.add(provider)
+    return providers
 
 
 def _queue_agent_files(
@@ -1839,105 +1221,6 @@ def _manifest_has_local_sources(components: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _manifest_has_arena_channels(components: list[dict[str, Any]]) -> bool:
-    for comp in components:
-        files = comp.get("files")
-        if not files or not isinstance(files, list):
-            continue
-        for file_spec in files:
-            raw_spec, _ = coerce_file_spec(file_spec)
-            spec = os.path.expanduser(raw_spec)
-            if not is_http_url(spec):
-                continue
-            opts = parse_target_spec(spec)
-            target = opts.get("target", spec)
-            if is_arena_channel_url(target):
-                return True
-    return False
-
-
-def _manifest_has_atproto_sources(components: list[dict[str, Any]]) -> bool:
-    for comp in components:
-        files = comp.get("files")
-        if not files or not isinstance(files, list):
-            continue
-        for file_spec in files:
-            raw_spec, _ = coerce_file_spec(file_spec)
-            spec = os.path.expanduser(raw_spec)
-            if is_atproto_url(spec):
-                return True
-            if not is_http_url(spec):
-                continue
-            opts = parse_target_spec(spec)
-            target = opts.get("target", spec)
-            if is_atproto_url(target):
-                return True
-    return False
-
-
-def _atproto_target_kind_from_spec(raw_spec: str) -> str | None:
-    spec = os.path.expanduser(raw_spec)
-    target = spec
-    if is_http_url(spec):
-        opts = parse_target_spec(spec)
-        target_candidate = opts.get("target", spec)
-        target = target_candidate if isinstance(target_candidate, str) else spec
-    parsed = parse_atproto_target(target)
-    if parsed is None:
-        return None
-    return parsed.kind
-
-
-def _manifest_atproto_target_kinds(components: list[dict[str, Any]]) -> set[str]:
-    kinds: set[str] = set()
-    for comp in components:
-        files = comp.get("files")
-        if not files or not isinstance(files, list):
-            continue
-        for file_spec in files:
-            raw_spec, _ = coerce_file_spec(file_spec)
-            kind = _atproto_target_kind_from_spec(raw_spec)
-            if kind:
-                kinds.add(kind)
-    return kinds
-
-
-def _manifest_has_discord_channels(components: list[dict[str, Any]]) -> bool:
-    for comp in components:
-        files = comp.get("files")
-        if not files or not isinstance(files, list):
-            continue
-        for file_spec in files:
-            raw_spec, _ = coerce_file_spec(file_spec)
-            spec = os.path.expanduser(raw_spec)
-            if not is_http_url(spec):
-                continue
-            opts = parse_target_spec(spec)
-            target = opts.get("target", spec)
-            if is_discord_url(target):
-                return True
-    return False
-
-
-def _manifest_has_soundcloud_sources(components: list[dict[str, Any]]) -> bool:
-    for comp in components:
-        files = comp.get("files")
-        if not files or not isinstance(files, list):
-            continue
-        for file_spec in files:
-            raw_spec, _ = coerce_file_spec(file_spec)
-            spec = os.path.expanduser(raw_spec)
-            if is_soundcloud_url(spec):
-                return True
-            if not is_http_url(spec):
-                continue
-            opts = parse_target_spec(spec)
-            target = opts.get("target", spec)
-            if is_soundcloud_url(target):
-                return True
-    return False
-
-
 def _has_explicit_scheme(spec: str) -> bool:
     if looks_like_windows_drive(spec):
         return False
@@ -1949,9 +1232,7 @@ def _is_external_spec(raw_spec: str) -> bool:
     target = parse_target_spec(spec).get("target", spec)
     if not isinstance(target, str):
         target = spec
-    if is_atproto_url(target):
-        return True
-    if is_soundcloud_url(target):
+    if classify_plugin_target(target) is not None:
         return True
     if is_http_url(target):
         return True
@@ -2109,10 +1390,7 @@ def _resolve_external_items_via_refs(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
-    arena_overrides: dict | None = None,
-    atproto_overrides: dict[str, Any] | None = None,
-    discord_overrides: dict | None = None,
-    soundcloud_overrides: dict[str, Any] | None = None,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> list[ResolvedItem]:
     refs = create_file_references(
         [target],
@@ -2122,10 +1400,7 @@ def _resolve_external_items_via_refs(
         use_cache=use_cache,
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
-        arena_overrides=arena_overrides,
-        atproto_overrides=atproto_overrides,
-        discord_overrides=discord_overrides,
-        soundcloud_overrides=soundcloud_overrides,
+        plugin_overrides=plugin_overrides,
     )["refs"]
 
     plugin_refs = [ref for ref in refs if isinstance(ref, PluginReference)]
@@ -2220,11 +1495,7 @@ def _resolve_spec_items(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     force_git: bool = False,
-    arena_overrides: dict | None = None,
-    atproto_overrides: dict[str, Any] | None = None,
-    discord_overrides: dict | None = None,
-    soundcloud_overrides: dict[str, Any] | None = None,
-    group_atproto_by_kind: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
     spec_opts = parse_target_spec(spec)
@@ -2287,10 +1558,7 @@ def _resolve_spec_items(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
-            arena_overrides=arena_overrides,
-            atproto_overrides=atproto_overrides,
-            discord_overrides=discord_overrides,
-            soundcloud_overrides=soundcloud_overrides,
+            plugin_overrides=plugin_overrides,
         )
 
     tgt = parse_git_target(target)
@@ -2304,10 +1572,7 @@ def _resolve_spec_items(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
-            arena_overrides=arena_overrides,
-            atproto_overrides=atproto_overrides,
-            discord_overrides=discord_overrides,
-            soundcloud_overrides=soundcloud_overrides,
+            plugin_overrides=plugin_overrides,
         )
 
     base = "" if os.path.isabs(target) else base_dir
@@ -2604,8 +1869,6 @@ def _build_identity_key(
         item.context_subpath if item.source_type.startswith("plugin:") else None,
         item.plugin_name if item.source_type.startswith("plugin:") else None,
         item.plugin_dedupe_key if item.source_type.startswith("plugin:") else None,
-        item.atproto_scope_id if item.source_type == "atproto" else None,
-        item.soundcloud_scope_id if item.source_type == "soundcloud" else None,
         ranges_key,
         symbols_key,
     )
@@ -2789,12 +2052,12 @@ def _build_manifest_file_entry(
     comment: str | None,
     extras: dict[str, Any],
 ) -> dict[str, Any] | str:
+    plugin_target = classify_plugin_target(item.manifest_spec)
     is_url = (
         item.source_type == "http"
         or item.source_type.startswith("plugin:")
         or is_http_url(item.manifest_spec)
-        or is_atproto_url(item.manifest_spec)
-        or is_soundcloud_url(item.manifest_spec)
+        or plugin_target is not None
     )
     key = "url" if is_url else "path"
     entry = {key: item.manifest_spec}
@@ -2917,14 +2180,9 @@ def _build_normalized_config(
     base_dir: str,
     *,
     include_root: bool,
-    include_arena_max_depth: bool,
-    arena_overrides: dict[str, Any] | None,
-    include_atproto_defaults: bool,
-    atproto_overrides: dict[str, Any] | None,
-    include_discord_defaults: bool,
-    discord_overrides: dict[str, Any] | None,
-    include_soundcloud_defaults: bool,
-    soundcloud_overrides: dict[str, Any] | None,
+    plugin_overrides: dict[str, Any] | None,
+    include_plugin_defaults: bool,
+    manifest_plugin_providers: set[str] | None,
 ) -> dict[str, Any]:
     normalized = dict(cfg)
     if include_root:
@@ -2949,157 +2207,22 @@ def _build_normalized_config(
         normalized["context"] = context
     else:
         normalized.pop("context", None)
-    if include_arena_max_depth:
-        from ..references.arena import build_arena_settings
 
-        arena_settings = build_arena_settings(arena_overrides)
-        arena = dict(cfg.get("arena") or {})
-        arena.pop("max-depth", None)
-        arena.pop("sort", None)
-        arena["recurse-depth"] = arena_settings.max_depth
-        arena["block-sort"] = arena_settings.sort_order
-        if arena_settings.max_blocks_per_channel is None:
-            arena.pop("max-blocks-per-channel", None)
-        else:
-            arena["max-blocks-per-channel"] = arena_settings.max_blocks_per_channel
-        if arena_settings.connected_after:
-            arena["connected-after"] = (
-                arena_settings.connected_after.isoformat().replace("+00:00", "Z")
+    if include_plugin_defaults:
+        providers_to_normalize = set(manifest_plugin_providers or set())
+        if plugin_overrides:
+            providers_to_normalize.update(plugin_overrides.keys())
+        for plugin_name in sorted(providers_to_normalize):
+            raw_mapping = None
+            if plugin_overrides and isinstance(plugin_overrides.get(plugin_name), dict):
+                raw_mapping = dict(plugin_overrides.get(plugin_name) or {})
+            normalized_value = normalize_manifest_plugin_config(
+                plugin_name, raw_mapping
             )
-        else:
-            arena.pop("connected-after", None)
-        if arena_settings.connected_before:
-            arena["connected-before"] = (
-                arena_settings.connected_before.isoformat().replace("+00:00", "Z")
-            )
-        else:
-            arena.pop("connected-before", None)
-        if arena_settings.created_after:
-            arena["created-after"] = arena_settings.created_after.isoformat().replace(
-                "+00:00", "Z"
-            )
-        else:
-            arena.pop("created-after", None)
-        if arena_settings.created_before:
-            arena["created-before"] = arena_settings.created_before.isoformat().replace(
-                "+00:00", "Z"
-            )
-        else:
-            arena.pop("created-before", None)
-        normalized["arena"] = arena
-    if include_atproto_defaults:
-        atproto_settings = build_atproto_settings(atproto_overrides)
-        atproto = dict(cfg.get("atproto") or {})
-        atproto["max-items"] = (
-            "all" if atproto_settings.max_items is None else atproto_settings.max_items
-        )
-        atproto["post-ancestors"] = (
-            "all"
-            if atproto_settings.post_ancestors is None
-            else atproto_settings.post_ancestors
-        )
-        atproto["thread-depth"] = atproto_settings.thread_depth
-        atproto["quote-depth"] = atproto_settings.quote_depth
-        atproto["max-replies"] = atproto_settings.max_replies
-        atproto["reply-quote-depth"] = atproto_settings.reply_quote_depth
-        atproto["replies"] = atproto_settings.replies_filter
-        atproto["reposts"] = atproto_settings.reposts_filter
-        atproto["likes"] = atproto_settings.likes_filter
-        if atproto_settings.created_after:
-            atproto["created-after"] = (
-                atproto_settings.created_after.isoformat().replace("+00:00", "Z")
-            )
-        else:
-            atproto.pop("created-after", None)
-        if atproto_settings.created_before:
-            atproto["created-before"] = (
-                atproto_settings.created_before.isoformat().replace("+00:00", "Z")
-            )
-        else:
-            atproto.pop("created-before", None)
-        atproto["include-media-descriptions"] = (
-            atproto_settings.include_media_descriptions
-        )
-        atproto["include-embed-media-descriptions"] = (
-            atproto_settings.include_embed_media_descriptions
-        )
-        atproto["media-mode"] = atproto_settings.media_mode
-        atproto["include-lineage"] = atproto_settings.include_lineage
-        normalized["atproto"] = atproto
-    if include_discord_defaults:
-        discord_settings = build_discord_settings(discord_overrides)
-        discord = dict(cfg.get("discord") or {})
-        window = dict(discord.get("window") or {})
-        media = dict(discord.get("media") or {})
-
-        discord["format"] = discord_settings.format
-        discord["include-system"] = discord_settings.include_system
-        discord["include-thread-starters"] = discord_settings.include_thread_starters
-        discord["expand-threads"] = discord_settings.expand_threads
-        discord["gap-threshold"] = _format_duration_for_manifest(
-            discord_settings.gap_threshold
-        )
-
-        window["before-messages"] = discord_settings.before_messages
-        window["after-messages"] = discord_settings.after_messages
-        window["around-messages"] = discord_settings.around_messages
-        window["message-context"] = discord_settings.message_context
-        window["channel-limit"] = discord_settings.channel_limit
-        if discord_settings.start:
-            window["start"] = discord_settings.start.isoformat().replace("+00:00", "Z")
-        if discord_settings.end:
-            window["end"] = discord_settings.end.isoformat().replace("+00:00", "Z")
-        if discord_settings.start_message_id:
-            window["start-message"] = discord_settings.start_message_id
-        if discord_settings.end_message_id:
-            window["end-message"] = discord_settings.end_message_id
-        if discord_settings.before_duration:
-            window["before-duration"] = _format_duration_for_manifest(
-                discord_settings.before_duration
-            )
-        if discord_settings.after_duration:
-            window["after-duration"] = _format_duration_for_manifest(
-                discord_settings.after_duration
-            )
-        if discord_settings.around_duration:
-            window["around-duration"] = _format_duration_for_manifest(
-                discord_settings.around_duration
-            )
-        discord["window"] = {k: v for k, v in window.items() if v is not None}
-
-        media["describe"] = discord_settings.include_media_descriptions
-        media["embed-media-describe"] = (
-            discord_settings.include_embed_media_descriptions
-        )
-        media["file-content"] = discord_settings.include_file_content
-        media["mode"] = discord_settings.media_mode
-        discord["media"] = media
-        normalized["discord"] = discord
-    if include_soundcloud_defaults:
-        soundcloud_settings = build_soundcloud_settings(soundcloud_overrides)
-        soundcloud = dict(cfg.get("soundcloud") or {})
-        artist = dict(soundcloud.get("artist") or {})
-        comments = dict(soundcloud.get("comments") or {})
-        media = dict(soundcloud.get("media") or {})
-
-        soundcloud["max-items"] = (
-            "all"
-            if soundcloud_settings.max_items is None
-            else soundcloud_settings.max_items
-        )
-        artist["tracks"] = soundcloud_settings.artist_tracks_filter
-        artist["playlists"] = soundcloud_settings.artist_playlists_filter
-        artist["reposts"] = soundcloud_settings.artist_reposts_filter
-        comments["enabled"] = soundcloud_settings.include_comments
-        comments["max-items"] = soundcloud_settings.comments_max_items
-        comments["sort"] = soundcloud_settings.comments_sort
-        comments["nesting-depth"] = soundcloud_settings.comments_nesting_depth
-        media["describe-artwork"] = soundcloud_settings.include_artwork_descriptions
-        media["mode"] = soundcloud_settings.media_mode
-        soundcloud["artist"] = artist
-        soundcloud["comments"] = comments
-        soundcloud["media"] = media
-        normalized["soundcloud"] = soundcloud
+            if normalized_value is None:
+                normalized.pop(plugin_name, None)
+                continue
+            normalized[plugin_name] = normalized_value
     return normalized
 
 

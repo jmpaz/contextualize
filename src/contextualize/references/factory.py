@@ -43,6 +43,7 @@ def create_file_references(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
     arena_overrides: dict | None = None,
     discord_overrides: dict | None = None,
     atproto_overrides: dict | None = None,
@@ -117,6 +118,18 @@ def create_file_references(
         else:
             expanded_all_paths.append(raw_path)
 
+    effective_plugin_overrides: dict[str, Any] = {}
+    if isinstance(plugin_overrides, dict):
+        effective_plugin_overrides.update(plugin_overrides)
+    for provider_name, provider_overrides in (
+        ("arena", arena_overrides),
+        ("discord", discord_overrides),
+        ("atproto", atproto_overrides),
+        ("soundcloud", soundcloud_overrides),
+    ):
+        if provider_overrides is not None:
+            effective_plugin_overrides.setdefault(provider_name, provider_overrides)
+
     for raw_path in expanded_all_paths:
         spec_opts = parse_target_spec(raw_path)
         target = spec_opts.get("target", raw_path)
@@ -134,12 +147,7 @@ def create_file_references(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
-            overrides={
-                "arena": arena_overrides,
-                "discord": discord_overrides,
-                "atproto": atproto_overrides,
-                "soundcloud": soundcloud_overrides,
-            },
+            overrides=effective_plugin_overrides,
         )
         if plugin_refs:
             file_references.extend(plugin_refs)

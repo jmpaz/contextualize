@@ -4,7 +4,7 @@ import sys
 from datetime import timedelta
 from typing import Any
 
-from .api import PluginContext, PluginDocument
+from .api import PluginContext, PluginDocument, PluginTargetDescriptor
 from .loader import get_loaded_plugins
 from .reference import PluginReference, PluginResolvedDocument
 
@@ -175,3 +175,88 @@ def resolve_plugin_references(
             for document in normalized_documents
         ]
     return []
+
+
+def _build_inspection_context(overrides: dict[str, Any] | None) -> PluginContext:
+    return _build_context(
+        format="raw",
+        label="relative",
+        label_suffix=None,
+        include_token_count=False,
+        token_target="cl100k_base",
+        inject=False,
+        depth=5,
+        use_cache=True,
+        cache_ttl=None,
+        refresh_cache=False,
+        overrides=overrides or {},
+    )
+
+
+def loaded_plugin_names() -> tuple[str, ...]:
+    return tuple(plugin.name for plugin in get_loaded_plugins())
+
+
+def normalize_manifest_plugin_config(
+    plugin_name: str,
+    raw_config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    plugin = next((p for p in get_loaded_plugins() if p.name == plugin_name), None)
+    if plugin is None:
+        return raw_config
+    if plugin.normalize_manifest_config is None:
+        return raw_config
+    try:
+        normalized = plugin.normalize_manifest_config(raw_config)
+    except Exception as exc:
+        raise ValueError(
+            f"plugin '{plugin_name}' normalize_manifest_config failed: {exc}"
+        ) from exc
+    if normalized is None:
+        return None
+    if not isinstance(normalized, dict):
+        raise ValueError(
+            f"plugin '{plugin_name}' normalize_manifest_config must return a mapping"
+        )
+    return dict(normalized)
+
+
+def classify_plugin_target(
+    target: str,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> PluginTargetDescriptor | None:
+    context = _build_inspection_context(overrides)
+    for plugin in get_loaded_plugins():
+        try:
+            matched = bool(plugin.can_resolve(target, context))
+        except Exception as exc:
+            _warn(f"plugin '{plugin.name}' can_resolve failed for '{target}': {exc}")
+            continue
+        if not matched:
+            continue
+
+        descriptor: PluginTargetDescriptor | None
+        if plugin.classify_target is None:
+            descriptor = {"provider": plugin.name, "is_external": True}
+        else:
+            try:
+                descriptor = plugin.classify_target(target, context)
+            except Exception as exc:
+                _warn(
+                    f"plugin '{plugin.name}' classify_target failed for '{target}': {exc}"
+                )
+                continue
+            if descriptor is None:
+                descriptor = {"provider": plugin.name, "is_external": True}
+            elif not isinstance(descriptor, dict):
+                _warn(
+                    f"plugin '{plugin.name}' classify_target returned non-mapping for '{target}'"
+                )
+                continue
+            else:
+                descriptor = dict(descriptor)
+                descriptor.setdefault("provider", plugin.name)
+                descriptor.setdefault("is_external", True)
+        return descriptor
+    return None

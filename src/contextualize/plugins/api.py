@@ -29,9 +29,18 @@ class PluginContext(TypedDict, total=False):
     overrides: dict[str, Any]
 
 
+class PluginTargetDescriptor(TypedDict, total=False):
+    provider: str
+    kind: str
+    is_external: bool
+    group_key: str
+
+
 CanResolveFn = Callable[[str, PluginContext], bool]
 ResolveFn = Callable[[str, PluginContext], list[PluginDocument]]
 RegisterAuthCommandFn = Callable[[Any], None]
+ClassifyTargetFn = Callable[[str, PluginContext], PluginTargetDescriptor | None]
+NormalizeManifestConfigFn = Callable[[dict[str, Any] | None], dict[str, Any] | None]
 
 
 @dataclass(frozen=True)
@@ -42,3 +51,5 @@ class LoadedPlugin:
     can_resolve: CanResolveFn
     resolve: ResolveFn
     register_auth_command: RegisterAuthCommandFn | None = None
+    classify_target: ClassifyTargetFn | None = None
+    normalize_manifest_config: NormalizeManifestConfigFn | None = None

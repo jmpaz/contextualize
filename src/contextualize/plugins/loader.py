@@ -32,6 +32,8 @@ def _validate_plugin_callables(
     can_resolve: Any,
     resolve: Any,
     register_auth_command: Any,
+    classify_target: Any,
+    normalize_manifest_config: Any,
     priority: int,
 ) -> LoadedPlugin | None:
     if not callable(can_resolve):
@@ -46,6 +48,20 @@ def _validate_plugin_callables(
             _warn(f"plugin '{name}' has non-callable register_auth_command ({origin})")
             return None
         auth_hook = register_auth_command
+    classify_hook = None
+    if classify_target is not None:
+        if not callable(classify_target):
+            _warn(f"plugin '{name}' has non-callable classify_target ({origin})")
+            return None
+        classify_hook = classify_target
+    normalize_hook = None
+    if normalize_manifest_config is not None:
+        if not callable(normalize_manifest_config):
+            _warn(
+                f"plugin '{name}' has non-callable normalize_manifest_config ({origin})"
+            )
+            return None
+        normalize_hook = normalize_manifest_config
     return LoadedPlugin(
         name=name,
         priority=priority,
@@ -53,6 +69,8 @@ def _validate_plugin_callables(
         can_resolve=can_resolve,
         resolve=resolve,
         register_auth_command=auth_hook,
+        classify_target=classify_hook,
+        normalize_manifest_config=normalize_hook,
     )
 
 
@@ -112,6 +130,10 @@ def _load_entrypoint_plugins() -> list[_PluginCandidate]:
             can_resolve=getattr(plugin_obj, "can_resolve", None),
             resolve=getattr(plugin_obj, "resolve", None),
             register_auth_command=getattr(plugin_obj, "register_auth_command", None),
+            classify_target=getattr(plugin_obj, "classify_target", None),
+            normalize_manifest_config=getattr(
+                plugin_obj, "normalize_manifest_config", None
+            ),
             priority=priority,
         )
         if loaded is not None:

@@ -10,7 +10,7 @@ from .helpers import (
     MARKITDOWN_PREFERRED_EXTENSIONS,
     resolve_symbol_ranges,
 )
-from .audio_transcription import is_audio_suffix, transcribe_audio_file
+from .audio_transcription import is_media_suffix, transcribe_media_file
 
 
 class FileReference:
@@ -74,12 +74,12 @@ class FileReference:
         suffix = Path(self.path).suffix.lower()
         if suffix in DISALLOWED_EXTENSIONS:
             raise ValueError(f"Unsupported file type: {self.path}")
-        if is_audio_suffix(suffix):
+        if is_media_suffix(suffix):
             try:
-                transcript = transcribe_audio_file(self.path)
+                transcript = transcribe_media_file(self.path)
             except Exception as e:
                 raise ValueError(
-                    f"Audio transcription failed for {self.path}: {e}"
+                    f"Media transcription failed for {self.path}: {e}"
                 ) from e
             self.file_content = self.original_file_content = transcript
             if self.inject:

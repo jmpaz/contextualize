@@ -17,12 +17,82 @@ _AUDIO_SUFFIX_TO_MIME: dict[str, str] = {
     ".flac": "audio/flac",
     ".aiff": "audio/aiff",
 }
+_VIDEO_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".mp4",
+        ".mov",
+        ".m4v",
+        ".webm",
+        ".mkv",
+        ".avi",
+        ".wmv",
+        ".flv",
+        ".mpeg",
+        ".mpg",
+    }
+)
+_VIDEO_CONTENT_TYPE_TO_SUFFIX: dict[str, str] = {
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/x-matroska": ".mkv",
+    "video/x-msvideo": ".avi",
+    "video/x-ms-wmv": ".wmv",
+    "video/mpeg": ".mpeg",
+}
 
 AUDIO_SUFFIXES: frozenset[str] = frozenset(_AUDIO_SUFFIX_TO_MIME)
+VIDEO_SUFFIXES: frozenset[str] = _VIDEO_SUFFIXES
 
 
 def is_audio_suffix(suffix: str) -> bool:
     return suffix.lower() in AUDIO_SUFFIXES
+
+
+def is_video_suffix(suffix: str) -> bool:
+    return suffix.lower() in VIDEO_SUFFIXES
+
+
+def is_media_suffix(suffix: str) -> bool:
+    return is_audio_suffix(suffix) or is_video_suffix(suffix)
+
+
+def transcribe_media_file(path: str | Path, *, timeout: float = 600) -> str:
+    media_path = Path(path)
+    suffix = media_path.suffix.lower()
+    if is_audio_suffix(suffix):
+        return transcribe_audio_file(media_path, timeout=timeout)
+    if is_video_suffix(suffix):
+        return _transcribe_video_file(media_path, timeout=timeout)
+    raise RuntimeError(
+        f"Unsupported media suffix for transcription: {suffix or '<none>'}"
+    )
+
+
+def transcribe_media_bytes(
+    data: bytes,
+    *,
+    filename: str,
+    content_type: str | None = None,
+    timeout: float = 600,
+) -> str:
+    kind = _infer_media_kind(filename=filename, content_type=content_type)
+    if kind == "audio":
+        return transcribe_audio_bytes(
+            data,
+            filename=filename,
+            content_type=content_type,
+            timeout=timeout,
+        )
+    if kind == "video":
+        suffix = Path(filename).suffix.lower()
+        if not suffix:
+            suffix = _video_suffix_from_content_type(content_type) or ".mp4"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = Path(tmpdir) / f"media{suffix}"
+            video_path.write_bytes(data)
+            return _transcribe_video_file(video_path, timeout=timeout)
+    raise RuntimeError("Unsupported media payload for transcription")
 
 
 def transcribe_audio_file(path: str | Path, *, timeout: float = 600) -> str:
@@ -54,6 +124,10 @@ def transcribe_audio_bytes(
     content_type: str | None = None,
     timeout: float = 600,
 ) -> str:
+    if not _is_whisper_configured():
+        raise RuntimeError(
+            "Whisper transcription requires WHISPER_API_BASE or WHISPER_API_KEY"
+        )
     import httpx
 
     api_base = os.environ.get("WHISPER_API_BASE", "https://api.openai.com/v1")
@@ -78,7 +152,10 @@ def transcribe_audio_bytes(
         raise RuntimeError(f"Whisper API error: {response.status_code} {response.text}")
 
     payload = response.json()
-    return _extract_transcription_text(payload)
+    text = _extract_transcription_text(payload)
+    if not text:
+        raise RuntimeError("Whisper API returned no transcription text")
+    return text
 
 
 def _guess_audio_content_type(filename: str) -> str:
@@ -89,6 +166,32 @@ def _guess_audio_content_type(filename: str) -> str:
     if guessed and guessed.startswith("audio/"):
         return guessed
     return "audio/mpeg"
+
+
+def _is_whisper_configured() -> bool:
+    return bool(
+        (os.environ.get("WHISPER_API_BASE") or "").strip()
+        or (os.environ.get("WHISPER_API_KEY") or "").strip()
+    )
+
+
+def _infer_media_kind(*, filename: str, content_type: str | None) -> str | None:
+    suffix = Path(filename).suffix.lower()
+    if is_audio_suffix(suffix):
+        return "audio"
+    if is_video_suffix(suffix):
+        return "video"
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    if normalized.startswith("audio/"):
+        return "audio"
+    if normalized.startswith("video/"):
+        return "video"
+    return None
+
+
+def _video_suffix_from_content_type(content_type: str | None) -> str | None:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    return _VIDEO_CONTENT_TYPE_TO_SUFFIX.get(normalized)
 
 
 def _extract_transcription_text(payload: Any) -> str:
@@ -120,6 +223,42 @@ def _should_retry_chunked_transcription(exc: RuntimeError) -> bool:
         return False
     message = str(exc)
     return message.startswith("Whisper API error: 5")
+
+
+def _transcribe_video_file(video_path: Path, *, timeout: float) -> str:
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("Video transcription requires ffmpeg in PATH")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        extracted_path = Path(tmpdir) / "audio.wav"
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video_path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(extracted_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(timeout, 120),
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            stdout = result.stdout.strip()
+            detail = stderr or stdout or "unknown error"
+            raise RuntimeError(f"ffmpeg video audio extraction failed: {detail}")
+        if not extracted_path.exists() or extracted_path.stat().st_size == 0:
+            raise RuntimeError("Video transcription failed: no audio stream found")
+        return transcribe_audio_file(extracted_path, timeout=timeout)
 
 
 def _transcribe_audio_file_in_chunks(audio_path: Path, *, timeout: float) -> str:
