@@ -7,15 +7,19 @@
 
 ## Installation
 
-```bash
-pip install contextualize
-```
-
-or with [uv](https://docs.astral.sh/uv/):
+Install the core CLI:
 
 ```bash
 uv tool install contextualize
 ```
+
+or install with the maintained plugin bundle:
+
+```bash
+uv tool install 'contextualize[plugins]'
+```
+
+The plugins extra installs provider plugins from [`jmpaz/cx-plugins`](https://github.com/jmpaz/cx-plugins).
 
 
 ## Commands
