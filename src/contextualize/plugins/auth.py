@@ -44,17 +44,39 @@ def _build_auth_commands(
 
 def _format_plugin_source(origin: str) -> str:
     if origin.startswith("entrypoint:"):
-        return f"package ({origin.replace('entrypoint:', '', 1)})"
-    return f"path ({origin})"
+        return origin.replace("entrypoint:", "", 1)
+    return origin
+
+
+def _plugin_name_width(plugins: tuple[LoadedPlugin, ...]) -> int:
+    return max((len(plugin.name) for plugin in plugins), default=0)
+
+
+def _render_plugin_line(plugin: LoadedPlugin, *, name_width: int) -> str:
+    return f"- {plugin.name:<{name_width}}  {_format_plugin_source(plugin.origin)}"
 
 
 def _render_installed_plugins(plugins: tuple[LoadedPlugin, ...]) -> tuple[str, ...]:
     if not plugins:
         return ("Installed plugins: none",)
+    name_width = _plugin_name_width(plugins)
     lines = ["Installed plugins:"]
     for plugin in plugins:
-        lines.append(f"- {plugin.name}: {_format_plugin_source(plugin.origin)}")
+        lines.append(_render_plugin_line(plugin, name_width=name_width))
     return tuple(lines)
+
+
+def format_plugin_source(origin: str) -> str:
+    return _format_plugin_source(origin)
+
+
+def render_installed_plugins(plugins: tuple[LoadedPlugin, ...]) -> tuple[str, ...]:
+    return _render_installed_plugins(plugins)
+
+
+def render_plugin_line(plugin: LoadedPlugin, plugins: tuple[LoadedPlugin, ...]) -> str:
+    name_width = max(_plugin_name_width(plugins), len(plugin.name))
+    return _render_plugin_line(plugin, name_width=name_width)
 
 
 def _echo_installed_plugins(plugins: tuple[LoadedPlugin, ...]) -> None:

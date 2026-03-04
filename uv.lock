@@ -553,7 +553,7 @@ plugins = [
 requires-dist = [
     { name = "aider-chat", specifier = ">=0.86.1" },
     { name = "anthropic", specifier = "==0.42.0" },
-    { name = "cx-plugins", marker = "extra == 'plugins'", git = "https://github.com/jmpaz/cx-plugins.git?rev=v0.1.1" },
+    { name = "cx-plugins", marker = "extra == 'plugins'", git = "https://github.com/jmpaz/cx-plugins.git?rev=v0.1.2" },
     { name = "markitdown", extras = ["all"], specifier = ">=0.1.4" },
     { name = "pathspec" },
     { name = "pyperclip", specifier = ">=1.8.2" },
@@ -617,7 +617,7 @@ wheels = [
 [[package]]
 name = "cx-plugins"
 version = "0.1.0"
-source = { git = "https://github.com/jmpaz/cx-plugins.git?rev=v0.1.1#011bfbc903766f3b0b3c528b1e1bc3eb2bcc2061" }
+source = { git = "https://github.com/jmpaz/cx-plugins.git?rev=v0.1.2#710097eae1a08aeceecf22c70cee3dee8d01a25f" }
 dependencies = [
     { name = "click" },
     { name = "cryptography" },

@@ -87,7 +87,7 @@ def test_auth_placeholder_lists_installed_plugins_and_sources(
     assert auth_result.exit_code == 0
     assert "No loaded plugins expose authentication handlers." in auth_result.output
     assert "Installed plugins:" in auth_result.output
-    assert "- arena: package (contextualize_plugins.arena:plugin)" in auth_result.output
+    assert "- arena  contextualize_plugins.arena:plugin" in auth_result.output
 
     missing_result = runner.invoke(cli.cli, ["auth", "arena"])
     assert missing_result.exit_code != 0
@@ -132,9 +132,7 @@ def test_external_plugin_registers_auth_command(monkeypatch, tmp_path: Path) -> 
     assert "demo auth ok" in auth_command.output
 
 
-def test_auth_placeholder_renders_package_plugin_source(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_auth_placeholder_renders_plugin_source(monkeypatch, tmp_path: Path) -> None:
     from contextualize import cli
     from contextualize.plugins import clear_loaded_plugins_cache
     from contextualize.plugins import loader as plugin_loader
@@ -157,7 +155,109 @@ def test_auth_placeholder_renders_package_plugin_source(
     runner = CliRunner()
     auth_result = runner.invoke(cli.cli, ["auth"])
     assert auth_result.exit_code == 0
-    assert (
-        "- pkg-arena: package (contextualize_plugins.arena:plugin)"
-        in auth_result.output
+    assert "- pkg-arena  contextualize_plugins.arena:plugin" in auth_result.output
+
+
+def test_plugins_command_without_plugins(monkeypatch, tmp_path: Path) -> None:
+    from contextualize import cli
+    from contextualize.plugins import clear_loaded_plugins_cache
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    clear_loaded_plugins_cache()
+
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["plugins"])
+    assert result.exit_code == 0
+    assert "Installed plugins: none" in result.output
+
+
+def test_plugins_command_lists_installed_plugins_and_sources(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from contextualize import cli
+    from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
+
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [
+            _entrypoint(
+                entrypoint_name="pkg-arena",
+                entrypoint_value="contextualize_plugins.arena:plugin",
+                plugin_name="arena",
+                register_auth=False,
+            ),
+            _entrypoint(
+                entrypoint_name="pkg-youtube",
+                entrypoint_value="contextualize_plugins.youtube:plugin",
+                plugin_name="youtube",
+                register_auth=False,
+            ),
+        ],
     )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    clear_loaded_plugins_cache()
+
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["plugins"])
+    assert result.exit_code == 0
+    assert "Installed plugins:" in result.output
+    assert "- arena    contextualize_plugins.arena:plugin" in result.output
+    assert "- youtube  contextualize_plugins.youtube:plugin" in result.output
+
+
+def test_plugins_command_missing_plugin_lists_installed_plugins(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from contextualize import cli
+    from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
+
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [
+            _entrypoint(
+                entrypoint_name="pkg-arena",
+                entrypoint_value="contextualize_plugins.arena:plugin",
+                plugin_name="arena",
+                register_auth=False,
+            )
+        ],
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    clear_loaded_plugins_cache()
+
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["plugins", "missing"])
+    assert result.exit_code != 0
+    assert "Plugin 'missing' is not installed." in result.output
+    assert "Installed plugins:" in result.output
+    assert "- arena  contextualize_plugins.arena:plugin" in result.output
+
+
+def test_plugins_command_renders_single_plugin(monkeypatch, tmp_path: Path) -> None:
+    from contextualize import cli
+    from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
+
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [
+            _entrypoint(
+                entrypoint_name="pkg-arena",
+                entrypoint_value="contextualize_plugins.arena:plugin",
+                plugin_name="arena",
+                register_auth=False,
+            )
+        ],
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    clear_loaded_plugins_cache()
+
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["plugins", "arena"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "- arena  contextualize_plugins.arena:plugin"

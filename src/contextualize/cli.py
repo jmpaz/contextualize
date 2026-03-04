@@ -15,7 +15,7 @@ from .utils import add_prompt_wrappers, count_tokens, wrap_text
 COMMAND_GROUPS = (
     ("Sources", ("cat", "map", "shell", "paste")),
     ("Manifest", ("hydrate", "payload")),
-    ("Auth", ("auth",)),
+    ("Plugins", ("plugins", "auth")),
 )
 HELP_COL_MAX = 30
 HELP_COL_SPACING = 2
@@ -274,7 +274,16 @@ def preprocess_args():
     if len(sys.argv) < 2:
         return
 
-    subcommands = {"payload", "cat", "map", "shell", "paste", "hydrate", "auth"}
+    subcommands = {
+        "payload",
+        "cat",
+        "map",
+        "shell",
+        "paste",
+        "hydrate",
+        "plugins",
+        "auth",
+    }
 
     # options that should be moved / which take values
     forwardable = {
@@ -404,7 +413,16 @@ preprocess_args()
 
 @click.group(
     cls=OrderedGroup,
-    commands_order=["cat", "map", "shell", "paste", "hydrate", "payload", "auth"],
+    commands_order=[
+        "cat",
+        "map",
+        "shell",
+        "paste",
+        "hydrate",
+        "payload",
+        "plugins",
+        "auth",
+    ],
     command_groups=COMMAND_GROUPS,
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -892,6 +910,29 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         if trace_output:
             click.echo("\n-----\n")
             click.echo(trace_output)
+
+
+@cli.command("plugins")
+@click.argument("plugin_name", required=False)
+def plugins_command(plugin_name: str | None = None) -> None:
+    """List loaded plugins and their sources."""
+    from .plugins.auth import render_installed_plugins, render_plugin_line
+    from .plugins.loader import get_loaded_plugins
+
+    plugins = get_loaded_plugins()
+    if plugin_name is None:
+        for line in render_installed_plugins(plugins):
+            click.echo(line)
+        return
+
+    plugin = next((loaded for loaded in plugins if loaded.name == plugin_name), None)
+    if plugin is None:
+        click.echo(f"Plugin '{plugin_name}' is not installed.")
+        for line in render_installed_plugins(plugins):
+            click.echo(line)
+        raise click.exceptions.Exit(1)
+
+    click.echo(render_plugin_line(plugin, plugins))
 
 
 @cli.command("payload")
