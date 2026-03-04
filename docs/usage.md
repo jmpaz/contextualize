@@ -38,16 +38,13 @@ contextualize --prompt "what has changed in this patch?" shell "git diff --stage
 
 ### `auth`
 
-Provider authentication helpers, generally unnecessary for public data.
+Plugin-provided authentication helpers.
 
 ```
 contextualize auth PROVIDER [provider options]
 ```
 
-Providers:
-- `arena` (`--token`, `--logout`)
-- `atproto` (`--timeout`, `--no-browser`, `--logout`)
-- `soundcloud` (`--timeout`, `--no-browser`, `--logout`)
+Run `contextualize auth` to list available handlers from loaded plugins.
 
 ### `cat`
 

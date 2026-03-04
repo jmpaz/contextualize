@@ -536,31 +536,32 @@ source = { editable = "." }
 dependencies = [
     { name = "aider-chat" },
     { name = "anthropic" },
-    { name = "cryptography" },
-    { name = "lexrpc" },
     { name = "markitdown", extra = ["all"] },
     { name = "pathspec" },
-    { name = "pyjwt" },
     { name = "pyperclip" },
     { name = "pyyaml" },
     { name = "requests" },
     { name = "tiktoken" },
 ]
 
+[package.optional-dependencies]
+plugins = [
+    { name = "cx-plugins" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aider-chat", specifier = ">=0.86.1" },
     { name = "anthropic", specifier = "==0.42.0" },
-    { name = "cryptography", specifier = ">=46.0.0" },
-    { name = "lexrpc", specifier = ">=2.1" },
+    { name = "cx-plugins", marker = "extra == 'plugins'", git = "https://github.com/jmpaz/cx-plugins.git?rev=v0.1.1" },
     { name = "markitdown", extras = ["all"], specifier = ">=0.1.4" },
     { name = "pathspec" },
-    { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "pyperclip", specifier = ">=1.8.2" },
     { name = "pyyaml" },
     { name = "requests", specifier = ">=2.25.0" },
     { name = "tiktoken", specifier = ">=0.6.0" },
 ]
+provides-extras = ["plugins"]
 
 [[package]]
 name = "cryptography"
@@ -611,6 +612,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/79/92/88970c2b5b270d232213a971e74afa6d0e82d8aeee0964765a78ee1f55c8/cryptography-46.0.0-pp311-pypy311_pp73-manylinux_2_34_aarch64.whl", hash = "sha256:c39f0947d50f74b1b3523cec3931315072646286fb462995eb998f8136779319", size = 4249072, upload-time = "2025-09-16T21:07:38.382Z" },
     { url = "https://files.pythonhosted.org/packages/63/50/b0b90a269d64b479602d948f40ef6131f3704546ce003baa11405aa4093b/cryptography-46.0.0-pp311-pypy311_pp73-manylinux_2_34_x86_64.whl", hash = "sha256:6460866a92143a24e3ed68eaeb6e98d0cedd85d7d9a8ab1fc293ec91850b1b38", size = 4527173, upload-time = "2025-09-16T21:07:40.742Z" },
     { url = "https://files.pythonhosted.org/packages/37/e1/826091488f6402c904e831ccbde41cf1a08672644ee5107e2447ea76a903/cryptography-46.0.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:bf1961037309ee0bdf874ccba9820b1c2f720c2016895c44d8eb2316226c1ad5", size = 3448199, upload-time = "2025-09-16T21:07:42.639Z" },
+]
+
+[[package]]
+name = "cx-plugins"
+version = "0.1.0"
+source = { git = "https://github.com/jmpaz/cx-plugins.git?rev=v0.1.1#011bfbc903766f3b0b3c528b1e1bc3eb2bcc2061" }
+dependencies = [
+    { name = "click" },
+    { name = "cryptography" },
+    { name = "lexrpc" },
+    { name = "pyjwt" },
+    { name = "pyyaml" },
+    { name = "requests" },
 ]
 
 [[package]]

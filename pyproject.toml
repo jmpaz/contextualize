@@ -16,9 +16,11 @@ dependencies = [
   "tiktoken>=0.6.0",
   "requests>=2.25.0",
   "markitdown[all]>=0.1.4",
-  "lexrpc>=2.1",
-  "pyjwt>=2.10.1",
-  "cryptography>=46.0.0",
+]
+
+[project.optional-dependencies]
+plugins = [
+  "cx-plugins @ git+https://github.com/jmpaz/cx-plugins.git@v0.1.1",
 ]
 
 [project.urls]

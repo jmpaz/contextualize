@@ -7,15 +7,19 @@
 
 ## Installation
 
-```bash
-pip install contextualize
-```
-
-or with [uv](https://docs.astral.sh/uv/):
+Install the core CLI:
 
 ```bash
 uv tool install contextualize
 ```
+
+or install with the maintained plugin bundle:
+
+```bash
+uv tool install 'contextualize[plugins]'
+```
+
+The plugins extra installs provider plugins from [`jmpaz/cx-plugins`](https://github.com/jmpaz/cx-plugins).
 
 
 ## Commands
@@ -48,3 +52,14 @@ contextualize cat https://modelcontextprotocol.io/llms.txt
 ```
 
 Details and more examples are available in [`docs/usage.md`](docs/usage.md).
+
+## Plugins
+
+`contextualize` loads provider plugins from installed Python packages via the
+`contextualize.plugins` entry-point group.
+
+Each plugin module should export `PLUGIN_API_VERSION`, `PLUGIN_NAME`,
+`PLUGIN_PRIORITY`,
+`can_resolve(target, context)`, and `resolve(target, context)`.
+Plugins may also export `register_auth_command(group)` to add
+`contextualize auth <provider>` commands.

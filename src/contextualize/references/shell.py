@@ -85,19 +85,6 @@ class CommandReference:
                 shell_cmd=self.command if self.format == "shell" else None,
             )
 
-    # Legacy aliases
-    def run_command(self) -> str:
-        """Legacy method - returns cached command output."""
-        return self.command_output
-
-    def get_contents(self) -> str:
-        """Legacy method - returns cached formatted output."""
-        return self.output
-
-
-# Alias for backward compatibility
-ShellReference = CommandReference
-
 
 def _normalize_shell_executable(value: str | None) -> str | None:
     """Normalize a shell executable path."""

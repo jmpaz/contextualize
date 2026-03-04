@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from ..concurrency import run_indexed_tasks_fail_fast
+from ..plugins.resolve import resolve_plugin_references
+from ..git.target import parse_git_target
 from ..utils import brace_expand, count_tokens
 from .file import FileReference
 from .helpers import (
@@ -16,40 +18,14 @@ from .helpers import (
     fetch_gist_files,
     is_http_url,
     is_utf8_file,
+    looks_like_windows_drive,
     parse_gist_url,
     parse_target_spec,
     split_spec_symbols,
 )
 from .url import URLReference
-from .arena import (
-    ArenaReference,
-    build_arena_settings,
-    is_arena_block_url,
-    is_arena_channel_url,
-)
-from .atproto import (
-    AtprotoReference,
-    build_atproto_settings,
-    is_atproto_url,
-    resolve_atproto_url,
-)
-from .discord import (
-    DiscordResolutionError,
-    DiscordReference,
-    build_discord_settings,
-    is_discord_url,
-    render_discord_document_with_metadata,
-    resolve_discord_url,
-    split_discord_document_by_utc_day,
-    with_discord_document_rendered,
-)
-from .soundcloud import (
-    SoundCloudReference,
-    build_soundcloud_settings,
-    is_soundcloud_url,
-    resolve_soundcloud_url,
-)
-from .youtube import YouTubeReference, is_youtube_url
+
+_EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 def create_file_references(
@@ -141,220 +117,41 @@ def create_file_references(
         else:
             expanded_all_paths.append(raw_path)
 
-    arena_settings = None
-
-    def resolve_arena_settings():
-        nonlocal arena_settings
-        if arena_settings is None:
-            arena_settings = build_arena_settings(arena_overrides)
-        return arena_settings
-
     for raw_path in expanded_all_paths:
         spec_opts = parse_target_spec(raw_path)
         target = spec_opts.get("target", raw_path)
         path, symbols = split_spec_symbols(target)
-
-        if is_youtube_url(target):
-            file_references.append(
-                YouTubeReference(
-                    target,
-                    format=format,
-                    label=label,
-                    label_suffix=label_suffix,
-                    include_token_count=include_token_count,
-                    token_target=token_target,
-                    inject=inject,
-                    depth=depth,
-                    trace_collector=trace_collector,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                )
-            )
+        plugin_refs = resolve_plugin_references(
+            target,
+            format=format,
+            label=label,
+            label_suffix=label_suffix,
+            include_token_count=include_token_count,
+            token_target=token_target,
+            inject=inject,
+            depth=depth,
+            trace_collector=trace_collector,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            overrides={
+                "arena": arena_overrides,
+                "discord": discord_overrides,
+                "atproto": atproto_overrides,
+                "soundcloud": soundcloud_overrides,
+            },
+        )
+        if plugin_refs:
+            file_references.extend(plugin_refs)
             continue
 
-        if is_atproto_url(target):
-            atproto_settings = build_atproto_settings(atproto_overrides)
-            atproto_documents = resolve_atproto_url(
-                target,
-                settings=atproto_settings,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-            )
-            for document in atproto_documents:
-                file_references.append(
-                    AtprotoReference(
-                        target,
-                        document=document,
-                        format=format,
-                        label=label,
-                        label_suffix=label_suffix,
-                        include_token_count=include_token_count,
-                        token_target=token_target,
-                        inject=inject,
-                        depth=depth,
-                        trace_collector=trace_collector,
-                    )
-                )
-            continue
-
-        if is_soundcloud_url(target):
-            soundcloud_settings = build_soundcloud_settings(soundcloud_overrides)
-            soundcloud_documents = resolve_soundcloud_url(
-                target,
-                settings=soundcloud_settings,
-                use_cache=use_cache,
-                cache_ttl=cache_ttl,
-                refresh_cache=refresh_cache,
-            )
-            for document in soundcloud_documents:
-                file_references.append(
-                    SoundCloudReference(
-                        target,
-                        document=document,
-                        format=format,
-                        label=label,
-                        label_suffix=label_suffix,
-                        include_token_count=include_token_count,
-                        token_target=token_target,
-                        inject=inject,
-                        depth=depth,
-                        trace_collector=trace_collector,
-                    )
-                )
-            continue
-
-        if is_arena_channel_url(target):
-            from .arena import (
-                extract_channel_slug,
-                resolve_channel,
-                warmup_arena_network_stack,
-            )
-            from ..runtime import get_payload_media_jobs
-
-            slug = extract_channel_slug(target)
-            if slug:
-                warmup_arena_network_stack()
-                settings = resolve_arena_settings()
-                metadata, flat_blocks = resolve_channel(
-                    slug,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                    settings=settings,
-                )
-                tasks = [
-                    (
-                        index,
-                        (
-                            lambda cp=channel_path, b=block: ArenaReference(
-                                target,
-                                block=b,
-                                channel_path=cp,
-                                format=format,
-                                label=label,
-                                label_suffix=label_suffix,
-                                include_token_count=include_token_count,
-                                token_target=token_target,
-                                inject=inject,
-                                depth=depth,
-                                trace_collector=trace_collector,
-                                include_descriptions=settings.include_descriptions,
-                                include_comments=settings.include_comments,
-                                include_link_image_descriptions=settings.include_link_image_descriptions,
-                                include_pdf_content=settings.include_pdf_content,
-                                include_media_descriptions=settings.include_media_descriptions,
-                            )
-                        ),
-                    )
-                    for index, (channel_path, block) in enumerate(flat_blocks)
-                ]
-                for _, arena_ref in run_indexed_tasks_fail_fast(
-                    tasks,
-                    max_workers=get_payload_media_jobs(),
-                ):
-                    file_references.append(arena_ref)
-                continue
-
-        if is_arena_block_url(target):
-            from .arena import extract_block_id, _fetch_block
-
-            block_id = extract_block_id(target)
-            if block_id is not None:
-                block = _fetch_block(block_id)
-                settings = resolve_arena_settings()
-                file_references.append(
-                    ArenaReference(
-                        target,
-                        block=block,
-                        format=format,
-                        label=label,
-                        label_suffix=label_suffix,
-                        include_token_count=include_token_count,
-                        token_target=token_target,
-                        inject=inject,
-                        depth=depth,
-                        trace_collector=trace_collector,
-                        include_descriptions=settings.include_descriptions,
-                        include_comments=settings.include_comments,
-                        include_link_image_descriptions=settings.include_link_image_descriptions,
-                        include_pdf_content=settings.include_pdf_content,
-                        include_media_descriptions=settings.include_media_descriptions,
-                    )
-                )
-                continue
-
-        if is_discord_url(target):
-            discord_settings = build_discord_settings(discord_overrides)
-            try:
-                discord_docs = resolve_discord_url(
-                    target,
-                    settings=discord_settings,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                )
-            except ValueError as exc:
-                if isinstance(exc, DiscordResolutionError) and exc.is_skippable:
-                    print(
-                        f"Warning: skipping Discord URL: {target} ({exc})",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    continue
-                raise
-            prepared_docs = []
-            for document in discord_docs:
-                day_docs = split_discord_document_by_utc_day(
-                    document, settings=discord_settings
-                )
-                for day_doc in day_docs:
-                    rendered = render_discord_document_with_metadata(
-                        day_doc,
-                        settings=discord_settings,
-                        source_url=target,
-                        include_message_bounds=False,
-                    )
-                    prepared_docs.append(
-                        with_discord_document_rendered(day_doc, rendered=rendered)
-                    )
-            for document in prepared_docs:
-                file_references.append(
-                    DiscordReference(
-                        target,
-                        document=document,
-                        format=format,
-                        label=label,
-                        label_suffix=label_suffix,
-                        include_token_count=include_token_count,
-                        token_target=token_target,
-                        inject=inject,
-                        depth=depth,
-                        trace_collector=trace_collector,
-                    )
-                )
-            continue
+        if (
+            _EXTERNAL_SCHEME_RE.match(target)
+            and not is_http_url(target)
+            and not looks_like_windows_drive(target)
+            and parse_git_target(target) is None
+        ):
+            raise ValueError(f"No plugin could resolve external target: {target}")
 
         if is_http_url(target):
             gist_id = parse_gist_url(target)
@@ -529,9 +326,6 @@ def create_file_references(
         "ignored_files": ignored_files,
         "ignored_folders": consolidated_folders,
     }
-
-
-resolve = create_file_references
 
 
 def concat_refs(file_references):
