@@ -19,7 +19,7 @@ or install with the maintained plugin bundle:
 uv tool install 'contextualize[plugins]'
 ```
 
-The plugins extra installs provider plugins from [`jmpaz/cx-plugins`](https://github.com/jmpaz/cx-plugins).
+The plugins extra installs provider plugins from [jmpaz/cx-plugins](https://github.com/jmpaz/cx-plugins).
 
 
 ## Commands
@@ -58,8 +58,4 @@ Details and more examples are available in [`docs/usage.md`](docs/usage.md).
 `contextualize` loads provider plugins from installed Python packages via the
 `contextualize.plugins` entry-point group.
 
-Each plugin module should export `PLUGIN_API_VERSION`, `PLUGIN_NAME`,
-`PLUGIN_PRIORITY`,
-`can_resolve(target, context)`, and `resolve(target, context)`.
-Plugins may also export `register_auth_command(group)` to add
-`contextualize auth <provider>` commands.
+See [`docs/plugins.md`](docs/plugins.md) for details.
