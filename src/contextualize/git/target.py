@@ -193,9 +193,6 @@ def _is_supported_git_http_url(
     if host in known_hosts:
         return len(segments) == 2
 
-    if has_explicit_ref or has_explicit_path:
-        return len(segments) >= 2
-
     return False
 
 
