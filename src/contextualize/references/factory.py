@@ -249,6 +249,10 @@ def create_file_references(
                         inject=inject,
                         depth=depth,
                         trace_collector=trace_collector,
+                        use_cache=use_cache,
+                        cache_ttl=cache_ttl,
+                        refresh_cache=refresh_cache,
+                        plugin_overrides=effective_plugin_overrides or None,
                     )
                 )
             else:
@@ -303,6 +307,10 @@ def create_file_references(
                                 inject=inject,
                                 depth=depth,
                                 trace_collector=trace_collector,
+                                use_cache=use_cache,
+                                cache_ttl=cache_ttl,
+                                refresh_cache=refresh_cache,
+                                plugin_overrides=effective_plugin_overrides or None,
                             )
                         )
 

@@ -171,6 +171,10 @@ def resolve_plugin_references(
                 inject=inject,
                 depth=depth,
                 trace_collector=trace_collector,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+                plugin_overrides=overrides or None,
             )
             for document in normalized_documents
         ]

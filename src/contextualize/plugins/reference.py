@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,10 @@ class PluginReference:
     inject: bool = False
     depth: int = 5
     trace_collector: list | None = None
+    use_cache: bool = True
+    cache_ttl: timedelta | None = None
+    refresh_cache: bool = False
+    plugin_overrides: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         self.file_content = self.document.content
@@ -73,6 +78,10 @@ class PluginReference:
                 self.depth,
                 self.trace_collector,
                 self.source,
+                use_cache=self.use_cache,
+                cache_ttl=self.cache_ttl,
+                refresh_cache=self.refresh_cache,
+                plugin_overrides=self.plugin_overrides,
             )
             self.file_content = text
         return process_text(

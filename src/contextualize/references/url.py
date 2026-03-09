@@ -486,7 +486,13 @@ class URLReference:
                     from ..render.inject import inject_content_in_text
 
                     text = inject_content_in_text(
-                        text, self.depth, self.trace_collector, self.url
+                        text,
+                        self.depth,
+                        self.trace_collector,
+                        self.url,
+                        use_cache=self.use_cache,
+                        cache_ttl=self.cache_ttl,
+                        refresh_cache=self.refresh_cache,
                     )
                     self.file_content = text
                 return process_text(
@@ -563,7 +569,13 @@ class URLReference:
                 from ..render.inject import inject_content_in_text
 
                 text = inject_content_in_text(
-                    text, self.depth, self.trace_collector, self.url
+                    text,
+                    self.depth,
+                    self.trace_collector,
+                    self.url,
+                    use_cache=self.use_cache,
+                    cache_ttl=self.cache_ttl,
+                    refresh_cache=self.refresh_cache,
                 )
                 self.file_content = text
             return text
@@ -581,7 +593,13 @@ class URLReference:
                     from ..render.inject import inject_content_in_text
 
                     text = inject_content_in_text(
-                        text, self.depth, self.trace_collector, self.url
+                        text,
+                        self.depth,
+                        self.trace_collector,
+                        self.url,
+                        use_cache=self.use_cache,
+                        cache_ttl=self.cache_ttl,
+                        refresh_cache=self.refresh_cache,
                     )
                 self.file_content = text
                 return text
@@ -597,7 +615,13 @@ class URLReference:
                 from ..render.inject import inject_content_in_text
 
                 text = inject_content_in_text(
-                    text, self.depth, self.trace_collector, self.url
+                    text,
+                    self.depth,
+                    self.trace_collector,
+                    self.url,
+                    use_cache=self.use_cache,
+                    cache_ttl=self.cache_ttl,
+                    refresh_cache=self.refresh_cache,
                 )
             self.file_content = text
             return text
@@ -636,7 +660,13 @@ class URLReference:
                 from ..render.inject import inject_content_in_text
 
                 text = inject_content_in_text(
-                    text, self.depth, self.trace_collector, self.url
+                    text,
+                    self.depth,
+                    self.trace_collector,
+                    self.url,
+                    use_cache=self.use_cache,
+                    cache_ttl=self.cache_ttl,
+                    refresh_cache=self.refresh_cache,
                 )
             self.file_content = text
             return text
@@ -668,7 +698,13 @@ class URLReference:
             from ..render.inject import inject_content_in_text
 
             text = inject_content_in_text(
-                text, self.depth, self.trace_collector, self.url
+                text,
+                self.depth,
+                self.trace_collector,
+                self.url,
+                use_cache=self.use_cache,
+                cache_ttl=self.cache_ttl,
+                refresh_cache=self.refresh_cache,
             )
         self.file_content = text
         return text

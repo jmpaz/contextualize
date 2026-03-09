@@ -2,15 +2,49 @@
 
 import os
 import re
+from datetime import timedelta
 from typing import Any, Optional
 
 from ..git.cache import ensure_repo, expand_git_paths
 from ..git.target import parse_git_target
-from ..references import URLReference, create_file_references
-from ..references.helpers import is_http_url, parse_git_url_target, parse_target_spec
+from ..references import create_file_references
+from ..references.helpers import (
+    is_http_url,
+    looks_like_windows_drive,
+    parse_git_url_target,
+    parse_target_spec,
+)
 from ..utils import count_tokens, wrap_text
 
 _INJECTION_PATTERN = re.compile(r"\{cx::((?:[^{}]|\{[^{}]*\})*)\}")
+_EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _resolve_reference_targets(
+    targets: list[str],
+    *,
+    format: str,
+    label: str,
+    depth: int,
+    trace_collector: Optional[list],
+    use_cache: bool,
+    cache_ttl: timedelta | None,
+    refresh_cache: bool,
+    plugin_overrides: dict[str, Any] | None,
+) -> str:
+    refs = create_file_references(
+        targets,
+        format=format,
+        label=label,
+        inject=True,
+        depth=depth,
+        trace_collector=trace_collector,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
+    )
+    return refs["concatenated"]
 
 
 def _http_fetch(
@@ -19,17 +53,25 @@ def _http_fetch(
     depth: int,
     wrap: str | None = None,
     trace_collector: Optional[list] = None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
     try:
-        ref = URLReference(
-            url,
+        result = _resolve_reference_targets(
+            [url],
             format="raw",
-            label=name or url,
-            inject=depth > 0,
+            label="relative",
             depth=depth,
             trace_collector=trace_collector,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )
-        return wrap_text(ref.output, wrap or "md", name)
+        return wrap_text(result, wrap or "md", name)
     except Exception as e:
         raise Exception(f"http fetch failed for {url}: {e}")
 
@@ -40,6 +82,11 @@ def _git_fetch(
     depth: int,
     wrap: str | None = None,
     trace_collector: Optional[list] = None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
     git_opts = params.split() if params else []
     fmt = "md"
@@ -57,15 +104,17 @@ def _git_fetch(
         raise Exception(f"invalid git target: {target}")
     repo = ensure_repo(tgt, pull=pull, reclone=reclone)
     paths = [repo] if not tgt.path else expand_git_paths(repo, tgt.path)
-    refs = create_file_references(
+    result = _resolve_reference_targets(
         paths,
         format=fmt,
         label=lbl,
-        inject=True,
         depth=depth,
         trace_collector=trace_collector,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
     )
-    result = refs["concatenated"]
     return wrap_text(result, wrap) if wrap else result
 
 
@@ -77,6 +126,11 @@ def _local_fetch(
     wrap: str | None = None,
     filename: str | None = None,
     trace_collector: Optional[list] = None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
     fmt = "md"
     lbl = "relative"
@@ -96,16 +150,44 @@ def _local_fetch(
         raise Exception(f"path not found: {path}")
 
     label = filename if filename and len(existing) == 1 else lbl
-    refs = create_file_references(
+    result = _resolve_reference_targets(
         existing,
         format=fmt,
         label=label,
-        inject=True,
         depth=depth,
         trace_collector=trace_collector,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
     )
-    result = refs["concatenated"]
     return wrap_text(result, wrap, filename) if wrap else result
+
+
+def _external_fetch(
+    target: str,
+    depth: int,
+    wrap: str | None = None,
+    filename: str | None = None,
+    trace_collector: Optional[list] = None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
+) -> str:
+    result = _resolve_reference_targets(
+        [target],
+        format="raw",
+        label="relative",
+        depth=depth,
+        trace_collector=trace_collector,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
+    )
+    return wrap_text(result, wrap or "md", filename)
 
 
 def _process_injection(
@@ -114,6 +196,11 @@ def _process_injection(
     trace_collector: Optional[list] = None,
     source_file: Optional[str] = None,
     pattern_text: Optional[str] = None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
     tgt = opts.get("target") or ""
 
@@ -132,18 +219,59 @@ def _process_injection(
     if is_http_url(tgt):
         try:
             result = _http_fetch(
-                tgt, opts.get("filename"), depth, opts.get("wrap"), trace_collector
+                tgt,
+                opts.get("filename"),
+                depth,
+                opts.get("wrap"),
+                trace_collector,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+                plugin_overrides=plugin_overrides,
             )
         except Exception:
             if not parse_git_url_target(tgt):
                 raise
             result = _git_fetch(
-                tgt, opts.get("params"), depth, opts.get("wrap"), trace_collector
+                tgt,
+                opts.get("params"),
+                depth,
+                opts.get("wrap"),
+                trace_collector,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
+                plugin_overrides=plugin_overrides,
             )
         _add_trace(result)
     elif parse_git_target(tgt):
         result = _git_fetch(
-            tgt, opts.get("params"), depth, opts.get("wrap"), trace_collector
+            tgt,
+            opts.get("params"),
+            depth,
+            opts.get("wrap"),
+            trace_collector,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
+        )
+        _add_trace(result)
+    elif (
+        _EXTERNAL_SCHEME_RE.match(tgt)
+        and not looks_like_windows_drive(tgt)
+        and parse_git_target(tgt) is None
+    ):
+        result = _external_fetch(
+            tgt,
+            depth,
+            opts.get("wrap"),
+            opts.get("filename"),
+            trace_collector,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )
         _add_trace(result)
     else:
@@ -155,6 +283,10 @@ def _process_injection(
             opts.get("wrap"),
             opts.get("filename"),
             trace_collector,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )
         root = opts.get("root")
         base = os.path.expanduser(root) if root else os.getcwd()
@@ -176,6 +308,11 @@ def inject_content_in_text(
     depth: int = 5,
     trace_collector: Optional[list] = None,
     source_file: Optional[str] = None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
     if depth <= 0:
         return text
@@ -186,11 +323,24 @@ def inject_content_in_text(
             trace_collector,
             source_file,
             m.group(0),
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         ),
         text,
     )
     return (
-        inject_content_in_text(new, depth - 1, trace_collector, source_file)
+        inject_content_in_text(
+            new,
+            depth - 1,
+            trace_collector,
+            source_file,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
+        )
         if _INJECTION_PATTERN.search(new)
         else new
     )

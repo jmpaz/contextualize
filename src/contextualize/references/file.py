@@ -1,6 +1,7 @@
 """FileReference - Local filesystem file references."""
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from ..render.text import process_text
@@ -32,6 +33,10 @@ class FileReference:
         depth=5,
         trace_collector=None,
         symbols=None,
+        use_cache: bool = True,
+        cache_ttl: timedelta | None = None,
+        refresh_cache: bool = False,
+        plugin_overrides: dict | None = None,
     ):
         self.range = range
         self.ranges = ranges
@@ -49,6 +54,10 @@ class FileReference:
         self.inject = inject
         self.depth = depth
         self.trace_collector = trace_collector
+        self.use_cache = use_cache
+        self.cache_ttl = cache_ttl
+        self.refresh_cache = refresh_cache
+        self.plugin_overrides = plugin_overrides
         self.file_content = self.original_file_content = ""
         self.output = self._get_contents()
 
@@ -86,7 +95,14 @@ class FileReference:
                 from ..render.inject import inject_content_in_text
 
                 self.file_content = inject_content_in_text(
-                    self.file_content, self.depth, self.trace_collector, self.path
+                    self.file_content,
+                    self.depth,
+                    self.trace_collector,
+                    self.path,
+                    use_cache=self.use_cache,
+                    cache_ttl=self.cache_ttl,
+                    refresh_cache=self.refresh_cache,
+                    plugin_overrides=self.plugin_overrides,
                 )
             return process_text(
                 self.file_content,
@@ -128,7 +144,14 @@ class FileReference:
             from ..render.inject import inject_content_in_text
 
             self.file_content = inject_content_in_text(
-                self.file_content, self.depth, self.trace_collector, self.path
+                self.file_content,
+                self.depth,
+                self.trace_collector,
+                self.path,
+                use_cache=self.use_cache,
+                cache_ttl=self.cache_ttl,
+                refresh_cache=self.refresh_cache,
+                plugin_overrides=self.plugin_overrides,
             )
 
         ranges = self.ranges

@@ -308,6 +308,9 @@ def _resolve_spec_to_seed_refs(
                 label_suffix=label_suffix,
                 inject=inject,
                 depth=depth,
+                use_cache=use_cache,
+                cache_ttl=cache_ttl,
+                refresh_cache=refresh_cache,
             )
             seed_refs.append(fr)
         else:

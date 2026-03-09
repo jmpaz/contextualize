@@ -193,3 +193,64 @@ def test_duplicate_plugin_name_tie_uses_lexicographic_origin(
 
     result = create_file_references(["same://abc"], format="raw")
     assert result["concatenated"] == "from a"
+
+
+def test_injected_http_target_uses_plugin_and_inherits_cache_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _DemoEntrypoint:
+        name = "demo-http"
+        value = "contextualize_plugins.demo_http:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "demo-http"
+            plugin.PLUGIN_PRIORITY = 500
+
+            def can_resolve(target: str, _context: dict[str, object]) -> bool:
+                return target.startswith("https://demo.test/")
+
+            def resolve(
+                target: str, context: dict[str, object]
+            ) -> list[dict[str, str]]:
+                refresh = bool(context.get("refresh_cache"))
+                use_cache = bool(context.get("use_cache", True))
+                return [
+                    {
+                        "source": target,
+                        "label": "demo-http/item.md",
+                        "content": (
+                            f"resolved via plugin refresh={refresh} use_cache={use_cache}"
+                        ),
+                    }
+                ]
+
+            plugin.can_resolve = can_resolve
+            plugin.resolve = resolve
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_DemoEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    note_path = tmp_path / "note.md"
+    note_path.write_text(
+        "{cx::wrap=xml::https://demo.test/thread}",
+        encoding="utf-8",
+    )
+
+    result = create_file_references(
+        [str(note_path)],
+        format="raw",
+        inject=True,
+        use_cache=False,
+        refresh_cache=True,
+    )
+
+    assert result["concatenated"] == (
+        "<paste>\nresolved via plugin refresh=True use_cache=False\n</paste>"
+    )
