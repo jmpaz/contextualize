@@ -85,7 +85,11 @@ class FileReference:
             raise ValueError(f"Unsupported file type: {self.path}")
         if is_media_suffix(suffix):
             try:
-                transcript = transcribe_media_file(self.path)
+                transcript = transcribe_media_file(
+                    self.path,
+                    use_cache=self.use_cache,
+                    refresh_cache=self.refresh_cache,
+                )
             except Exception as e:
                 raise ValueError(
                     f"Media transcription failed for {self.path}: {e}"

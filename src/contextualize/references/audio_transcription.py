@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -7,6 +9,13 @@ import shutil
 import subprocess
 import tempfile
 from typing import Any
+
+from contextualize.cache.local_media import (
+    get_cached_transcript as get_cached_local_media_transcript,
+)
+from contextualize.cache.local_media import (
+    store_transcript as store_local_media_transcript,
+)
 
 _AUDIO_SUFFIX_TO_MIME: dict[str, str] = {
     ".wav": "audio/wav",
@@ -57,13 +66,47 @@ def is_media_suffix(suffix: str) -> bool:
     return is_audio_suffix(suffix) or is_video_suffix(suffix)
 
 
-def transcribe_media_file(path: str | Path, *, timeout: float = 600) -> str:
+def transcribe_media_file(
+    path: str | Path,
+    *,
+    timeout: float = 600,
+    use_cache: bool = True,
+    refresh_cache: bool | None = None,
+) -> str:
     media_path = Path(path)
     suffix = media_path.suffix.lower()
     if is_audio_suffix(suffix):
-        return transcribe_audio_file(media_path, timeout=timeout)
+        return transcribe_audio_file(
+            media_path,
+            timeout=timeout,
+            use_cache=use_cache,
+            refresh_cache=refresh_cache,
+        )
     if is_video_suffix(suffix):
-        return _transcribe_video_file(media_path, timeout=timeout)
+        source_sha256 = _sha256_file(media_path)
+        cache_identity = _transcription_cache_identity(
+            operation="video-transcription",
+            source_sha256=source_sha256,
+            source_suffix=suffix,
+        )
+        should_refresh = _should_refresh_transcription_cache(
+            "video", refresh_cache=refresh_cache
+        )
+        if use_cache and not should_refresh:
+            cached = get_cached_local_media_transcript(cache_identity)
+            if cached is not None:
+                return cached
+
+        transcript = _transcribe_video_file(media_path, timeout=timeout)
+        if use_cache and transcript.strip():
+            store_local_media_transcript(
+                cache_identity,
+                transcript,
+                operation="video-transcription",
+                source_sha256=source_sha256,
+                source_suffix=suffix,
+            )
+        return transcript
     raise RuntimeError(
         f"Unsupported media suffix for transcription: {suffix or '<none>'}"
     )
@@ -95,12 +138,33 @@ def transcribe_media_bytes(
     raise RuntimeError("Unsupported media payload for transcription")
 
 
-def transcribe_audio_file(path: str | Path, *, timeout: float = 600) -> str:
+def transcribe_audio_file(
+    path: str | Path,
+    *,
+    timeout: float = 600,
+    use_cache: bool = True,
+    refresh_cache: bool | None = None,
+) -> str:
     audio_path = Path(path)
     data = audio_path.read_bytes()
+    suffix = audio_path.suffix.lower()
+    source_sha256 = _sha256_bytes(data)
+    cache_identity = _transcription_cache_identity(
+        operation="audio-transcription",
+        source_sha256=source_sha256,
+        source_suffix=suffix,
+    )
+    should_refresh = _should_refresh_transcription_cache(
+        "audio", refresh_cache=refresh_cache
+    )
+    if use_cache and not should_refresh:
+        cached = get_cached_local_media_transcript(cache_identity)
+        if cached is not None:
+            return cached
+
     content_type = _guess_audio_content_type(audio_path.name)
     try:
-        return transcribe_audio_bytes(
+        transcript = transcribe_audio_bytes(
             data,
             filename=audio_path.name,
             content_type=content_type,
@@ -113,8 +177,19 @@ def transcribe_audio_file(path: str | Path, *, timeout: float = 600) -> str:
             audio_path, timeout=timeout
         )
         if chunked_transcript:
-            return chunked_transcript
-        raise
+            transcript = chunked_transcript
+        else:
+            raise
+
+    if use_cache and transcript.strip():
+        store_local_media_transcript(
+            cache_identity,
+            transcript,
+            operation="audio-transcription",
+            source_sha256=source_sha256,
+            source_suffix=suffix,
+        )
+    return transcript
 
 
 def transcribe_audio_bytes(
@@ -130,9 +205,9 @@ def transcribe_audio_bytes(
         )
     import httpx
 
-    api_base = os.environ.get("WHISPER_API_BASE", "https://api.openai.com/v1")
+    api_base = _whisper_api_base()
     api_key = os.environ.get("WHISPER_API_KEY")
-    model = os.environ.get("WHISPER_MODEL", "whisper-1")
+    model = _whisper_model()
     endpoint = f"{api_base.rstrip('/')}/audio/transcriptions"
 
     headers: dict[str, str] = {}
@@ -173,6 +248,21 @@ def _is_whisper_configured() -> bool:
         (os.environ.get("WHISPER_API_BASE") or "").strip()
         or (os.environ.get("WHISPER_API_KEY") or "").strip()
     )
+
+
+def _whisper_api_base() -> str:
+    value = (os.environ.get("WHISPER_API_BASE") or "").strip()
+    return value or "https://api.openai.com/v1"
+
+
+def _whisper_model() -> str:
+    value = (os.environ.get("WHISPER_MODEL") or "").strip()
+    return value or "whisper-1"
+
+
+def _chunk_seconds_cache_component() -> str:
+    value = (os.environ.get("WHISPER_CHUNK_SECONDS") or "").strip()
+    return value or "25"
 
 
 def _infer_media_kind(*, filename: str, content_type: str | None) -> str | None:
@@ -258,7 +348,12 @@ def _transcribe_video_file(video_path: Path, *, timeout: float) -> str:
             raise RuntimeError(f"ffmpeg video audio extraction failed: {detail}")
         if not extracted_path.exists() or extracted_path.stat().st_size == 0:
             raise RuntimeError("Video transcription failed: no audio stream found")
-        return transcribe_audio_file(extracted_path, timeout=timeout)
+        return transcribe_audio_file(
+            extracted_path,
+            timeout=timeout,
+            use_cache=False,
+            refresh_cache=False,
+        )
 
 
 def _transcribe_audio_file_in_chunks(audio_path: Path, *, timeout: float) -> str:
@@ -327,3 +422,48 @@ def _get_chunk_seconds() -> int:
             f"Invalid WHISPER_CHUNK_SECONDS value: {raw!r}. Expected a positive integer."
         )
     return value
+
+
+def _should_refresh_transcription_cache(
+    kind: str, *, refresh_cache: bool | None
+) -> bool:
+    if refresh_cache is not None:
+        return bool(refresh_cache)
+
+    from contextualize.runtime import get_refresh_audio, get_refresh_videos
+
+    if kind == "audio":
+        return get_refresh_audio()
+    if kind == "video":
+        return get_refresh_videos()
+    return False
+
+
+def _transcription_cache_identity(
+    *,
+    operation: str,
+    source_sha256: str,
+    source_suffix: str,
+) -> str:
+    payload = {
+        "operation": operation,
+        "source_sha256": source_sha256,
+        "source_suffix": source_suffix,
+        "whisper_api_base": _whisper_api_base(),
+        "whisper_model": _whisper_model(),
+        "whisper_chunk_seconds": _chunk_seconds_cache_component(),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()

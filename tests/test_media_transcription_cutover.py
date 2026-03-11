@@ -56,9 +56,17 @@ def test_file_reference_uses_media_transcription_for_video(
 
     calls: list[str] = []
 
-    def _transcribe(path: str | Path, *, timeout: float = 600) -> str:
+    def _transcribe(
+        path: str | Path,
+        *,
+        timeout: float = 600,
+        use_cache: bool = True,
+        refresh_cache: bool | None = None,
+    ) -> str:
         calls.append(str(path))
         assert timeout == 600
+        assert use_cache is True
+        assert refresh_cache is False
         return "video transcript"
 
     monkeypatch.setattr(
