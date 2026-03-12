@@ -166,6 +166,18 @@ def test_assess_markdown_quality_detects_html_document_blob() -> None:
     assert "html_document" in assessment["reasons"]
 
 
+def test_assess_markdown_quality_detects_metadata_only_document() -> None:
+    markdown = (
+        "---\n"
+        "description: Professional audio plugins and virtual instruments.\n"
+        "site_name: Tweakbench\n"
+        "---"
+    )
+    assessment = _assess_markdown_quality(markdown)
+    assert assessment["requires_fallback"]
+    assert "metadata_only_document" in assessment["reasons"]
+
+
 def test_fetch_via_markdown_converter_uses_jina_when_markdown_new_requires_fallback(
     monkeypatch,
 ) -> None:
@@ -254,6 +266,47 @@ def test_fetch_via_markdown_converter_uses_jina_when_markdown_new_returns_html(
                 headers={"Content-Type": "text/html; charset=utf-8"},
                 text=html_payload,
                 url=url,
+            )
+        if url == "https://r.jina.ai/":
+            return _DummyJSONResponse(
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                text="",
+                url=url,
+                payload={"code": 200, "data": {"content": jina_markdown}},
+            )
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(requests, "post", _post)
+
+    ref = object.__new__(URLReference)
+    ref.url = "https://example.com/doc"
+    out = URLReference._fetch_via_markdown_converter(ref)
+
+    assert out == jina_markdown
+    assert calls == ["https://markdown.new/", "https://r.jina.ai/"]
+
+
+def test_fetch_via_markdown_converter_uses_jina_when_markdown_new_returns_metadata_only_document(
+    monkeypatch,
+) -> None:
+    markdown_new = (
+        "---\n"
+        "description: Professional audio plugins and virtual instruments for music production.\n"
+        "---"
+    )
+    jina_markdown = "# Good title\n\n- item one\n- item two"
+    calls: list[str] = []
+
+    def _post(url, *args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(url)
+        if url == "https://markdown.new/":
+            return _DummyJSONResponse(
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                text="",
+                url=url,
+                payload={"markdown": markdown_new},
             )
         if url == "https://r.jina.ai/":
             return _DummyJSONResponse(

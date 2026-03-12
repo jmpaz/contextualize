@@ -35,6 +35,10 @@ _MARKDOWN_ESCAPED_PUNCT_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|])")
 _MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
 _MARKDOWN_LIST_RE = re.compile(r"^\s{0,3}(?:[-*+]\s+\S|\d{1,3}\.\s+\S)")
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]{1,200}\]\([^\s)]+[^)]*\)")
+_MARKDOWN_METADATA_LINE_RE = re.compile(
+    r"^\s{0,3}[A-Za-z0-9_.-]{1,64}\s*:\s*(?:\S.*)?$"
+)
+_MARKDOWN_YAML_DELIMITER_RE = re.compile(r"^\s*(?:---|\.\.\.)\s*$")
 _MARKDOWN_BLOB_TOKEN_RE = re.compile(
     r"(?:\[[^\]\n]{1,200}\]\([^\s)]+[^)]*\)|\*\*[^*\n]+\*\*|`[^`\n]+`|#{1,6}\s+\S)"
 )
@@ -61,6 +65,7 @@ class MarkdownQualitySignals(TypedDict):
     avg_line_length: float
     newline_density: float
     has_single_line_blob: bool
+    is_metadata_only: bool
 
 
 class MarkdownQualityAssessment(TypedDict):
@@ -141,6 +146,17 @@ def _quality_signals(markdown: str) -> MarkdownQualitySignals:
         and avg_line_length >= 220
         and blob_token_count >= 8
     )
+    meaningful_lines = [line.strip() for line in lines if line.strip()]
+    metadata_lines = meaningful_lines
+    if (
+        len(meaningful_lines) >= 3
+        and _MARKDOWN_YAML_DELIMITER_RE.match(meaningful_lines[0])
+        and _MARKDOWN_YAML_DELIMITER_RE.match(meaningful_lines[-1])
+    ):
+        metadata_lines = meaningful_lines[1:-1]
+    is_metadata_only = bool(metadata_lines) and all(
+        _MARKDOWN_METADATA_LINE_RE.match(line) for line in metadata_lines
+    )
     return {
         "char_count": char_count,
         "line_count": line_count,
@@ -152,6 +168,7 @@ def _quality_signals(markdown: str) -> MarkdownQualitySignals:
         "avg_line_length": avg_line_length,
         "newline_density": newline_density,
         "has_single_line_blob": has_single_line_blob,
+        "is_metadata_only": is_metadata_only,
     }
 
 
@@ -162,6 +179,8 @@ def _assess_markdown_quality(
     reasons: list[str] = []
     if _looks_like_html(markdown):
         reasons.append("html_document")
+    if signal_set["is_metadata_only"]:
+        reasons.append("metadata_only_document")
     if signal_set["has_single_line_blob"]:
         reasons.append("single_line_blob")
     if (
@@ -203,6 +222,8 @@ def _score_markdown_quality(
         score -= (signal_set["avg_line_length"] - 140.0) / 30.0
     if signal_set["has_single_line_blob"]:
         score -= 30.0
+    if signal_set["is_metadata_only"]:
+        score -= 20.0
     return score
 
 
