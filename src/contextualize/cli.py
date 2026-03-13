@@ -208,8 +208,10 @@ class OrderedGroup(click.Group):
 
     def _sync_dynamic_commands(self) -> None:
         from .plugins.auth import sync_plugin_auth_group
+        from .plugins.cli import sync_plugin_cli_commands
 
         sync_plugin_auth_group(self)
+        sync_plugin_cli_commands(self)
 
     def format_commands(
         self, ctx: click.Context, formatter: click.HelpFormatter
@@ -1333,6 +1335,7 @@ def hydrate_cmd(
     refresh_all,
     cache_ttl,
     trace,
+    **extra_params,
 ):
     """
     Materialize targets or a YAML manifest into a context folder.
@@ -1344,6 +1347,8 @@ def hydrate_cmd(
     used_options = _collect_used_global_option_labels(ctx)
     if used_options:
         click.echo(f"ignoring global options [{', '.join(used_options)}]", err=True)
+
+    from .plugins import collect_plugin_cli_overrides
 
     from .manifest.hydrate import (
         apply_hydration_plan,
@@ -1378,6 +1383,9 @@ def hydrate_cmd(
     set_refresh_images(refresh_images)
     set_refresh_videos(refresh_videos)
     set_refresh_audio(refresh_audio)
+    command_params = dict(ctx.params)
+    command_params.update(extra_params)
+    plugin_overrides = collect_plugin_cli_overrides("hydrate", command_params)
 
     manifest_path = None
     inline_targets: list[str] = []
@@ -1406,6 +1414,7 @@ def hydrate_cmd(
                 use_cache=use_cache if use_cache is not None else True,
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
+                plugin_overrides=plugin_overrides,
             )
         except (ValueError, FileNotFoundError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -1439,6 +1448,7 @@ def hydrate_cmd(
             use_cache=use_cache,
             cache_ttl=parsed_cache_ttl,
             refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )
         cwd = os.getcwd()
         data = None
@@ -1690,6 +1700,7 @@ def cat_cmd(
     refresh_audio,
     refresh_all,
     cache_ttl,
+    **extra_params,
 ):
     """
     Prepare and concatenate file references (raw).
@@ -1744,6 +1755,7 @@ def cat_cmd(
 
     from pathlib import Path
 
+    from .plugins import collect_plugin_cli_overrides
     from .render.links import add_markdown_link_refs
     from .render.trace import compute_input_token_details, format_trace_output
     from .references import (
@@ -1753,6 +1765,10 @@ def cat_cmd(
     )
     from .git.cache import ensure_repo, expand_git_paths
     from .git.target import github_blob_to_raw_url, parse_git_target
+
+    command_params = dict(ctx.params)
+    command_params.update(extra_params)
+    plugin_overrides = collect_plugin_cli_overrides("cat", command_params)
 
     injection_trace_items = [] if inject and trace else None
     ignored_files = []
@@ -1776,6 +1792,7 @@ def cat_cmd(
                 use_cache=use_cache,
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
+                plugin_overrides=plugin_overrides,
             )
         except (MarkItDownConversionError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -1936,6 +1953,7 @@ def cat_cmd(
                 inject=inject,
                 link_skip=link_skip,
                 include_token_count=annotate_tokens,
+                plugin_overrides=plugin_overrides,
             )
         except (MarkItDownConversionError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc

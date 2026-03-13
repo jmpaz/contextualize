@@ -58,11 +58,37 @@ def _render_plugin_line(plugin: LoadedPlugin, *, name_width: int) -> str:
 
 def _render_installed_plugins(plugins: tuple[LoadedPlugin, ...]) -> tuple[str, ...]:
     if not plugins:
-        return ("Installed plugins: none",)
+        return ("No plugins installed.",)
     name_width = _plugin_name_width(plugins)
-    lines = ["Installed plugins:"]
+    grouped: dict[str, list[LoadedPlugin]] = {"source": [], "processor": []}
     for plugin in plugins:
-        lines.append(_render_plugin_line(plugin, name_width=name_width))
+        grouped.setdefault(plugin.plugin_kind, []).append(plugin)
+    sections: list[list[str]] = []
+    if grouped.get("processor"):
+        sections.append(
+            [
+                "Processors:",
+                *(
+                    _render_plugin_line(plugin, name_width=name_width)
+                    for plugin in grouped["processor"]
+                ),
+            ]
+        )
+    if grouped.get("source"):
+        sections.append(
+            [
+                "Sources:",
+                *(
+                    _render_plugin_line(plugin, name_width=name_width)
+                    for plugin in grouped["source"]
+                ),
+            ]
+        )
+    lines: list[str] = []
+    for index, section in enumerate(sections):
+        if index > 0:
+            lines.append("")
+        lines.extend(section)
     return tuple(lines)
 
 

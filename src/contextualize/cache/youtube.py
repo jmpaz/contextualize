@@ -7,12 +7,16 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .media import get_cached_media_bytes as _get_cached_media_bytes
+from .media import store_media_bytes as _store_media_bytes
+
 YOUTUBE_CACHE_ROOT = Path(
     os.environ.get(
         "CONTEXTUALIZE_YOUTUBE_CACHE",
         os.path.expanduser("~/.local/share/contextualize/cache/youtube/v1"),
     )
 )
+MEDIA_CACHE_ROOT = YOUTUBE_CACHE_ROOT / "media"
 DEFAULT_TTL = timedelta(days=30)
 CACHE_VERSION = 1
 
@@ -109,3 +113,11 @@ def store_transcript(
 
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(asdict(metadata), f, indent=2)
+
+
+def get_cached_media_bytes(identity: str) -> bytes | None:
+    return _get_cached_media_bytes(MEDIA_CACHE_ROOT, identity)
+
+
+def store_media_bytes(identity: str, content: bytes) -> None:
+    _store_media_bytes(MEDIA_CACHE_ROOT, identity, content)

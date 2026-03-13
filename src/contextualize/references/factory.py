@@ -181,6 +181,7 @@ def create_file_references(
                                 use_cache=use_cache,
                                 cache_ttl=cache_ttl,
                                 refresh_cache=refresh_cache,
+                                plugin_overrides=effective_plugin_overrides or None,
                             )
                         )
                     continue
@@ -198,6 +199,7 @@ def create_file_references(
                     use_cache=use_cache,
                     cache_ttl=cache_ttl,
                     refresh_cache=refresh_cache,
+                    plugin_overrides=effective_plugin_overrides or None,
                 )
             )
         elif os.path.isfile(path):

@@ -55,7 +55,7 @@ Details and more examples are available in [`docs/usage.md`](docs/usage.md).
 
 ## Plugins
 
-`contextualize` loads provider plugins from installed Python packages via the
+`contextualize` loads source and processor plugins from installed Python packages via the
 `contextualize.plugins` entry-point group.
 
 See [`docs/plugins.md`](docs/plugins.md) for details.

@@ -5,6 +5,11 @@ from pathlib import Path
 import pytest
 
 from contextualize.cache import local_media as local_media_cache
+from contextualize.plugins.api import (
+    TranscriptionProvider,
+    TranscriptionRequest,
+    TranscriptionResult,
+)
 from contextualize.references.audio_transcription import (
     transcribe_audio_file,
     transcribe_media_file,
@@ -25,6 +30,15 @@ def _configure_local_media_cache(
     return cache_root
 
 
+def _provider(name: str, transcribe_fn) -> TranscriptionProvider:
+    return TranscriptionProvider(
+        name=name,
+        priority=200,
+        transcribe=transcribe_fn,
+        cache_identity=lambda _request: {"provider": name},
+    )
+
+
 def test_transcribe_audio_file_reuses_cache_for_identical_bytes(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -36,22 +50,20 @@ def test_transcribe_audio_file_reuses_cache_for_identical_bytes(
 
     calls: list[str] = []
 
-    def _transcribe(
-        data: bytes,
-        *,
-        filename: str,
-        content_type: str | None = None,
-        timeout: float = 600,
-    ) -> str:
-        assert data == b"same-audio"
-        assert content_type == "audio/mp4"
-        assert timeout == 600
-        calls.append(filename)
-        return f"audio transcript {len(calls)}"
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        assert request.data == b"same-audio"
+        assert request.content_type == "audio/mp4"
+        assert request.timeout == 600
+        calls.append(request.filename)
+        return TranscriptionResult(
+            text=f"audio transcript {len(calls)}",
+            model="openai",
+            provider="openai",
+        )
 
     monkeypatch.setattr(
-        "contextualize.references.audio_transcription.transcribe_audio_bytes",
-        _transcribe,
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
     )
 
     assert transcribe_audio_file(first) == "audio transcript 1"
@@ -68,20 +80,18 @@ def test_transcribe_audio_file_refresh_cache_bypasses_cached_result(
 
     calls: list[int] = []
 
-    def _transcribe(
-        data: bytes,
-        *,
-        filename: str,
-        content_type: str | None = None,
-        timeout: float = 600,
-    ) -> str:
-        assert data == b"audio"
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        assert request.data == b"audio"
         calls.append(len(calls) + 1)
-        return f"audio transcript {calls[-1]}"
+        return TranscriptionResult(
+            text=f"audio transcript {calls[-1]}",
+            model="openai",
+            provider="openai",
+        )
 
     monkeypatch.setattr(
-        "contextualize.references.audio_transcription.transcribe_audio_bytes",
-        _transcribe,
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
     )
 
     assert transcribe_audio_file(audio_path) == "audio transcript 1"
@@ -98,19 +108,17 @@ def test_transcribe_audio_file_cache_invalidates_when_bytes_change(
 
     calls: list[bytes] = []
 
-    def _transcribe(
-        data: bytes,
-        *,
-        filename: str,
-        content_type: str | None = None,
-        timeout: float = 600,
-    ) -> str:
-        calls.append(data)
-        return f"audio transcript {len(calls)}"
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append(request.data)
+        return TranscriptionResult(
+            text=f"audio transcript {len(calls)}",
+            model="openai",
+            provider="openai",
+        )
 
     monkeypatch.setattr(
-        "contextualize.references.audio_transcription.transcribe_audio_bytes",
-        _transcribe,
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
     )
 
     assert transcribe_audio_file(audio_path) == "audio transcript 1"
@@ -126,19 +134,39 @@ def test_transcribe_media_file_reuses_video_cache(tmp_path: Path, monkeypatch) -
 
     calls: list[str] = []
 
-    def _transcribe_video(path: Path, *, timeout: float) -> str:
-        calls.append(str(path))
-        assert timeout == 600
-        return f"video transcript {len(calls)}"
+    def _run_ffmpeg(*args, **kwargs):
+        output_path = Path(args[0][-1])
+        output_path.write_bytes(b"video-audio")
+        calls.append(str(output_path))
+
+        class _Result:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return _Result()
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        assert request.data == b"video-audio"
+        assert request.timeout == 600
+        return TranscriptionResult(
+            text=f"video transcript {len(calls)}",
+            model="openai",
+            provider="openai",
+        )
 
     monkeypatch.setattr(
-        "contextualize.references.audio_transcription._transcribe_video_file",
-        _transcribe_video,
+        "contextualize.references.audio_transcription.subprocess.run",
+        _run_ffmpeg,
+    )
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
     )
 
     assert transcribe_media_file(video_path) == "video transcript 1"
     assert transcribe_media_file(video_path) == "video transcript 1"
-    assert calls == [str(video_path)]
+    assert len(calls) == 1
 
 
 def test_file_reference_passes_media_cache_controls(

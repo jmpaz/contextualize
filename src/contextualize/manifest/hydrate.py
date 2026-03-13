@@ -57,6 +57,7 @@ class HydrateOverrides:
     use_cache: bool | None = None
     cache_ttl: timedelta | None = None
     refresh_cache: bool = False
+    plugin_overrides: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,7 @@ def build_inline_hydration_plan(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> HydratePlan:
     from ..utils import brace_expand
 
@@ -178,6 +180,7 @@ def build_inline_hydration_plan(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )
         for item in items:
             subpath = _split_subpath(item.context_subpath)
@@ -366,7 +369,10 @@ def build_hydration_plan_data(
         raise ValueError("'components' must be a list")
     components = normalize_components(components)
 
-    plugin_overrides = _resolve_plugin_config(cfg)
+    plugin_overrides = _merge_plugin_overrides(
+        _resolve_plugin_config(cfg),
+        overrides.plugin_overrides,
+    )
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
@@ -742,7 +748,7 @@ def build_hydration_plan_data(
                 base_dir,
                 include_root=has_local_sources,
                 plugin_overrides=plugin_overrides,
-                include_plugin_defaults=bool(manifest_plugin_providers),
+                include_plugin_defaults=bool(manifest_plugin_providers or plugin_overrides),
                 manifest_plugin_providers=manifest_plugin_providers,
             ),
             "components": normalized_components,

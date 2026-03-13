@@ -112,6 +112,7 @@ def add_markdown_link_refs(
     include_token_count=False,
     inject=False,
     link_skip=None,
+    plugin_overrides=None,
 ):
     """
     Discover Markdown-linked files and append them as additional refs.
@@ -180,6 +181,7 @@ def add_markdown_link_refs(
         include_token_count=include_token_count,
         inject=inject,
         depth=link_depth,
+        plugin_overrides=plugin_overrides,
     )["refs"]
     refs.extend(more)
     return refs, trace_items, skip_impact

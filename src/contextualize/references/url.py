@@ -269,6 +269,7 @@ class URLReference:
     use_cache: bool = True
     cache_ttl: timedelta | None = None
     refresh_cache: bool = False
+    plugin_overrides: dict[str, Any] | None = None
     _bypass_markdown_converter: bool = field(default=False, init=False, repr=False)
     _gist_filename: str | None = field(default=None, init=False, repr=False)
     _content_type: str | None = field(default=None, init=False, repr=False)
@@ -666,11 +667,13 @@ class URLReference:
             elif "." not in media_name:
                 media_name = f"{media_name}.mp3" if is_audio else f"{media_name}.mp4"
             try:
-                text = transcribe_media_bytes(
-                    data,
-                    filename=media_name,
-                    content_type=content_type or None,
-                )
+                transcribe_kwargs = {
+                    "filename": media_name,
+                    "content_type": content_type or None,
+                }
+                if self.plugin_overrides is not None:
+                    transcribe_kwargs["plugin_overrides"] = self.plugin_overrides
+                text = transcribe_media_bytes(data, **transcribe_kwargs)
             except RuntimeError as exc:
                 raise ValueError(
                     f"Media transcription failed for {self.url}: {exc}"
@@ -688,6 +691,7 @@ class URLReference:
                     use_cache=self.use_cache,
                     cache_ttl=self.cache_ttl,
                     refresh_cache=self.refresh_cache,
+                    plugin_overrides=self.plugin_overrides,
                 )
             self.file_content = text
             return text
@@ -726,6 +730,7 @@ class URLReference:
                 use_cache=self.use_cache,
                 cache_ttl=self.cache_ttl,
                 refresh_cache=self.refresh_cache,
+                plugin_overrides=self.plugin_overrides,
             )
         self.file_content = text
         return text
@@ -744,6 +749,7 @@ def create_url_reference(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> URLReference:
     return URLReference(
         url=url,
@@ -758,4 +764,5 @@ def create_url_reference(
         use_cache=use_cache,
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
     )

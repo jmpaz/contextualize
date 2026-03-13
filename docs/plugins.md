@@ -14,6 +14,7 @@ Each plugin module should export:
 - `PLUGIN_API_VERSION = "1"`
 - `PLUGIN_NAME = "my-plugin"`
 - `PLUGIN_PRIORITY = 200`
+- optional `PLUGIN_KIND = "source" | "processor"` (defaults to `"source"`)
 - `can_resolve(target: str, context: dict) -> bool`
 - `resolve(target: str, context: dict) -> list[dict]`
 - optional `register_auth_command(group) -> None`
@@ -32,3 +33,5 @@ Each plugin module should export:
 Plugins are checked in priority order (highest first). The first plugin that
 matches and returns valid documents wins. If a plugin errors, contextualize
 warns and falls through to the next plugin or default resolver.
+
+`source` plugins resolve targets directly, while `processor` plugins add post-resolution capabilities (e.g. transcription routing, media processing policy).

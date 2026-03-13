@@ -16,6 +16,7 @@ def _entrypoint(
     entrypoint_value: str,
     plugin_name: str,
     register_auth: bool,
+    extra_attrs: dict[str, object] | None = None,
 ) -> object:
     class _FakeEntrypoint:
         name = entrypoint_name
@@ -28,6 +29,8 @@ def _entrypoint(
             plugin.PLUGIN_PRIORITY = 300
             plugin.can_resolve = lambda _target, _context: False
             plugin.resolve = lambda _target, _context: []
+            for key, value in (extra_attrs or {}).items():
+                setattr(plugin, key, value)
             if register_auth:
                 import click
 
@@ -57,7 +60,7 @@ def test_auth_placeholder_without_auth_plugins(monkeypatch, tmp_path: Path) -> N
     auth_result = runner.invoke(cli.cli, ["auth"])
     assert auth_result.exit_code == 0
     assert "No loaded plugins expose authentication handlers." in auth_result.output
-    assert "Installed plugins: none" in auth_result.output
+    assert "No plugins installed." in auth_result.output
 
 
 def test_auth_placeholder_lists_installed_plugins_and_sources(
@@ -86,7 +89,7 @@ def test_auth_placeholder_lists_installed_plugins_and_sources(
     auth_result = runner.invoke(cli.cli, ["auth"])
     assert auth_result.exit_code == 0
     assert "No loaded plugins expose authentication handlers." in auth_result.output
-    assert "Installed plugins:" in auth_result.output
+    assert "Sources:" in auth_result.output
     assert "- arena  contextualize_plugins.arena:plugin" in auth_result.output
 
     missing_result = runner.invoke(cli.cli, ["auth", "arena"])
@@ -168,7 +171,7 @@ def test_plugins_command_without_plugins(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(cli.cli, ["plugins"])
     assert result.exit_code == 0
-    assert "Installed plugins: none" in result.output
+    assert result.output.strip() == "No plugins installed."
 
 
 def test_plugins_command_lists_installed_plugins_and_sources(
@@ -202,9 +205,53 @@ def test_plugins_command_lists_installed_plugins_and_sources(
     runner = CliRunner()
     result = runner.invoke(cli.cli, ["plugins"])
     assert result.exit_code == 0
-    assert "Installed plugins:" in result.output
+    assert "Sources:" in result.output
     assert "- arena    contextualize_plugins.arena:plugin" in result.output
     assert "- youtube  contextualize_plugins.youtube:plugin" in result.output
+
+
+def test_plugins_command_groups_processor_plugins_separately(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from contextualize import cli
+    from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
+
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [
+            _entrypoint(
+                entrypoint_name="pkg-arena",
+                entrypoint_value="contextualize_plugins.arena:plugin",
+                plugin_name="arena",
+                register_auth=False,
+            ),
+            _entrypoint(
+                entrypoint_name="pkg-transcribe",
+                entrypoint_value="contextualize_plugins.transcribe:plugin",
+                plugin_name="transcribe",
+                register_auth=False,
+                extra_attrs={"PLUGIN_KIND": "processor"},
+            ),
+        ],
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    clear_loaded_plugins_cache()
+
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["plugins"])
+
+    assert result.exit_code == 0
+    assert "Processors:" in result.output
+    assert "Sources:" in result.output
+    assert result.output.index("Processors:") < result.output.index("Sources:")
+    assert (
+        "- transcribe  contextualize_plugins.transcribe:plugin\n\nSources:"
+        in result.output
+    )
+    assert "- arena       contextualize_plugins.arena:plugin" in result.output
+    assert "- transcribe  contextualize_plugins.transcribe:plugin" in result.output
 
 
 def test_plugins_command_missing_plugin_lists_installed_plugins(
@@ -233,7 +280,7 @@ def test_plugins_command_missing_plugin_lists_installed_plugins(
     result = runner.invoke(cli.cli, ["plugins", "missing"])
     assert result.exit_code != 0
     assert "Plugin 'missing' is not installed." in result.output
-    assert "Installed plugins:" in result.output
+    assert "Sources:" in result.output
     assert "- arena  contextualize_plugins.arena:plugin" in result.output
 
 

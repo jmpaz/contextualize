@@ -14,6 +14,7 @@ LOCAL_MEDIA_CACHE_ROOT = Path(
     )
 )
 TRANSCRIPT_CACHE_ROOT = LOCAL_MEDIA_CACHE_ROOT / "transcript"
+GATE_CACHE_ROOT = LOCAL_MEDIA_CACHE_ROOT / "gate"
 CACHE_VERSION = 1
 
 
@@ -89,6 +90,46 @@ def store_transcript(
             source_sha256=source_sha256,
             source_suffix=source_suffix,
             size_bytes=len(content.encode("utf-8")),
+        )
+        meta_path.write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
+    except OSError:
+        return
+
+
+def get_cached_gate_decision(identity: str) -> dict[str, object] | None:
+    content_path, meta_path = _cache_paths(GATE_CACHE_ROOT, identity, "json")
+    if not content_path.exists():
+        return None
+    if _load_meta(meta_path) is None:
+        return None
+    try:
+        payload = json.loads(content_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def store_gate_decision(
+    identity: str,
+    payload: dict[str, object],
+    *,
+    operation: str,
+    source_sha256: str,
+    source_suffix: str,
+) -> None:
+    if not payload:
+        return
+    try:
+        GATE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        content_path, meta_path = _cache_paths(GATE_CACHE_ROOT, identity, "json")
+        content_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        meta = LocalMediaCacheMetadata(
+            identity=identity,
+            cached_at=datetime.now(timezone.utc).isoformat(),
+            operation=operation,
+            source_sha256=source_sha256,
+            source_suffix=source_suffix,
+            size_bytes=len(content_path.read_bytes()),
         )
         meta_path.write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
     except OSError:
