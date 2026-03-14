@@ -13,6 +13,7 @@ from ..plugins.resolve import resolve_plugin_references
 from ..git.target import parse_git_target
 from ..utils import brace_expand, count_tokens
 from .file import FileReference
+from .audio_transcription import is_media_suffix
 from .helpers import (
     MARKITDOWN_PREFERRED_EXTENSIONS,
     fetch_gist_files,
@@ -213,7 +214,10 @@ def create_file_references(
                     ignored_files.append((path, token_count))
             elif is_utf8_file(path) or (
                 not text_only
-                and Path(path).suffix.lower() in MARKITDOWN_PREFERRED_EXTENSIONS
+                and (
+                    Path(path).suffix.lower() in MARKITDOWN_PREFERRED_EXTENSIONS
+                    or is_media_suffix(Path(path).suffix)
+                )
             ):
                 ranges = None
                 if symbols:
@@ -283,8 +287,10 @@ def create_file_references(
                             dir_ignored_files[root].append((file_path, token_count))
                     elif is_utf8_file(file_path) or (
                         not text_only
-                        and Path(file_path).suffix.lower()
-                        in MARKITDOWN_PREFERRED_EXTENSIONS
+                        and (
+                            Path(file_path).suffix.lower() in MARKITDOWN_PREFERRED_EXTENSIONS
+                            or is_media_suffix(Path(file_path).suffix)
+                        )
                     ):
                         dirs_with_non_ignored_files.add(root)
                         parent = os.path.dirname(root)
