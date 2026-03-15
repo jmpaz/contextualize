@@ -172,6 +172,23 @@ def build_inline_hydration_plan(
         else:
             expanded.append(t)
 
+    local_parents: list[str] = []
+    for t in expanded:
+        exp = os.path.expanduser(t)
+        if is_http_url(exp) or _has_explicit_scheme(exp) or parse_git_target(exp):
+            continue
+        parent = str(Path(exp).parent)
+        try:
+            Path(parent).relative_to(cwd)
+        except ValueError:
+            local_parents.append(parent)
+    local_base: str | None = None
+    if local_parents:
+        try:
+            local_base = os.path.commonpath(local_parents)
+        except ValueError:
+            pass
+
     for target in expanded:
         items = _resolve_spec_items(
             target,
@@ -182,6 +199,7 @@ def build_inline_hydration_plan(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
+            local_base=local_base,
         )
         for item in items:
             subpath = _split_subpath(item.context_subpath)
@@ -1506,6 +1524,7 @@ def _resolve_spec_items(
     refresh_cache: bool = False,
     force_git: bool = False,
     plugin_overrides: dict[str, Any] | None = None,
+    local_base: str | None = None,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
     spec_opts = parse_target_spec(spec)
@@ -1612,7 +1631,13 @@ def _resolve_spec_items(
             try:
                 rel_path = _relative_path(ref.path, base_dir)
             except ValueError:
-                rel_path = Path(ref.path).name
+                if local_base:
+                    try:
+                        rel_path = _relative_path(ref.path, local_base)
+                    except ValueError:
+                        rel_path = Path(ref.path).name
+                else:
+                    rel_path = Path(ref.path).name
             is_media = _is_media_suffix(Path(ref.path).suffix)
             context_subpath = (
                 str(Path(rel_path).with_suffix(".md")) if is_media else rel_path
