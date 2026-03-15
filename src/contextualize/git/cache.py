@@ -164,7 +164,8 @@ def expand_git_paths(repo_dir: str, spec: str) -> list[str]:
     from glob import glob
 
     paths: list[str] = []
-    for part in _split_brace_options(spec):
+    parts = _split_brace_options(spec) if "{" in spec else [spec]
+    for part in parts:
         for expanded_path in brace_expand(part):
             full = os.path.join(repo_dir, expanded_path)
             matches = glob(full, recursive=True)

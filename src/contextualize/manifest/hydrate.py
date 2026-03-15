@@ -23,6 +23,7 @@ from ..plugins import (
 )
 from ..plugins.reference import PluginReference
 from ..references import URLReference, create_file_references
+from ..references.audio_transcription import is_media_suffix as _is_media_suffix
 from ..runtime import get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
@@ -1351,6 +1352,9 @@ def _plugin_context_subpath(
             label = ref.trace_path or ref.path or "item"
         cleaned = label.strip().lstrip("/")
         if "/" in cleaned:
+            plugin_slug = source_type.replace("plugin:", "", 1)
+            if cleaned.startswith(f"{plugin_slug}/"):
+                cleaned = cleaned[len(plugin_slug) + 1:]
             base = cleaned
         else:
             fallback_name = _sanitize_path_segment(cleaned, fallback="item")
@@ -1602,20 +1606,27 @@ def _resolve_spec_items(
             ignore_patterns = ignore_cache[cache_key]
 
         refs = create_file_references(
-            [full], ignore_patterns=ignore_patterns, format="raw", text_only=True
+            [full], ignore_patterns=ignore_patterns, format="raw", text_only=False
         )["refs"]
         for ref in refs:
-            rel_path = _relative_path(ref.path, base_dir)
+            try:
+                rel_path = _relative_path(ref.path, base_dir)
+            except ValueError:
+                rel_path = Path(ref.path).name
+            is_media = _is_media_suffix(Path(ref.path).suffix)
+            context_subpath = (
+                str(Path(rel_path).with_suffix(".md")) if is_media else rel_path
+            )
             resolved.append(
                 ResolvedItem(
                     source_type="local",
                     source_ref=base_dir,
                     source_rev=None,
                     source_path=rel_path,
-                    context_subpath=rel_path,
+                    context_subpath=context_subpath,
                     content=ref.file_content,
                     manifest_spec=rel_path,
-                    source_full_path=ref.path,
+                    source_full_path=None if is_media else ref.path,
                 )
             )
     return resolved
