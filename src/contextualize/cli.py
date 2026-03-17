@@ -1026,7 +1026,7 @@ def payload_cmd(
     If no path is given and stdin is piped, read the manifest from stdin.
 
     Some common non-text formats are converted to text automatically:
-    pdf, docx, pptx, xls/xlsx, csv, epub, msg, images (jpg/jpeg/png),
+    pdf, docx, pptx, xls/xlsx, csv, epub, msg, images (jpg/jpeg/png/webp/gif/heic/avif/tiff),
     audio/video (wav/mp3/m4a/mp4).
     """
     ctx.obj["format"] = "md"  # for segmentation
@@ -1706,7 +1706,7 @@ def cat_cmd(
     Prepare and concatenate file references (raw).
 
     Some common non-text formats are converted to text automatically:
-    pdf, docx, pptx, xls/xlsx, csv, epub, msg, images (jpg/jpeg/png),
+    pdf, docx, pptx, xls/xlsx, csv, epub, msg, images (jpg/jpeg/png/webp/gif/heic/avif/tiff),
     audio/video (wav/mp3/m4a/mp4).
     """
     token_target = ctx.obj.get("token_target", "cl100k_base")
