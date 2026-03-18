@@ -122,7 +122,9 @@ def _validate_plugin_callables(
             return None
         candidate_kind = plugin_kind.strip().lower()
         if candidate_kind not in {"source", "processor"}:
-            _warn(f"plugin '{name}' has unsupported plugin_kind={plugin_kind!r} ({origin})")
+            _warn(
+                f"plugin '{name}' has unsupported plugin_kind={plugin_kind!r} ({origin})"
+            )
             return None
         normalized_kind = candidate_kind
     return LoadedPlugin(

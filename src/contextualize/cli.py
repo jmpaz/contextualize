@@ -1675,6 +1675,11 @@ def hydrate_cmd(
     type=str,
     help="Cache TTL (e.g., 7d, 24h, 1w)",
 )
+@click.option(
+    "--cache-only",
+    is_flag=True,
+    help="Only use already-cached content; skip anything not yet cached.",
+)
 @click.pass_context
 def cat_cmd(
     ctx,
@@ -1700,6 +1705,7 @@ def cat_cmd(
     refresh_audio,
     refresh_all,
     cache_ttl,
+    cache_only,
     **extra_params,
 ):
     """
@@ -1729,6 +1735,7 @@ def cat_cmd(
     refresh_videos = refresh_videos or refresh_media
     refresh_audio = refresh_audio or refresh_media
     from .runtime import (
+        set_cache_only,
         set_refresh_audio,
         set_refresh_cache,
         set_refresh_images,
@@ -1739,6 +1746,7 @@ def cat_cmd(
     set_refresh_images(refresh_images)
     set_refresh_videos(refresh_videos)
     set_refresh_audio(refresh_audio)
+    set_cache_only(cache_only)
 
     stdin_data = ctx.obj.get("stdin_data", "")
     if len(paths) == 1 and paths[0] == "-":

@@ -58,6 +58,7 @@ class FileReference:
         self.cache_ttl = cache_ttl
         self.refresh_cache = refresh_cache
         self.plugin_overrides = plugin_overrides
+        self.cache_miss = False
         self.file_content = self.original_file_content = ""
         self.output = self._get_contents()
 
@@ -85,6 +86,8 @@ class FileReference:
             raise ValueError(f"Unsupported file type: {self.path}")
         if is_media_suffix(suffix):
             try:
+                from ..references.audio_transcription import CacheMissError
+
                 transcribe_kwargs = {
                     "use_cache": self.use_cache,
                     "refresh_cache": self.refresh_cache,
@@ -92,6 +95,9 @@ class FileReference:
                 if self.plugin_overrides is not None:
                     transcribe_kwargs["plugin_overrides"] = self.plugin_overrides
                 transcript = transcribe_media_file(self.path, **transcribe_kwargs)
+            except CacheMissError:
+                self.cache_miss = True
+                return ""
             except Exception as e:
                 raise ValueError(
                     f"Media transcription failed for {self.path}: {e}"

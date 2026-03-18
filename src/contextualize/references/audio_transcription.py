@@ -82,6 +82,10 @@ def is_media_suffix(suffix: str) -> bool:
     return is_audio_suffix(suffix) or is_video_suffix(suffix)
 
 
+class CacheMissError(RuntimeError):
+    pass
+
+
 def _log(message: str) -> None:
     try:
         from contextualize.runtime import get_verbose_logging
@@ -129,6 +133,11 @@ def transcribe_media_file(
             cached = get_cached_local_media_transcript(cache_identity)
             if cached is not None:
                 return cached
+
+        from contextualize.runtime import get_cache_only
+
+        if get_cache_only():
+            raise CacheMissError(f"No cached transcript for video: {media_path.name}")
 
         result = _transcribe_video_path(
             media_path,
@@ -342,6 +351,9 @@ def _transcribe_audio_bytes(
         "video" if cache_operation.startswith("video") else "audio",
         refresh_cache=refresh_cache,
     )
+    from contextualize.runtime import get_cache_only
+
+    cache_only = get_cache_only()
     errors: list[str] = []
     for provider in providers:
         cache_identity = None
@@ -364,6 +376,8 @@ def _transcribe_audio_bytes(
                         model=provider.name,
                         provider=provider.name,
                     )
+        if cache_only:
+            continue
         try:
             result = provider.transcribe(request)
         except (
@@ -389,6 +403,8 @@ def _transcribe_audio_bytes(
             _log(f"stored transcript cache for {filename} via {provider.name}")
         return result
 
+    if cache_only:
+        raise CacheMissError(f"No cached transcript for audio: {filename}")
     if errors:
         raise RuntimeError("; ".join(errors))
     raise RuntimeError("No transcription providers could handle the media input")
@@ -477,9 +493,9 @@ def _normalized_transcription_config(
         "diarize": bool(raw.get("diarize", False)),
         "speakers": speakers if speakers and speakers > 0 else None,
         "auto_diarize": bool(raw.get("auto_diarize", False)),
-        "auto_diarize_provider": str(
-            raw.get("auto_diarize_provider") or "mistral"
-        ).strip().lower(),
+        "auto_diarize_provider": str(raw.get("auto_diarize_provider") or "mistral")
+        .strip()
+        .lower(),
         "explicit_provider": explicit_provider,
         "explicit_diarize": "diarize" in raw,
         "explicit_speakers": "speakers" in raw,

@@ -135,7 +135,7 @@ def create_file_references(
         spec_opts = parse_target_spec(raw_path)
         target = spec_opts.get("target", raw_path)
         path, symbols = split_spec_symbols(target)
-        plugin_refs = resolve_plugin_references(
+        plugin_refs, plugin_claimed = resolve_plugin_references(
             target,
             format=format,
             label=label,
@@ -152,6 +152,8 @@ def create_file_references(
         )
         if plugin_refs:
             file_references.extend(plugin_refs)
+            continue
+        if plugin_claimed:
             continue
 
         if (
@@ -288,7 +290,8 @@ def create_file_references(
                     elif is_utf8_file(file_path) or (
                         not text_only
                         and (
-                            Path(file_path).suffix.lower() in MARKITDOWN_PREFERRED_EXTENSIONS
+                            Path(file_path).suffix.lower()
+                            in MARKITDOWN_PREFERRED_EXTENSIONS
                             or is_media_suffix(Path(file_path).suffix)
                         )
                     ):
@@ -343,6 +346,10 @@ def create_file_references(
             parent = new_parent
         if not parent_is_ignored:
             consolidated_folders[folder_path] = ignored_folders[folder_path]
+
+    file_references = [
+        r for r in file_references if not getattr(r, "cache_miss", False)
+    ]
 
     return {
         "refs": file_references,

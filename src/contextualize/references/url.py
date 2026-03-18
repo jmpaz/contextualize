@@ -273,6 +273,7 @@ class URLReference:
     _bypass_markdown_converter: bool = field(default=False, init=False, repr=False)
     _gist_filename: str | None = field(default=None, init=False, repr=False)
     _content_type: str | None = field(default=None, init=False, repr=False)
+    cache_miss: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.url.startswith(RAW_PREFIX):
@@ -496,6 +497,8 @@ class URLReference:
         return candidate
 
     def _get_contents(self) -> str:
+        from ..runtime import get_cache_only
+
         if self.use_cache and not self.refresh_cache:
             from ..cache import get_cached
 
@@ -525,6 +528,10 @@ class URLReference:
                     token_target=self.token_target,
                     include_token_count=self.include_token_count,
                 )
+
+        if get_cache_only():
+            self.cache_miss = True
+            return ""
 
         text = self._fetch_content()
 

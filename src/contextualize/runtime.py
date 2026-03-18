@@ -15,6 +15,7 @@ _REFRESH_AUDIO: ContextVar[bool] = ContextVar(
 _REFRESH_CACHE: ContextVar[bool] = ContextVar(
     "contextualize_refresh_cache", default=False
 )
+_CACHE_ONLY: ContextVar[bool] = ContextVar("contextualize_cache_only", default=False)
 _VERBOSE_LOGGING: ContextVar[bool] = ContextVar(
     "contextualize_verbose_logging", default=False
 )
@@ -87,6 +88,18 @@ def set_refresh_cache(enabled: bool) -> Token[bool]:
 
 def reset_refresh_cache(token: Token[bool]) -> None:
     _REFRESH_CACHE.reset(token)
+
+
+def get_cache_only() -> bool:
+    return _CACHE_ONLY.get()
+
+
+def set_cache_only(enabled: bool) -> Token[bool]:
+    return _CACHE_ONLY.set(bool(enabled))
+
+
+def reset_cache_only(token: Token[bool]) -> None:
+    _CACHE_ONLY.reset(token)
 
 
 def get_verbose_logging() -> bool:

@@ -767,7 +767,9 @@ def build_hydration_plan_data(
                 base_dir,
                 include_root=has_local_sources,
                 plugin_overrides=plugin_overrides,
-                include_plugin_defaults=bool(manifest_plugin_providers or plugin_overrides),
+                include_plugin_defaults=bool(
+                    manifest_plugin_providers or plugin_overrides
+                ),
                 manifest_plugin_providers=manifest_plugin_providers,
             ),
             "components": normalized_components,
@@ -1372,7 +1374,7 @@ def _plugin_context_subpath(
         if "/" in cleaned:
             plugin_slug = source_type.replace("plugin:", "", 1)
             if cleaned.startswith(f"{plugin_slug}/"):
-                cleaned = cleaned[len(plugin_slug) + 1:]
+                cleaned = cleaned[len(plugin_slug) + 1 :]
             base = cleaned
         else:
             fallback_name = _sanitize_path_segment(cleaned, fallback="item")

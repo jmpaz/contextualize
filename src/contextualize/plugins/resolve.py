@@ -69,6 +69,7 @@ def _build_context(
     use_cache: bool,
     cache_ttl: timedelta | None,
     refresh_cache: bool,
+    cache_only: bool,
     overrides: dict[str, Any],
 ) -> PluginContext:
     return {
@@ -82,6 +83,7 @@ def _build_context(
         "use_cache": use_cache,
         "cache_ttl": cache_ttl,
         "refresh_cache": refresh_cache,
+        "cache_only": cache_only,
         "overrides": overrides,
     }
 
@@ -101,7 +103,10 @@ def resolve_plugin_references(
     cache_ttl: timedelta | None,
     refresh_cache: bool,
     overrides: dict[str, Any],
-) -> list[PluginReference]:
+) -> tuple[list[PluginReference], bool]:
+    from contextualize.runtime import get_cache_only
+
+    cache_only = get_cache_only()
     context = _build_context(
         format=format,
         label=label,
@@ -113,6 +118,7 @@ def resolve_plugin_references(
         use_cache=use_cache,
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
+        cache_only=cache_only,
         overrides=overrides,
     )
     for plugin in get_loaded_plugins():
@@ -157,7 +163,7 @@ def resolve_plugin_references(
                 break
             normalized_documents.append(normalized)
         if not normalized_documents:
-            continue
+            return [], True
 
         return [
             PluginReference(
@@ -177,8 +183,8 @@ def resolve_plugin_references(
                 plugin_overrides=overrides or None,
             )
             for document in normalized_documents
-        ]
-    return []
+        ], True
+    return [], False
 
 
 def _build_inspection_context(overrides: dict[str, Any] | None) -> PluginContext:
@@ -193,6 +199,7 @@ def _build_inspection_context(overrides: dict[str, Any] | None) -> PluginContext
         use_cache=True,
         cache_ttl=None,
         refresh_cache=False,
+        cache_only=False,
         overrides=overrides or {},
     )
 

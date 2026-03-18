@@ -26,6 +26,7 @@ class PluginContext(TypedDict, total=False):
     use_cache: bool
     cache_ttl: timedelta | None
     refresh_cache: bool
+    cache_only: bool
     overrides: dict[str, Any]
 
 
