@@ -614,11 +614,30 @@ def cli(
     ctx.obj["output_pos"] = output_pos
 
     stdin_data = ""
+    stdin_binary_path: str | None = None
     if not sys.stdin.isatty():
-        stdin_data = sys.stdin.read()
-    ctx.obj["stdin_data"] = stdin_data
+        raw = sys.stdin.buffer.read()
+        if raw:
+            from .references.helpers import detect_media_suffix
 
-    if ctx.invoked_subcommand is None and not stdin_data:
+            suffix = detect_media_suffix(raw[:32])
+            if suffix:
+                import shutil
+                import tempfile
+
+                tmpdir = tempfile.mkdtemp()
+                stdin_binary_path = os.path.join(tmpdir, "stdin" + suffix)
+                with open(stdin_binary_path, "wb") as f:
+                    f.write(raw)
+                ctx.call_on_close(
+                    lambda _dir=tmpdir: shutil.rmtree(_dir, ignore_errors=True)
+                )
+            else:
+                stdin_data = raw.decode("utf-8", errors="replace")
+    ctx.obj["stdin_data"] = stdin_data
+    ctx.obj["stdin_binary_path"] = stdin_binary_path
+
+    if ctx.invoked_subcommand is None and not stdin_data and not stdin_binary_path:
         if prompt:
             ctx.obj["prompt_only"] = True
         else:
@@ -1399,6 +1418,11 @@ def hydrate_cmd(
     elif paths:
         inline_targets = list(paths)
 
+    if not inline_targets and not manifest_path:
+        stdin_binary_path = ctx.obj.get("stdin_binary_path")
+        if stdin_binary_path:
+            inline_targets = [stdin_binary_path]
+
     if inline_targets:
         from pathlib import Path
 
@@ -1752,12 +1776,16 @@ def cat_cmd(
     if len(paths) == 1 and paths[0] == "-":
         paths = ()
     if not paths:
-        stdin_urls = _extract_stdin_urls(stdin_data)
-        if stdin_urls:
-            paths = stdin_urls
+        stdin_binary_path = ctx.obj.get("stdin_binary_path")
+        if stdin_binary_path:
+            paths = (stdin_binary_path,)
         else:
-            click.echo(ctx.get_help())
-            ctx.exit()
+            stdin_urls = _extract_stdin_urls(stdin_data)
+            if stdin_urls:
+                paths = stdin_urls
+            else:
+                click.echo(ctx.get_help())
+                ctx.exit()
 
     ctx.obj["format"] = format  # for segmentation
 

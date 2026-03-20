@@ -307,6 +307,55 @@ DISALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
 )
 
 
+_FTYP_BRANDS: dict[bytes, str] = {
+    b"heic": ".heic",
+    b"heix": ".heic",
+    b"mif1": ".heic",
+    b"avif": ".avif",
+    b"avis": ".avif",
+    b"M4A ": ".m4a",
+    b"M4V ": ".mp4",
+    b"qt  ": ".mov",
+}
+
+
+def detect_media_suffix(header: bytes) -> str | None:
+    if len(header) < 3:
+        return None
+
+    if header[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if header[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if header[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if header[:4] in (b"II*\x00", b"MM\x00*"):
+        return ".tiff"
+    if header[:4] == b"%PDF":
+        return ".pdf"
+    if header[:4] == b"fLaC":
+        return ".flac"
+    if header[:4] == b"OggS":
+        return ".ogg"
+    if header[:3] == b"ID3" or header[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return ".mp3"
+
+    if len(header) >= 12 and header[:4] == b"RIFF":
+        riff_type = header[8:12]
+        if riff_type == b"WEBP":
+            return ".webp"
+        if riff_type == b"WAVE":
+            return ".wav"
+        if riff_type == b"AVI ":
+            return ".avi"
+
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        brand = header[8:12]
+        return _FTYP_BRANDS.get(brand, ".mp4")
+
+    return None
+
+
 _CD_FILENAME_RE = re.compile(
     r"filename\*?=(?:UTF-8''|\"|')?(?P<name>[^\"';]+)", flags=re.IGNORECASE
 )
