@@ -667,6 +667,11 @@ class URLReference:
         is_video = bool(suffix and is_video_suffix(suffix)) or content_type.startswith(
             "video/"
         )
+        if is_video:
+            from ..runtime import get_skip_media
+
+            if get_skip_media():
+                return ""
         if is_audio or is_video:
             media_name = os.path.basename(urlparse(self.url).path) or "media"
             if "." not in media_name and suffix:
@@ -722,6 +727,13 @@ class URLReference:
             try:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
+                from ..render.markitdown import IMAGE_SUFFIXES as _img_suffixes
+
+                if content_type.startswith("image/") or suffix in _img_suffixes:
+                    from ..runtime import get_skip_media
+
+                    if get_skip_media():
+                        return ""
                 from ..render.markitdown import convert_response_to_markdown
 
                 text = convert_response_to_markdown(r).markdown

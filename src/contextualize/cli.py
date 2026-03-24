@@ -1704,6 +1704,11 @@ def hydrate_cmd(
     is_flag=True,
     help="Only use already-cached content; skip anything not yet cached.",
 )
+@click.option(
+    "--skip-media",
+    is_flag=True,
+    help="Skip processing of images and video files.",
+)
 @click.pass_context
 def cat_cmd(
     ctx,
@@ -1730,6 +1735,7 @@ def cat_cmd(
     refresh_all,
     cache_ttl,
     cache_only,
+    skip_media,
     **extra_params,
 ):
     """
@@ -1764,6 +1770,7 @@ def cat_cmd(
         set_refresh_cache,
         set_refresh_images,
         set_refresh_videos,
+        set_skip_media,
     )
 
     set_refresh_cache(refresh_cache)
@@ -1771,6 +1778,7 @@ def cat_cmd(
     set_refresh_videos(refresh_videos)
     set_refresh_audio(refresh_audio)
     set_cache_only(cache_only)
+    set_skip_media(skip_media)
 
     stdin_data = ctx.obj.get("stdin_data", "")
     if len(paths) == 1 and paths[0] == "-":

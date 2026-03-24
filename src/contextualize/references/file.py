@@ -11,7 +11,8 @@ from .helpers import (
     MARKITDOWN_PREFERRED_EXTENSIONS,
     resolve_symbol_ranges,
 )
-from .audio_transcription import is_media_suffix, transcribe_media_file
+from .audio_transcription import is_media_suffix, is_video_suffix, transcribe_media_file
+from ..render.markitdown import IMAGE_SUFFIXES as _IMAGE_SUFFIXES
 
 
 class FileReference:
@@ -84,6 +85,11 @@ class FileReference:
         suffix = Path(self.path).suffix.lower()
         if suffix in DISALLOWED_EXTENSIONS:
             raise ValueError(f"Unsupported file type: {self.path}")
+        if suffix in _IMAGE_SUFFIXES or is_video_suffix(suffix):
+            from ..runtime import get_skip_media
+
+            if get_skip_media():
+                return ""
         if is_media_suffix(suffix):
             try:
                 from ..references.audio_transcription import CacheMissError

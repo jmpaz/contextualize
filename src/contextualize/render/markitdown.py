@@ -79,7 +79,7 @@ _DESCRIPTION_HEADING_RE = re.compile(
 _HAS_LLM_DESCRIPTION_RE = re.compile(r"(?m)^# Description")
 _AUTO_DESCRIPTION_HEADING = "# Description (auto-generated):"
 _AUTO_VIDEO_HEADING = "# Video (auto-generated):"
-_IMAGE_SUFFIXES = frozenset(
+IMAGE_SUFFIXES = frozenset(
     {
         ".jpg",
         ".jpeg",
@@ -93,6 +93,7 @@ _IMAGE_SUFFIXES = frozenset(
         ".tiff",
     }
 )
+_IMAGE_SUFFIXES = IMAGE_SUFFIXES
 _IMAGE_CONVERT_SUFFIXES = frozenset(
     {".gif", ".webp", ".heic", ".heif", ".avif", ".tif", ".tiff"}
 )
