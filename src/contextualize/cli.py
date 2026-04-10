@@ -260,6 +260,49 @@ class OrderedGroup(click.Group):
             _write_bold_section(formatter, "OTHER", rows)
 
 
+class PluginGroupedCommand(click.Command):
+    def format_options(
+        self, ctx: click.Context, formatter: click.HelpFormatter
+    ) -> None:
+        option_records: list[tuple[str | None, tuple[str, str]]] = []
+        for param in self.get_params(ctx):
+            if not isinstance(param, click.Option) or param.hidden:
+                continue
+            record = param.get_help_record(ctx)
+            if record is None:
+                continue
+            plugin_name = getattr(param, "_contextualize_plugin_name", None)
+            if not isinstance(plugin_name, str) or not plugin_name.strip():
+                plugin_name = None
+            option_records.append((plugin_name, record))
+
+        if not option_records:
+            return
+
+        core_records = [
+            record for plugin_name, record in option_records if plugin_name is None
+        ]
+        plugin_records: dict[str, list[tuple[str, str]]] = {}
+        plugin_order: list[str] = []
+        for plugin_name, record in option_records:
+            if plugin_name is None:
+                continue
+            if plugin_name not in plugin_records:
+                plugin_records[plugin_name] = []
+                plugin_order.append(plugin_name)
+            plugin_records[plugin_name].append(record)
+
+        if core_records:
+            with formatter.section("Options"):
+                formatter.write_dl(
+                    core_records, col_max=HELP_COL_MAX, col_spacing=HELP_COL_SPACING
+                )
+
+        for plugin_name in plugin_order:
+            title = f"plugin: {plugin_name}"
+            _write_bold_section(formatter, title, plugin_records[plugin_name])
+
+
 def validate_prompt(ctx, param, value):
     """
     Ensure at most two prompt strings are provided.
@@ -1240,7 +1283,7 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     raise click.ClickException(f"{path} exists. Use --overwrite to replace it.")
 
 
-@cli.command("hydrate")
+@cli.command("hydrate", cls=PluginGroupedCommand)
 @click.argument("paths", nargs=-1, type=str)
 @click.option(
     "--dir",
@@ -1602,7 +1645,7 @@ def hydrate_cmd(
     return None
 
 
-@cli.command("cat")
+@cli.command("cat", cls=PluginGroupedCommand)
 @click.argument("paths", nargs=-1, type=str)
 @click.option("--ignore", multiple=True, help="File(s) to ignore")
 @click.option("-f", "--format", default="md", help="Output format (md/xml/shell/raw)")

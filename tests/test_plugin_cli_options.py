@@ -79,3 +79,45 @@ def test_cat_passes_plugin_cli_overrides_into_file_reference_creation(
 
     assert result.exit_code == 0
     assert captured["plugin_overrides"] == {"demo-cli": {"value": "hello"}}
+
+
+def test_cat_help_groups_plugin_options_into_plugin_sections(monkeypatch) -> None:
+    class _DemoEntrypoint:
+        name = "demo-cli"
+        value = "contextualize_plugins.demo_cli:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "demo-cli"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda _target, _context: False
+            plugin.resolve = lambda _target, _context: []
+
+            def register_cli_options(command_name, command):
+                if command_name != "cat":
+                    return
+                command.params.append(
+                    click.Option(
+                        ["--demo-text"],
+                        default=None,
+                        help="demo plugin option",
+                    )
+                )
+
+            plugin.register_cli_options = register_cli_options
+            plugin.collect_cli_overrides = lambda *_args, **_kwargs: None
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_DemoEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["cat", "--help"])
+
+    assert result.exit_code == 0
+    assert "Options:\n" in result.output
+    assert "plugin: demo-cli\n" in result.output
+    assert "--demo-text" in result.output

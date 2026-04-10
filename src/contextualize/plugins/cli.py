@@ -27,6 +27,7 @@ def sync_plugin_cli_commands(root: click.Group) -> None:
             marker = f"{plugin.name}:{plugin.origin}:{command_name}"
             if marker in synced:
                 continue
+            existing_ids = {id(param) for param in command.params}
             try:
                 hook(command_name, command)
             except Exception as exc:
@@ -34,6 +35,10 @@ def sync_plugin_cli_commands(root: click.Group) -> None:
                     f"plugin '{plugin.name}' cli registration failed for '{command_name}': {exc}"
                 )
                 continue
+            for param in command.params:
+                if id(param) in existing_ids:
+                    continue
+                setattr(param, "_contextualize_plugin_name", plugin.name)
             synced.add(marker)
         setattr(command, _SYNCED_PLUGINS_ATTR, synced)
 
