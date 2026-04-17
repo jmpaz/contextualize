@@ -4,6 +4,16 @@ from dataclasses import dataclass
 from urllib.parse import quote, unquote, urlparse, urlunparse
 
 CACHE_ROOT = os.path.expanduser("~/.local/share/contextualize/cache/git")
+KNOWN_HTTP_GIT_HOSTS = frozenset(
+    {
+        "bitbucket.org",
+        "codeberg.org",
+        "git.sr.ht",
+        "github.com",
+        "gitlab.com",
+        "tangled.org",
+    }
+)
 
 
 @dataclass
@@ -25,6 +35,10 @@ def _get_host_and_repo(url: str) -> tuple[str, str]:
     if path.endswith(".git"):
         path = path[:-4]
     return host, path
+
+
+def _canonical_http_host(host: str) -> str:
+    return host[4:] if host.startswith("www.") else host
 
 
 def _extract_path_and_rev(target: str) -> tuple[str, str | None, str | None]:
@@ -181,16 +195,7 @@ def _is_supported_git_http_url(
     if segments[-1].endswith(".git"):
         return True
 
-    known_hosts = {
-        "github.com",
-        "gitlab.com",
-        "bitbucket.org",
-        "git.sr.ht",
-        "www.github.com",
-        "www.gitlab.com",
-        "www.bitbucket.org",
-    }
-    if host in known_hosts:
+    if _canonical_http_host(host) in KNOWN_HTTP_GIT_HOSTS:
         return len(segments) == 2
 
     return False
