@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from .api import PluginContext, PluginDocument, PluginTargetDescriptor
+from .api import PluginContext, PluginDocument, PluginListItem, PluginTargetDescriptor
 from .loader import get_loaded_plugins
 from .reference import PluginReference, PluginResolvedDocument
 
 
 def _warn(message: str) -> None:
     print(f"Warning: {message}", file=sys.stderr, flush=True)
+
+
+@dataclass(frozen=True)
+class PluginListResult:
+    items: tuple[PluginListItem, ...]
+    matched: bool
+    supported: bool
+    plugin_name: str | None = None
 
 
 def _normalize_plugin_document(
@@ -55,6 +64,34 @@ def _normalize_plugin_document(
         content=content_raw,
         metadata=metadata,
     )
+
+
+def _normalize_plugin_list_item(
+    plugin_name: str,
+    target: str,
+    item: PluginListItem,
+    *,
+    index: int,
+) -> PluginListItem | None:
+    target_raw = item.get("target")
+    if not isinstance(target_raw, str) or not target_raw:
+        _warn(
+            f"plugin '{plugin_name}' returned invalid listing target for '{target}' "
+            f"(item {index})"
+        )
+        return None
+
+    normalized: PluginListItem = {"target": target_raw}
+    label_raw = item.get("label")
+    if isinstance(label_raw, str) and label_raw:
+        normalized["label"] = label_raw
+    kind_raw = item.get("kind")
+    if isinstance(kind_raw, str) and kind_raw:
+        normalized["kind"] = kind_raw
+    metadata_raw = item.get("metadata")
+    if isinstance(metadata_raw, dict):
+        normalized["metadata"] = dict(metadata_raw)
+    return normalized
 
 
 def _build_context(
@@ -185,6 +222,53 @@ def resolve_plugin_references(
             for document in normalized_documents
         ], True
     return [], False
+
+
+def list_plugin_targets(
+    target: str,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> PluginListResult:
+    context = _build_inspection_context(overrides)
+    for plugin in get_loaded_plugins():
+        try:
+            matched = bool(plugin.can_resolve(target, context))
+        except Exception as exc:
+            _warn(f"plugin '{plugin.name}' can_resolve failed for '{target}': {exc}")
+            continue
+        if not matched:
+            continue
+        if plugin.list_targets is None:
+            return PluginListResult((), True, False, plugin.name)
+
+        try:
+            items = plugin.list_targets(target, context)
+        except Exception as exc:
+            _warn(f"plugin '{plugin.name}' list_targets failed for '{target}': {exc}")
+            return PluginListResult((), True, False, plugin.name)
+        if not isinstance(items, list):
+            _warn(f"plugin '{plugin.name}' returned non-list listing for '{target}'")
+            return PluginListResult((), True, False, plugin.name)
+
+        normalized_items: list[PluginListItem] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                _warn(
+                    f"plugin '{plugin.name}' returned non-mapping listing item for "
+                    f"'{target}' (item {index})"
+                )
+                return PluginListResult((), True, False, plugin.name)
+            normalized = _normalize_plugin_list_item(
+                plugin.name,
+                target,
+                item,
+                index=index,
+            )
+            if normalized is None:
+                return PluginListResult((), True, False, plugin.name)
+            normalized_items.append(normalized)
+        return PluginListResult(tuple(normalized_items), True, True, plugin.name)
+    return PluginListResult((), False, False, None)
 
 
 def _build_inspection_context(overrides: dict[str, Any] | None) -> PluginContext:

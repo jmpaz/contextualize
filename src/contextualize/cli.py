@@ -1689,6 +1689,12 @@ def hydrate_cmd(
     help="Show paths crawled during execution.",
 )
 @click.option(
+    "--list",
+    "list_mode",
+    is_flag=True,
+    help="List refs that git targets or plugins expose without reading content.",
+)
+@click.option(
     "--rev",
     type=str,
     default=None,
@@ -1768,6 +1774,7 @@ def cat_cmd(
     link_scope,
     link_skip,
     trace,
+    list_mode,
     rev,
     use_cache,
     refresh_cache,
@@ -1851,7 +1858,9 @@ def cat_cmd(
         split_path_and_symbols,
     )
     from .git.cache import ensure_repo, expand_git_paths
+    from .git.listing import list_git_target_refs
     from .git.target import github_blob_to_raw_url, parse_git_target
+    from .plugins.resolve import list_plugin_targets
 
     command_params = dict(ctx.params)
     command_params.update(extra_params)
@@ -1925,6 +1934,55 @@ def cat_cmd(
             expanded_all_paths.extend(brace_expand(p))
         else:
             expanded_all_paths.append(p)
+
+    def render_listing_targets(targets: list[str]) -> str:
+        if not targets:
+            return "No targets matched."
+        return "\n".join(f"- `{target}`" for target in targets)
+
+    def add_listing_targets(targets: list[str], refs_to_add: list[str]) -> None:
+        for ref in refs_to_add:
+            if ref not in targets:
+                targets.append(ref)
+
+    if list_mode:
+        if use_rev:
+            raise click.ClickException("--list does not support --rev")
+        listing_targets: list[str] = []
+        unsupported: list[str] = []
+        for p in expanded_all_paths:
+            tgt = parse_git_target(p)
+            if tgt:
+                repo_dir = ensure_repo(
+                    tgt,
+                    pull=effective_git_pull,
+                    reclone=git_reclone,
+                )
+                add_listing_targets(
+                    listing_targets,
+                    [item.target for item in list_git_target_refs(tgt, repo_dir)],
+                )
+                continue
+
+            plugin_result = list_plugin_targets(p, overrides=plugin_overrides)
+            if plugin_result.supported:
+                add_listing_targets(
+                    listing_targets,
+                    [item["target"] for item in plugin_result.items],
+                )
+                continue
+            if plugin_result.matched and plugin_result.plugin_name:
+                raise click.ClickException(
+                    f"Plugin '{plugin_result.plugin_name}' does not support listing targets: {p}"
+                )
+            unsupported.append(p)
+
+        if unsupported:
+            raise click.ClickException(
+                "Listing is only supported for git targets and plugins with list_targets: "
+                + ", ".join(unsupported)
+            )
+        return render_listing_targets(listing_targets)
 
     for p in expanded_all_paths:
         if p.startswith("http://") or p.startswith("https://"):

@@ -7,6 +7,7 @@ from .cli import (
 from .loader import clear_loaded_plugins_cache, get_loaded_plugins
 from .resolve import (
     classify_plugin_target,
+    list_plugin_targets,
     loaded_plugin_names,
     normalize_manifest_plugin_config,
     resolve_plugin_references,
@@ -17,6 +18,7 @@ __all__ = [
     "clear_loaded_plugins_cache",
     "resolve_plugin_references",
     "classify_plugin_target",
+    "list_plugin_targets",
     "normalize_manifest_plugin_config",
     "loaded_plugin_names",
     "sync_plugin_cli_commands",

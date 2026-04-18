@@ -15,6 +15,13 @@ class PluginDocument(TypedDict, total=False):
     metadata: dict[str, Any]
 
 
+class PluginListItem(TypedDict, total=False):
+    target: str
+    label: str
+    kind: str
+    metadata: dict[str, Any]
+
+
 class PluginContext(TypedDict, total=False):
     format: str
     label: str
@@ -39,6 +46,7 @@ class PluginTargetDescriptor(TypedDict, total=False):
 
 CanResolveFn = Callable[[str, PluginContext], bool]
 ResolveFn = Callable[[str, PluginContext], list[PluginDocument]]
+ListTargetsFn = Callable[[str, PluginContext], list[PluginListItem]]
 RegisterAuthCommandFn = Callable[[Any], None]
 ClassifyTargetFn = Callable[[str, PluginContext], PluginTargetDescriptor | None]
 NormalizeManifestConfigFn = Callable[[dict[str, Any] | None], dict[str, Any] | None]
@@ -125,6 +133,7 @@ class LoadedPlugin:
     origin: str
     can_resolve: CanResolveFn
     resolve: ResolveFn
+    list_targets: ListTargetsFn | None = None
     register_auth_command: RegisterAuthCommandFn | None = None
     classify_target: ClassifyTargetFn | None = None
     normalize_manifest_config: NormalizeManifestConfigFn | None = None

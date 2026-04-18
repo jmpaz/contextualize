@@ -51,7 +51,7 @@ Run `contextualize auth` to list available handlers from loaded plugins.
 Collect file contents, with optional wrapping and labels.
 
 ```
-contextualize cat [PATH...] [--ignore PATH] [--format md|xml|shell|raw] [--label relative|name|ext] [--tokens] [--git-pull] [--git-reclone]
+contextualize cat [PATH...] [--ignore PATH] [--format md|xml|shell|raw] [--label relative|name|ext] [--tokens] [--git-pull] [--git-reclone] [--list]
 ```
 
 `PATH` may also start with a git repo spec such as `github:user/repo` or `https://host/repo.git:path`.
@@ -62,6 +62,7 @@ Multiple paths can be separated with commas after the colon.
 Brace expressions and glob patterns in those paths are expanded after cloning.
 The `.git` suffix is optional and the repo will be cloned to `~/.local/share/contextualize/cache/git/` on first use.
 If no paths are provided and stdin includes `http(s)` URLs, `cat` extracts them and treats them as refs.
+Use `--list` to print Markdown bullets for refs exposed by git targets or plugins with a `list_targets` hook without reading full file contents.
 
 Non-text files supported by [markitdown](https://github.com/microsoft/markitdown) are automatically converted to text.
 For Are.na, ATProto, and Discord media descriptions, source media bytes are cached locally; use `--refresh-media` to force a re-fetch.
@@ -75,6 +76,7 @@ For Are.na, ATProto, and Discord media descriptions, source media bytes are cach
 | `--tokens` | annotate each label with the file's token count |
 | `--git-pull` | update cached git repos referenced in paths |
 | `--git-reclone` | delete and re-clone cached git repos |
+| `--list` | list plugin refs without reading full content |
 | `--trace` | print a breakdown of gathered inputs, sorted by token count |
 
 Append `:Symbol` (or `:Sym1,Sym2`) to any path to extract only those definitions.
