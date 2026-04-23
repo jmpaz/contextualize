@@ -9,7 +9,18 @@ import sys
 import click
 
 
+def _load_dotenv_enabled() -> bool:
+    return os.environ.get("CONTEXTUALIZE_LOAD_DOTENV", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def load_dotenv_optional() -> None:
+    if not _load_dotenv_enabled():
+        return
     try:
         from dotenv import find_dotenv, load_dotenv
 
