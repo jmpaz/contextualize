@@ -331,6 +331,8 @@ def create_file_references(
                     ignored_folders[dir_path] = (len(files_list), total_tokens)
                 else:
                     ignored_files.extend(files_list)
+        else:
+            raise ValueError(f"path not found: {path}")
 
     consolidated_folders = {}
     for folder_path in sorted(ignored_folders.keys()):
