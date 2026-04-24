@@ -144,6 +144,45 @@ def test_normalize_markdown_converter_output_keeps_small_escapes() -> None:
     assert normalized == raw
 
 
+def test_normalize_markdown_converter_output_strips_json_ld_fence() -> None:
+    raw = (
+        "# Article\n\n"
+        "Body text.\n\n"
+        "```json\n"
+        '{"@context":"https://schema.org","@type":"NewsArticle","headline":"Title"}\n'
+        "```"
+    )
+
+    normalized = _normalize_markdown_converter_output(raw)
+
+    assert normalized == "# Article\n\nBody text."
+
+
+def test_normalize_markdown_converter_output_keeps_non_json_ld_fence() -> None:
+    raw = '# Article\n\n```json\n{"example": true}\n```'
+
+    normalized = _normalize_markdown_converter_output(raw)
+
+    assert normalized == raw
+
+
+def test_url_reference_strips_json_ld_from_cached_content(monkeypatch) -> None:
+    cached = (
+        "# Article\n\n"
+        "Body text.\n\n"
+        "```json\n"
+        '{"@context":"https://schema.org","@type":"NewsArticle","headline":"Title"}\n'
+        "```"
+    )
+
+    monkeypatch.setattr("contextualize.cache.get_cached", lambda *_args: cached)
+
+    ref = URLReference(url="https://example.com/article", format="raw")
+
+    assert ref.read() == "# Article\n\nBody text."
+    assert ref.output == "# Article\n\nBody text."
+
+
 def test_assess_markdown_quality_detects_single_line_blob() -> None:
     blob = (
         "# Title * [a](https://example.com/a) * [b](https://example.com/b) "

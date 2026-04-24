@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Callable, TypedDict
+from typing import Any, Callable, Mapping, TypedDict
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from ..render.text import process_text
@@ -43,6 +44,7 @@ _MARKDOWN_BLOB_TOKEN_RE = re.compile(
     r"(?:\[[^\]\n]{1,200}\]\([^\s)]+[^)]*\)|\*\*[^*\n]+\*\*|`[^`\n]+`|#{1,6}\s+\S)"
 )
 _HTML_DOC_ROOT_RE = re.compile(r"^\s*<!doctype\s+html|^\s*<html\b", re.IGNORECASE)
+_JSON_FENCE_RE = re.compile(r"(?ms)^```json\s*\n(?P<body>.*?)\n```\s*$")
 _HTML_DOC_MARKERS = (
     "<html",
     "<head",
@@ -234,8 +236,37 @@ def _has_excessive_markdown_escapes(text: str) -> bool:
     )
 
 
+def _is_json_ld_payload(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_is_json_ld_payload(item) for item in value)
+    if not isinstance(value, Mapping):
+        return False
+    context = value.get("@context")
+    if isinstance(context, str) and "schema.org" in context:
+        return True
+    if isinstance(context, list) and any(
+        isinstance(item, str) and "schema.org" in item for item in context
+    ):
+        return True
+    graph = value.get("@graph")
+    return isinstance(graph, list) and any(_is_json_ld_payload(item) for item in graph)
+
+
+def _strip_json_ld_fences(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        try:
+            payload = json.loads(match.group("body"))
+        except json.JSONDecodeError:
+            return match.group(0)
+        if not _is_json_ld_payload(payload):
+            return match.group(0)
+        return ""
+
+    return _JSON_FENCE_RE.sub(replace, text).strip()
+
+
 def _normalize_markdown_converter_output(text: str) -> str:
-    normalized = text.strip()
+    normalized = _strip_json_ld_fences(text)
     if not normalized or not _has_excessive_markdown_escapes(normalized):
         return normalized
 
@@ -504,6 +535,7 @@ class URLReference:
 
             cached = get_cached(self.url, self.cache_ttl)
             if cached is not None:
+                cached = _strip_json_ld_fences(cached)
                 self.original_file_content = cached
                 self.file_content = cached
                 text = cached
