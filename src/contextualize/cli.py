@@ -6,9 +6,8 @@ from collections.abc import Sequence
 
 import click
 from click.formatting import term_len
-from pyperclip import copy
-from pyperclip import paste as clipboard_paste
 
+from .clipboard import copy_to_clipboard, paste_from_clipboard
 from .render.text import process_text
 from .utils import add_prompt_wrappers, count_tokens, wrap_text
 
@@ -833,7 +832,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                     return True
 
                 if before_prompt:
-                    copy(before_prompt)
+                    copy_to_clipboard(before_prompt)
                     if segments or after_prompt:
                         click.echo("Copied preprompt to clipboard.", nl=False)
                         if not maybe_wait("content"):
@@ -844,7 +843,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                 if segments:
                     for i, (segment_text, _) in enumerate(segments, 1):
                         copied_segment = wrap_text(segment_text, ctx.obj["wrap_mode"])
-                        copy(copied_segment)
+                        copy_to_clipboard(copied_segment)
                         tokens = count_tokens(copied_segment, target=token_target)[
                             "count"
                         ]
@@ -863,7 +862,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                             click.echo(msg + ".")
 
                 if after_prompt:
-                    copy(after_prompt)
+                    copy_to_clipboard(after_prompt)
                     click.echo("Copied postprompt to clipboard.")
             else:
                 segments = segment_output(
@@ -883,7 +882,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                         len(segments),
                     )
 
-                    copy(final_segment)
+                    copy_to_clipboard(final_segment)
                     tokens = count_tokens(final_segment, target=token_target)["count"]
 
                     if i == 1:
@@ -938,7 +937,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                         content_stage_info = count_tokens(
                             stage_text, target=token_target
                         )
-                    copy(stage_text)
+                    copy_to_clipboard(stage_text)
                     label_msg = label
                     if content_stage_info is not None:
                         label_msg = (
@@ -960,7 +959,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                     click.echo(trace_output)
                     click.echo("\n-----\n")
             else:
-                copy(final_output)
+                copy_to_clipboard(final_output)
                 if trace_output:
                     click.echo(trace_output)
                     click.echo("\n-----\n")
@@ -2263,7 +2262,7 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
             continue
 
         try:
-            clipboard_text = clipboard_paste()
+            clipboard_text = paste_from_clipboard()
         except Exception as exc:
             raise click.ClickException(f"Unable to read from clipboard: {exc}") from exc
 

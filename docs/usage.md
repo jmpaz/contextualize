@@ -18,6 +18,10 @@
 `--copy` and `--copy-segments` cannot be combined.
 `--staged-copy` requires `--prompt` and either `--copy` or `--copy-segments`.
 
+`--copy` uses the local clipboard when available and automatically prefers OSC52 when running over SSH or inside tmux. Set `CONTEXTUALIZE_CLIPBOARD=osc52` to force OSC52, `CONTEXTUALIZE_CLIPBOARD=pyperclip` to force the local clipboard backend, or leave it unset for auto-detection.
+
+For tmux, `contextualize` first tries `tmux load-buffer -w -`, then falls back to a tmux-wrapped OSC52 sequence. The outer terminal must allow clipboard writes; if tmux does not forward them, add `set -g set-clipboard on` to tmux config and ensure the terminal app allows OSC52 clipboard access.
+
 these flags can be combined with any command:
 
 ```bash
