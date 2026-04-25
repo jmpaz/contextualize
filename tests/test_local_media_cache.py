@@ -99,6 +99,84 @@ def test_transcribe_audio_file_refresh_cache_bypasses_cached_result(
     assert calls == [1, 2]
 
 
+def test_transcribe_audio_file_passes_language_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    captured: dict[str, object] = {}
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        captured["language"] = request.language
+        return TranscriptionResult(
+            text="audio transcript",
+            model="openai",
+            provider="openai",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"language": "ES"}},
+        )
+        == "audio transcript"
+    )
+    assert captured["language"] == "es"
+
+
+def test_transcribe_audio_file_cache_varies_by_language(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    calls: list[str | None] = []
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append(request.language)
+        return TranscriptionResult(
+            text=f"audio transcript {request.language}",
+            model="openai",
+            provider="openai",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"language": "es"}},
+        )
+        == "audio transcript es"
+    )
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"language": "en"}},
+        )
+        == "audio transcript en"
+    )
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"language": "es"}},
+        )
+        == "audio transcript es"
+    )
+    assert calls == ["es", "en"]
+
+
 def test_transcribe_audio_file_cache_invalidates_when_bytes_change(
     tmp_path: Path, monkeypatch
 ) -> None:

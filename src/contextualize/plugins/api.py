@@ -89,6 +89,7 @@ class TranscriptionRequest:
     bias_terms: tuple[str, ...]
     diarize: bool
     speaker_count: int | None
+    language: str | None = None
 
 
 @dataclass(frozen=True)

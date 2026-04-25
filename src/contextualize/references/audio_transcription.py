@@ -436,6 +436,7 @@ def _build_request(
         filename=filename,
         content_type=content_type,
         timeout=timeout,
+        language=config.get("language"),
         prompt=prompt,
         bias_terms=bias_terms,
         diarize=bool(config.get("diarize", False)),
@@ -485,8 +486,16 @@ def _normalized_transcription_config(
         provider = "openai"
     if provider not in {"auto", "openai", "mistral"}:
         provider = "auto"
+    language = raw.get("language")
+    if isinstance(language, str):
+        language = language.strip().lower()
+        if language in {"", "auto"}:
+            language = None
+    else:
+        language = None
     return {
         "provider": provider,
+        "language": language,
         "priorities": priorities,
         "prompt_parts": prompt_parts,
         "prompt_files": prompt_files,
@@ -669,6 +678,7 @@ def _ordered_providers(
 def _cacheable_resolved_config(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "provider": config.get("provider"),
+        "language": config.get("language"),
         "priorities": dict(config.get("priorities") or {}),
         "prompt_parts": list(config.get("prompt_parts") or []),
         "prompt_files": list(config.get("prompt_files") or []),
