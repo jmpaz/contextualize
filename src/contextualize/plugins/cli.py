@@ -15,7 +15,7 @@ def _warn(message: str) -> None:
 
 def sync_plugin_cli_commands(root: click.Group) -> None:
     loaded = get_loaded_plugins()
-    for command_name in ("cat", "hydrate"):
+    for command_name in ("cat", "hydrate", "payload"):
         command = root.commands.get(command_name)
         if command is None:
             continue
@@ -35,11 +35,14 @@ def sync_plugin_cli_commands(root: click.Group) -> None:
                     f"plugin '{plugin.name}' cli registration failed for '{command_name}': {exc}"
                 )
                 continue
+            added_param = False
             for param in command.params:
                 if id(param) in existing_ids:
                     continue
                 setattr(param, "_contextualize_plugin_name", plugin.name)
-            synced.add(marker)
+                added_param = True
+            if added_param:
+                synced.add(marker)
         setattr(command, _SYNCED_PLUGINS_ATTR, synced)
 
 

@@ -39,6 +39,7 @@ def build_payload(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> PayloadResult:
     payload, input_refs, trace_items, base, skipped, impact = build_payload_impl(
         components,
@@ -55,6 +56,7 @@ def build_payload(
         use_cache=use_cache,
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
     )
     return PayloadResult(payload, input_refs, trace_items, base, skipped, impact)
 
@@ -122,6 +124,7 @@ def render_manifest(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> PayloadResult:
     """
     Load YAML and assemble payload with mdlinks.
@@ -162,6 +165,7 @@ def render_manifest(
         use_cache=use_cache,
         cache_ttl=effective_ttl,
         refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
     )
 
 
@@ -178,6 +182,7 @@ def render_manifest_data(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> PayloadResult:
     """
     Assemble from an already-parsed YAML mapping (used for stdin case).
@@ -208,4 +213,5 @@ def render_manifest_data(
         use_cache=use_cache,
         cache_ttl=effective_ttl,
         refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
     )

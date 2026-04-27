@@ -3,7 +3,7 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
-from contextualize.manifest.build import _resolve_spec_to_seed_refs
+from contextualize.manifest.build import _resolve_spec_to_seed_refs, build_payload_impl
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
 
@@ -98,3 +98,33 @@ def test_manifest_build_counts_git_url_inputs_in_trace(
     assert len(trace_inputs) == 1
     assert trace_items == []
     assert trace_inputs[0].path == str(local_file)
+
+
+def test_payload_build_passes_plugin_overrides_to_spec_resolution(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeRef:
+        path = "demo://root"
+        trace_path = "demo://root"
+        output = "wrapped"
+        file_content = "body"
+
+        def read(self) -> str:
+            return "body"
+
+    def _create_refs(*_args, **kwargs):
+        captured["plugin_overrides"] = kwargs.get("plugin_overrides")
+        return {"refs": [_FakeRef()]}
+
+    monkeypatch.setattr(
+        "contextualize.manifest.build.create_file_references",
+        _create_refs,
+    )
+
+    build_payload_impl(
+        [{"name": "main", "files": ["demo://root"]}],
+        ".",
+        plugin_overrides={"demo": {"value": "hello"}},
+    )
+
+    assert captured["plugin_overrides"] == {"demo": {"value": "hello"}}

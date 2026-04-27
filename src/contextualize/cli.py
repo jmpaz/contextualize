@@ -998,7 +998,7 @@ def plugins_command(plugin_name: str | None = None) -> None:
     click.echo(render_plugin_line(plugin, plugins))
 
 
-@cli.command("payload")
+@cli.command("payload", cls=PluginGroupedCommand)
 @click.argument(
     "manifest_path",
     required=False,
@@ -1081,6 +1081,7 @@ def payload_cmd(
     refresh_audio,
     refresh_all,
     cache_ttl,
+    **extra_params,
 ):
     """
     Render a context payload from a manifest.
@@ -1118,6 +1119,12 @@ def payload_cmd(
     set_refresh_images(refresh_images)
     set_refresh_videos(refresh_videos)
     set_refresh_audio(refresh_audio)
+
+    from .plugins import collect_plugin_cli_overrides
+
+    command_params = dict(ctx.params)
+    command_params.update(extra_params)
+    plugin_overrides = collect_plugin_cli_overrides("payload", command_params)
 
     def parse_keys(values):
         keys = []
@@ -1163,6 +1170,7 @@ def payload_cmd(
                 use_cache=use_cache,
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
+                plugin_overrides=plugin_overrides,
             )
         except (MarkItDownConversionError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -1221,6 +1229,7 @@ def payload_cmd(
             use_cache=use_cache,
             cache_ttl=parsed_cache_ttl,
             refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )
         payload_content = result.payload
         input_refs = result.input_refs

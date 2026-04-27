@@ -185,6 +185,7 @@ def _resolve_spec_to_seed_refs(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ) -> tuple[List[Any], List[Any], List[tuple[str, str, int]]]:
     spec = os.path.expanduser(raw_spec)
     opts = parse_target_spec(spec)
@@ -248,6 +249,7 @@ def _resolve_spec_to_seed_refs(
                     use_cache=use_cache,
                     cache_ttl=cache_ttl,
                     refresh_cache=refresh_cache,
+                    plugin_overrides=plugin_overrides,
                 )["refs"]
                 seed_refs.extend(refs)
                 trace_inputs.extend([ref for ref in refs if hasattr(ref, "path")])
@@ -263,6 +265,7 @@ def _resolve_spec_to_seed_refs(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )["refs"]
         for ref in refs:
             _append_wrapped_ref(ref, url)
@@ -279,6 +282,7 @@ def _resolve_spec_to_seed_refs(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )["refs"]
         for ref in refs:
             _append_wrapped_ref(ref, target)
@@ -384,6 +388,7 @@ def _resolve_spec(
     use_cache: bool,
     cache_ttl: timedelta | None,
     refresh_cache: bool,
+    plugin_overrides: dict[str, Any] | None,
 ) -> _SpecResolution:
     if map_component:
         map_paths = _resolve_spec_to_paths(
@@ -419,6 +424,7 @@ def _resolve_spec(
             use_cache=use_cache,
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
         )
     )
 
@@ -493,6 +499,7 @@ def build_payload_impl(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    plugin_overrides: dict[str, Any] | None = None,
 ):
     parts: List[str] = []
     all_input_refs = []
@@ -606,6 +613,7 @@ def build_payload_impl(
                             use_cache=use_cache,
                             cache_ttl=cache_ttl,
                             refresh_cache=refresh_cache,
+                            plugin_overrides=plugin_overrides,
                         )
                     ),
                 )
