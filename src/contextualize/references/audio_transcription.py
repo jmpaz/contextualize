@@ -437,6 +437,7 @@ def _build_request(
         content_type=content_type,
         timeout=timeout,
         language=config.get("language"),
+        model=config.get("model"),
         prompt=prompt,
         bias_terms=bias_terms,
         diarize=bool(config.get("diarize", False)),
@@ -482,10 +483,13 @@ def _normalized_transcription_config(
     if not isinstance(provider, str):
         provider = None
     provider = (provider or "auto").strip().lower()
-    if provider == "whisper":
-        provider = "openai"
     if provider not in {"auto", "openai", "mistral"}:
         provider = "auto"
+    model = raw.get("model")
+    if isinstance(model, str):
+        model = model.strip() or None
+    else:
+        model = None
     language = raw.get("language")
     if isinstance(language, str):
         language = language.strip().lower()
@@ -495,6 +499,7 @@ def _normalized_transcription_config(
         language = None
     return {
         "provider": provider,
+        "model": model,
         "language": language,
         "priorities": priorities,
         "prompt_parts": prompt_parts,
@@ -678,6 +683,7 @@ def _ordered_providers(
 def _cacheable_resolved_config(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "provider": config.get("provider"),
+        "model": config.get("model"),
         "language": config.get("language"),
         "priorities": dict(config.get("priorities") or {}),
         "prompt_parts": list(config.get("prompt_parts") or []),

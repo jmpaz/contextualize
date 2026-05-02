@@ -90,6 +90,7 @@ class TranscriptionRequest:
     diarize: bool
     speaker_count: int | None
     language: str | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True)

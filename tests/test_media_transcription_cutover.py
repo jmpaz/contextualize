@@ -38,13 +38,20 @@ class _DummyResponse:
         raise ValueError("no json payload")
 
 
-def test_transcribe_audio_bytes_requires_whisper_configuration(
+def test_transcribe_audio_bytes_requires_openai_compatible_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("WHISPER_API_BASE", raising=False)
-    monkeypatch.delenv("WHISPER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_TRANSCRIPTION_API_BASE", raising=False)
+    monkeypatch.delenv("OPENAI_TRANSCRIPTION_URL", raising=False)
+    monkeypatch.delenv("OPENAI_TRANSCRIPTION_API_KEY", raising=False)
 
-    with pytest.raises(RuntimeError, match="WHISPER_API_BASE or WHISPER_API_KEY"):
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "OPENAI_TRANSCRIPTION_API_BASE, OPENAI_TRANSCRIPTION_URL, or "
+            "OPENAI_TRANSCRIPTION_API_KEY"
+        ),
+    ):
         transcribe_audio_bytes(b"audio", filename="sample.mp3")
 
 
@@ -183,5 +190,5 @@ def test_youtube_reference_uses_shared_media_transcription(
 
     transcript, source = YouTubeReference._get_transcript(ref, 120)
     assert transcript == "yt transcript"
-    assert source == "whisper"
+    assert source == "transcription"
     assert not audio_dir.exists()

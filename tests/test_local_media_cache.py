@@ -131,6 +131,38 @@ def test_transcribe_audio_file_passes_language_override(
     assert captured["language"] == "es"
 
 
+def test_transcribe_audio_file_passes_model_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    captured: dict[str, object] = {}
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        captured["model"] = request.model
+        return TranscriptionResult(
+            text="audio transcript",
+            model=request.model or "server-default",
+            provider="openai",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"model": "cohere"}},
+        )
+        == "audio transcript"
+    )
+    assert captured["model"] == "cohere"
+
+
 def test_transcribe_audio_file_cache_varies_by_language(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -175,6 +207,52 @@ def test_transcribe_audio_file_cache_varies_by_language(
         == "audio transcript es"
     )
     assert calls == ["es", "en"]
+
+
+def test_transcribe_audio_file_cache_varies_by_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    calls: list[str | None] = []
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append(request.model)
+        return TranscriptionResult(
+            text=f"audio transcript {request.model}",
+            model=request.model or "server-default",
+            provider="openai",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"model": "distilwhisper"}},
+        )
+        == "audio transcript distilwhisper"
+    )
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"model": "cohere"}},
+        )
+        == "audio transcript cohere"
+    )
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"model": "distilwhisper"}},
+        )
+        == "audio transcript distilwhisper"
+    )
+    assert calls == ["distilwhisper", "cohere"]
 
 
 def test_transcribe_audio_file_cache_invalidates_when_bytes_change(
