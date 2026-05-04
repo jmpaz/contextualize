@@ -60,6 +60,10 @@ from .youtube import (
     get_cached_transcript,
     store_transcript,
 )
+from .local_media import (
+    get_cached_transcript_result as get_cached_local_media_transcript_result,
+    store_transcript_result as store_local_media_transcript_result,
+)
 
 __all__ = [
     "ARENA_CACHE_ROOT",
@@ -83,6 +87,7 @@ __all__ = [
     "get_cached_channel",
     "get_cached_rendered",
     "get_cached_transcript",
+    "get_cached_local_media_transcript_result",
     "get_cached_soundcloud_api_json",
     "get_cached_soundcloud_client_token",
     "get_cached_soundcloud_media_bytes",
@@ -107,6 +112,7 @@ __all__ = [
     "store_channel",
     "store_rendered",
     "store_transcript",
+    "store_local_media_transcript_result",
     "store_soundcloud_api_json",
     "store_soundcloud_client_token",
     "store_soundcloud_media_bytes",

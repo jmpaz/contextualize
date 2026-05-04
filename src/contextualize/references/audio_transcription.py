@@ -12,10 +12,11 @@ from typing import Any
 from contextualize.cache.local_media import (
     get_cached_gate_decision as get_cached_local_media_gate_decision,
     get_cached_transcript as get_cached_local_media_transcript,
+    get_cached_transcript_result as get_cached_local_media_transcript_result,
 )
 from contextualize.cache.local_media import (
     store_gate_decision as store_local_media_gate_decision,
-    store_transcript as store_local_media_transcript,
+    store_transcript_result as store_local_media_transcript_result,
 )
 from contextualize.plugins import (
     loaded_transcription_gates,
@@ -130,6 +131,13 @@ def transcribe_media_file(
             "video", refresh_cache=refresh_cache
         )
         if use_cache and not should_refresh:
+            cached_result = get_cached_local_media_transcript_result(cache_identity)
+            if cached_result is not None:
+                return _result_from_cached_payload(
+                    cached_result,
+                    fallback_model="cached",
+                    fallback_provider="cache",
+                ).text
             cached = get_cached_local_media_transcript(cache_identity)
             if cached is not None:
                 return cached
@@ -147,9 +155,9 @@ def transcribe_media_file(
             plugin_overrides=plugin_overrides,
         )
         if use_cache and result.text.strip():
-            store_local_media_transcript(
+            store_local_media_transcript_result(
                 cache_identity,
-                result.text,
+                _result_to_cached_payload(result),
                 operation="video-transcription",
                 source_sha256=source_sha256,
                 source_suffix=suffix,
@@ -368,6 +376,14 @@ def _transcribe_audio_bytes(
                 },
             )
             if use_cache and not should_refresh:
+                cached_result = get_cached_local_media_transcript_result(cache_identity)
+                if cached_result is not None:
+                    _log(f"transcript cache hit for {filename} via {provider.name}")
+                    return _result_from_cached_payload(
+                        cached_result,
+                        fallback_model=provider.name,
+                        fallback_provider=provider.name,
+                    )
                 cached = get_cached_local_media_transcript(cache_identity)
                 if cached is not None:
                     _log(f"transcript cache hit for {filename} via {provider.name}")
@@ -393,9 +409,9 @@ def _transcribe_audio_bytes(
             raise RuntimeError(str(exc)) from exc
 
         if cache_identity and use_cache and result.text.strip():
-            store_local_media_transcript(
+            store_local_media_transcript_result(
                 cache_identity,
-                result.text,
+                _result_to_cached_payload(result),
                 operation=cache_operation,
                 source_sha256=cache_source_sha256,
                 source_suffix=cache_source_suffix,
@@ -442,6 +458,7 @@ def _build_request(
         bias_terms=bias_terms,
         diarize=bool(config.get("diarize", False)),
         speaker_count=speaker_count,
+        timestamp_granularities=tuple(config.get("timestamp_granularities") or ()),
     )
 
 
@@ -497,6 +514,17 @@ def _normalized_transcription_config(
             language = None
     else:
         language = None
+    timestamp_granularities: list[str] = []
+    raw_granularities = raw.get("timestamp_granularities")
+    if isinstance(raw_granularities, str):
+        raw_granularities = [raw_granularities]
+    if isinstance(raw_granularities, list | tuple):
+        for value in raw_granularities:
+            if not isinstance(value, str):
+                continue
+            normalized = value.strip().lower()
+            if normalized in {"segment", "word"}:
+                timestamp_granularities.append(normalized)
     return {
         "provider": provider,
         "model": model,
@@ -510,6 +538,7 @@ def _normalized_transcription_config(
         "auto_diarize_provider": str(raw.get("auto_diarize_provider") or "mistral")
         .strip()
         .lower(),
+        "timestamp_granularities": timestamp_granularities,
         "explicit_provider": explicit_provider,
         "explicit_diarize": "diarize" in raw,
         "explicit_speakers": "speakers" in raw,
@@ -692,6 +721,7 @@ def _cacheable_resolved_config(config: dict[str, Any]) -> dict[str, Any]:
         "speakers": config.get("speakers"),
         "auto_diarize": bool(config.get("auto_diarize", False)),
         "auto_diarize_provider": config.get("auto_diarize_provider"),
+        "timestamp_granularities": list(config.get("timestamp_granularities") or []),
     }
 
 
@@ -814,6 +844,33 @@ def _transcription_cache_identity(
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _result_to_cached_payload(result: TranscriptionResult) -> dict[str, object]:
+    return {
+        "text": result.text,
+        "model": result.model,
+        "provider": result.provider,
+        "metadata": dict(result.metadata),
+    }
+
+
+def _result_from_cached_payload(
+    payload: dict[str, object],
+    *,
+    fallback_model: str,
+    fallback_provider: str,
+) -> TranscriptionResult:
+    text = payload.get("text")
+    model = payload.get("model")
+    provider = payload.get("provider")
+    metadata = payload.get("metadata")
+    return TranscriptionResult(
+        text=text if isinstance(text, str) else "",
+        model=model if isinstance(model, str) else fallback_model,
+        provider=provider if isinstance(provider, str) else fallback_provider,
+        metadata=metadata if isinstance(metadata, dict) else {},
+    )
 
 
 def _sha256_bytes(data: bytes) -> str:

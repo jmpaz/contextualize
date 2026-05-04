@@ -91,6 +91,7 @@ class TranscriptionRequest:
     speaker_count: int | None
     language: str | None = None
     model: str | None = None
+    timestamp_granularities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -71,6 +71,86 @@ def test_transcribe_audio_file_reuses_cache_for_identical_bytes(
     assert calls == ["first.m4a"]
 
 
+def test_transcribe_audio_file_preserves_structured_cache_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    calls: list[int] = []
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append(1)
+        return TranscriptionResult(
+            text="audio transcript",
+            model="vibevoice",
+            provider="openai",
+            metadata={
+                "segments": [
+                    {
+                        "text": "audio transcript",
+                        "speaker": "Speaker 0",
+                        "start": 0.0,
+                        "end": 1.0,
+                    }
+                ],
+                "speakers": ["Speaker 0"],
+            },
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+
+    assert transcribe_audio_file(audio_path) == "audio transcript"
+    assert transcribe_audio_file(audio_path) == "audio transcript"
+    assert calls == [1]
+
+    payloads = [
+        path
+        for path in (tmp_path / "local-media-cache" / "transcript").glob("*.json")
+        if not path.name.endswith(".meta.json")
+    ]
+    assert len(payloads) == 1
+    assert '"Speaker 0"' in payloads[0].read_text(encoding="utf-8")
+
+
+def test_transcribe_audio_file_still_reads_text_only_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        return TranscriptionResult(
+            text="legacy transcript",
+            model="openai",
+            provider="openai",
+        )
+
+    def _fail(request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("cached text should be used")
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+    assert transcribe_audio_file(audio_path) == "legacy transcript"
+
+    for payload in (tmp_path / "local-media-cache" / "transcript").glob("*.json"):
+        if not payload.name.endswith(".meta.json"):
+            payload.unlink()
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _fail),),
+    )
+    assert transcribe_audio_file(audio_path) == "legacy transcript"
+
+
 def test_transcribe_audio_file_refresh_cache_bypasses_cached_result(
     tmp_path: Path, monkeypatch
 ) -> None:
