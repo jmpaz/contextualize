@@ -331,7 +331,7 @@ def describe_image_with_codex_app_server(
         request_timeout_seconds=timeout_seconds,
     ) as client:
         client.initialize()
-        start_params: dict[str, Any] = {"cwd": str(Path.cwd())}
+        start_params: dict[str, Any] = {"cwd": str(Path.cwd()), "ephemeral": True}
         thread_id = _thread_id(client.request("thread/start", params=start_params))
         input_items: list[dict[str, Any]] = [
             {"type": "text", "text": prompt},
