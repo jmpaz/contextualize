@@ -34,7 +34,13 @@
         mkContextualize = { cxPluginsSrc ? cx-plugins, sourcePreference ? "wheel" }:
           let
             workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
+            cxPluginsWorkspace = uv2nix.lib.workspace.loadWorkspace {
+              workspaceRoot = cxPluginsSrc;
+            };
             overlay = workspace.mkPyprojectOverlay {
+              inherit sourcePreference;
+            };
+            cxPluginsOverlay = cxPluginsWorkspace.mkPyprojectOverlay {
               inherit sourcePreference;
             };
             pyprojectOverrides = final: prev: {
@@ -56,6 +62,15 @@
                   setuptools = [];
                 };
               });
+              pyjwt = prev.pyjwt.overrideAttrs (old: {
+                passthru = (old.passthru or {}) // {
+                  optional-dependencies = (old.passthru.optional-dependencies or {}) // {
+                    crypto = {
+                      cryptography = [];
+                    };
+                  };
+                };
+              });
               magika = prev.magika.overrideAttrs (_old: {
                 dontAutoPatchelf = true;
               });
@@ -70,12 +85,43 @@
                 lib.composeManyExtensions [
                   pyproject-build-systems.overlays.wheel
                   overlay
+                  cxPluginsOverlay
                   pyprojectOverrides
                 ]
               );
+            unwrapped =
+              pythonSet.mkVirtualEnv "contextualize-env-unwrapped" workspace.deps.all;
           in
-          pythonSet.mkVirtualEnv "contextualize-env" workspace.deps.all;
+          pkgs.symlinkJoin {
+            name = "contextualize-env";
+            paths = [ unwrapped ];
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            postBuild = ''
+              wrapProgram $out/bin/contextualize \
+                --prefix PATH : ${lib.makeBinPath [ unwrapped pkgs.ffmpeg ]}
+            '';
+          };
         venv = mkContextualize {};
+        pluginCheck = pkgs.runCommand "contextualize-plugin-check" { } ''
+          ${venv}/bin/python - <<'PY'
+          import importlib.metadata as metadata
+
+          import pylatexenc
+          import selectolax
+          import yt_dlp
+          from contextualize.plugins.loader import get_loaded_plugins
+          from cx_plugins.providers.ytdlp import plugin as ytdlp_plugin
+
+          names = {plugin.name for plugin in get_loaded_plugins()}
+          assert "ytdlp" in names
+          assert metadata.version("yt-dlp")
+          assert ytdlp_plugin.can_resolve("https://youtu.be/vjqt8T3tJIE", {})
+          PY
+          ${venv}/bin/contextualize plugins > plugins.txt
+          grep -q '^-' plugins.txt
+          grep -q 'ytdlp' plugins.txt
+          touch $out
+        '';
       in
       {
         packages.default = venv;
@@ -87,6 +133,7 @@
         };
 
         checks.default = venv;
+        checks.plugins = pluginCheck;
 
         lib.mkContextualize = mkContextualize;
 
