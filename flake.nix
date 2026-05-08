@@ -31,9 +31,23 @@
         pkgs = nixpkgs.legacyPackages.${system};
         lib = nixpkgs.lib;
         python = pkgs.python312;
-        mkContextualize = { cxPluginsSrc ? cx-plugins, sourcePreference ? "wheel" }:
+        mkContextualize = { contextualizeSrc ? self.outPath, cxPluginsSrc ? cx-plugins, sourcePreference ? "wheel" }:
           let
-            workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
+            cleanContextualizeSrc = lib.cleanSourceWith {
+              src = contextualizeSrc;
+              filter = path: type:
+                let
+                  rel = lib.removePrefix "${toString contextualizeSrc}/" (toString path);
+                in
+                !(rel == "build"
+                  || lib.hasPrefix "build/" rel
+                  || rel == "dist"
+                  || lib.hasPrefix "dist/" rel
+                  || lib.hasPrefix "src/contextualize.egg-info" rel
+                  || lib.hasSuffix "/__pycache__" rel
+                  || lib.hasInfix "/__pycache__/" rel);
+            };
+            workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = cleanContextualizeSrc; };
             cxPluginsWorkspace = uv2nix.lib.workspace.loadWorkspace {
               workspaceRoot = cxPluginsSrc;
             };
@@ -44,6 +58,9 @@
               inherit sourcePreference;
             };
             pyprojectOverrides = final: prev: {
+              contextualize = prev.contextualize.overrideAttrs (_old: {
+                src = cleanContextualizeSrc;
+              });
               "cx-plugins" = prev."cx-plugins".overrideAttrs (_old: {
                 src = cxPluginsSrc;
               });

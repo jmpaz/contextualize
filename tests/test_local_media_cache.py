@@ -84,7 +84,7 @@ def test_transcribe_audio_file_preserves_structured_cache_metadata(
         calls.append(1)
         return TranscriptionResult(
             text="audio transcript",
-            model="vibevoice",
+            model="openai",
             provider="openai",
             metadata={
                 "segments": [
@@ -241,6 +241,125 @@ def test_transcribe_audio_file_passes_model_override(
         == "audio transcript"
     )
     assert captured["model"] == "cohere"
+
+
+def test_transcribe_audio_file_routes_diarization_to_mistral(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    calls: list[str] = []
+
+    def _openai(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("diarized requests should not use local OpenAI ASR")
+
+    def _mistral(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append("mistral")
+        assert request.diarize is True
+        assert request.speaker_count == 2
+        return TranscriptionResult(
+            text="[Speaker 1] hello",
+            model="voxtral-mini-latest",
+            provider="mistral",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _openai), _provider("mistral", _mistral)),
+    )
+
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"diarize": True, "speakers": 2}},
+        )
+        == "[Speaker 1] hello"
+    )
+    assert calls == ["mistral"]
+
+
+def test_transcribe_audio_file_routes_auto_provider_diarization_to_mistral(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    calls: list[str] = []
+
+    def _mistral(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append("mistral")
+        assert request.diarize is True
+        return TranscriptionResult(
+            text="[Speaker 1] hello",
+            model="voxtral-mini-latest",
+            provider="mistral",
+        )
+
+    def _openai(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("local ASR should not be used")
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _openai), _provider("mistral", _mistral)),
+    )
+
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={
+                "transcribe": {
+                    "provider": "auto",
+                    "diarize": True,
+                }
+            },
+        )
+        == "[Speaker 1] hello"
+    )
+    assert calls == ["mistral"]
+
+
+def test_transcribe_audio_file_keeps_explicit_openai_diarization_provider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    calls: list[str] = []
+
+    def _openai(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append("openai")
+        assert request.diarize is True
+        return TranscriptionResult(
+            text="local transcript",
+            model="cohere",
+            provider="openai",
+        )
+
+    def _mistral(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("explicit OpenAI provider should win")
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _openai), _provider("mistral", _mistral)),
+    )
+
+    assert (
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={
+                "transcribe": {
+                    "provider": "openai",
+                    "diarize": True,
+                },
+            },
+        )
+        == "local transcript"
+    )
+    assert calls == ["openai"]
 
 
 def test_transcribe_audio_file_cache_varies_by_language(

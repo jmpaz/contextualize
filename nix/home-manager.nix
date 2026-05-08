@@ -3,13 +3,30 @@ self:
 
 let
   cfg = config.programs.contextualize;
+  envLoader = ''
+    load_contextualize_env_file() {
+      env_file=$1
+      [ -r "$env_file" ] || return 0
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          ""|\#*) continue ;;
+          export\ *) line=''${line#export } ;;
+        esac
+        case "$line" in
+          *=*) key=''${line%%=*}; value=''${line#*=} ;;
+          *) continue ;;
+        esac
+        case "$key" in
+          ""|[0-9]*|*[!A-Za-z0-9_]* ) continue ;;
+          *) export "$key=$value" ;;
+        esac
+      done < "$env_file"
+    }
+  '';
   wrapper = pkgs.writeShellScriptBin "contextualize" ''
+    ${envLoader}
     ${lib.concatMapStringsSep "\n" (envFile: ''
-      if [ -r ${lib.escapeShellArg envFile} ]; then
-        set -a
-        . ${lib.escapeShellArg envFile}
-        set +a
-      fi
+      load_contextualize_env_file ${lib.escapeShellArg envFile}
     '') cfg.envFiles}
     exec ${cfg.package}/bin/contextualize "$@"
   '';
@@ -55,12 +72,9 @@ in
     home.file = lib.mkIf cfg.enableDirenv {
       "${cfg.direnvTarget}".text = ''
         use flake ${cfg.devDir}
+        ${envLoader}
         ${lib.concatMapStringsSep "\n" (envFile: ''
-          if [ -r ${lib.escapeShellArg envFile} ]; then
-            set -a
-            . ${lib.escapeShellArg envFile}
-            set +a
-          fi
+          load_contextualize_env_file ${lib.escapeShellArg envFile}
         '') cfg.envFiles}
       '';
     };

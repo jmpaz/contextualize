@@ -500,7 +500,11 @@ def _normalized_transcription_config(
         except (TypeError, ValueError):
             speakers = None
     provider = raw.get("provider")
-    explicit_provider = isinstance(provider, str) and bool(provider.strip())
+    explicit_provider = (
+        isinstance(provider, str)
+        and bool(provider.strip())
+        and provider.strip().lower() != "auto"
+    )
     if not isinstance(provider, str):
         provider = None
     provider = (provider or "auto").strip().lower()
@@ -558,6 +562,7 @@ def _resolved_transcription_config(
     plugin_overrides: dict[str, Any] | None,
 ) -> dict[str, Any]:
     config = _normalized_transcription_config(plugin_overrides)
+    _route_requested_diarization(config)
     if not config.get("auto_diarize"):
         return config
     if config.get("explicit_diarize") or config.get("explicit_speakers"):
@@ -583,6 +588,15 @@ def _resolved_transcription_config(
         if decision.speaker_count:
             config["speakers"] = decision.speaker_count
     return config
+
+
+def _route_requested_diarization(config: dict[str, Any]) -> None:
+    if not config.get("diarize"):
+        return
+    if config.get("explicit_provider"):
+        return
+    if config.get("provider") == "auto":
+        config["provider"] = "mistral"
 
 
 def _auto_diarization_decision(

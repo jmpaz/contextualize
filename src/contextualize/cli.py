@@ -1056,6 +1056,11 @@ def plugins_command(plugin_name: str | None = None) -> None:
     help="Force refresh cached audio conversions",
 )
 @click.option(
+    "--transcribe-refresh",
+    is_flag=True,
+    help="Force refresh cached audio transcriptions",
+)
+@click.option(
     "--refresh-all",
     is_flag=True,
     help="Force refresh URL and media caches",
@@ -1079,6 +1084,7 @@ def payload_cmd(
     refresh_images,
     refresh_videos,
     refresh_audio,
+    transcribe_refresh,
     refresh_all,
     cache_ttl,
     **extra_params,
@@ -1107,7 +1113,7 @@ def payload_cmd(
     refresh_media = refresh_media or refresh_all
     refresh_images = refresh_images or refresh_media
     refresh_videos = refresh_videos or refresh_media
-    refresh_audio = refresh_audio or refresh_media
+    refresh_audio = refresh_audio or transcribe_refresh or refresh_media
     from .runtime import (
         set_refresh_audio,
         set_refresh_cache,
@@ -1370,6 +1376,11 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     help="Force refresh cached audio conversions",
 )
 @click.option(
+    "--transcribe-refresh",
+    is_flag=True,
+    help="Force refresh cached audio transcriptions",
+)
+@click.option(
     "--refresh-all",
     is_flag=True,
     help="Force refresh URL and media caches",
@@ -1402,6 +1413,7 @@ def hydrate_cmd(
     refresh_images,
     refresh_videos,
     refresh_audio,
+    transcribe_refresh,
     refresh_all,
     cache_ttl,
     trace,
@@ -1441,7 +1453,7 @@ def hydrate_cmd(
     refresh_media = refresh_media or refresh_all
     refresh_images = refresh_images or refresh_media
     refresh_videos = refresh_videos or refresh_media
-    refresh_audio = refresh_audio or refresh_media
+    refresh_audio = refresh_audio or transcribe_refresh or refresh_media
     from .runtime import (
         set_refresh_audio,
         set_refresh_cache,
@@ -1747,6 +1759,11 @@ def hydrate_cmd(
     help="Force refresh cached audio conversions",
 )
 @click.option(
+    "--transcribe-refresh",
+    is_flag=True,
+    help="Force refresh cached audio transcriptions",
+)
+@click.option(
     "--refresh-all",
     is_flag=True,
     help="Force refresh URL and media caches",
@@ -1790,6 +1807,7 @@ def cat_cmd(
     refresh_images,
     refresh_videos,
     refresh_audio,
+    transcribe_refresh,
     refresh_all,
     cache_ttl,
     cache_only,
@@ -1821,7 +1839,7 @@ def cat_cmd(
     refresh_media = refresh_media or refresh_all
     refresh_images = refresh_images or refresh_media
     refresh_videos = refresh_videos or refresh_media
-    refresh_audio = refresh_audio or refresh_media
+    refresh_audio = refresh_audio or transcribe_refresh or refresh_media
     from .runtime import (
         set_cache_only,
         set_refresh_audio,

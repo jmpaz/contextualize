@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from contextualize import cli
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
+from contextualize.runtime import get_refresh_audio, reset_refresh_audio, set_refresh_audio
 
 
 def test_cat_passes_plugin_cli_overrides_into_file_reference_creation(
@@ -79,6 +80,39 @@ def test_cat_passes_plugin_cli_overrides_into_file_reference_creation(
 
     assert result.exit_code == 0
     assert captured["plugin_overrides"] == {"demo-cli": {"value": "hello"}}
+
+
+def test_cat_transcribe_refresh_sets_audio_refresh(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(plugin_loader, "_iter_plugin_entrypoints", lambda: [])
+    clear_loaded_plugins_cache()
+
+    note_path = tmp_path / "note.txt"
+    note_path.write_text("hello", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _create_file_references(*args, **kwargs):
+        captured["refresh_audio"] = get_refresh_audio()
+        return {
+            "refs": [],
+            "concatenated": "",
+            "ignored_files": [],
+            "ignored_folders": {},
+        }
+
+    monkeypatch.setattr(
+        "contextualize.references.create_file_references", _create_file_references
+    )
+
+    token = set_refresh_audio(False)
+    try:
+        runner = CliRunner()
+        result = runner.invoke(cli.cli, ["cat", str(note_path), "--transcribe-refresh"])
+    finally:
+        reset_refresh_audio(token)
+
+    assert result.exit_code == 0
+    assert captured["refresh_audio"] is True
 
 
 def test_cat_help_groups_plugin_options_into_plugin_sections(monkeypatch) -> None:
