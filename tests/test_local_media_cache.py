@@ -53,7 +53,7 @@ def test_transcribe_audio_file_reuses_cache_for_identical_bytes(
     def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
         assert request.data == b"same-audio"
         assert request.content_type == "audio/mp4"
-        assert request.timeout == 600
+        assert request.timeout is None
         calls.append(request.filename)
         return TranscriptionResult(
             text=f"audio transcript {len(calls)}",
@@ -384,7 +384,7 @@ def test_transcribe_media_file_reuses_video_cache(tmp_path: Path, monkeypatch) -
 
     def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
         assert request.data == b"video-audio"
-        assert request.timeout == 600
+        assert request.timeout is None
         return TranscriptionResult(
             text=f"video transcript {len(calls)}",
             model="openai",
@@ -415,7 +415,7 @@ def test_file_reference_passes_media_cache_controls(
     def _transcribe(
         path: str | Path,
         *,
-        timeout: float = 600,
+        timeout: float | None = None,
         use_cache: bool = True,
         refresh_cache: bool | None = None,
     ) -> str:
@@ -440,7 +440,7 @@ def test_file_reference_passes_media_cache_controls(
     assert ref.output == "cached transcript"
     assert captured == {
         "path": str(media_path),
-        "timeout": 600,
+        "timeout": None,
         "use_cache": False,
         "refresh_cache": True,
     }

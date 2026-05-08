@@ -97,10 +97,14 @@ def _log(message: str) -> None:
         return
 
 
+def _media_subprocess_timeout(timeout: float | None) -> float | None:
+    return None if timeout is None else max(timeout, 120)
+
+
 def transcribe_media_file(
     path: str | Path,
     *,
-    timeout: float = 600,
+    timeout: float | None = None,
     use_cache: bool = True,
     refresh_cache: bool | None = None,
     plugin_overrides: dict[str, Any] | None = None,
@@ -173,7 +177,7 @@ def transcribe_media_bytes(
     *,
     filename: str,
     content_type: str | None = None,
-    timeout: float = 600,
+    timeout: float | None = None,
     refresh_cache: bool | None = None,
     plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
@@ -207,7 +211,7 @@ def transcribe_media_bytes(
 def transcribe_audio_file(
     path: str | Path,
     *,
-    timeout: float = 600,
+    timeout: float | None = None,
     use_cache: bool = True,
     refresh_cache: bool | None = None,
     plugin_overrides: dict[str, Any] | None = None,
@@ -226,7 +230,7 @@ def transcribe_audio_bytes(
     *,
     filename: str,
     content_type: str | None = None,
-    timeout: float = 600,
+    timeout: float | None = None,
     plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
     return _transcribe_audio_bytes(
@@ -241,7 +245,7 @@ def transcribe_audio_bytes(
 def _transcribe_audio_path(
     audio_path: Path,
     *,
-    timeout: float,
+    timeout: float | None,
     use_cache: bool,
     refresh_cache: bool | None,
     plugin_overrides: dict[str, Any] | None,
@@ -264,7 +268,7 @@ def _transcribe_audio_path(
 def _transcribe_video_path(
     video_path: Path,
     *,
-    timeout: float,
+    timeout: float | None,
     use_cache: bool,
     refresh_cache: bool | None,
     plugin_overrides: dict[str, Any] | None,
@@ -295,7 +299,7 @@ def _transcribe_video_path(
             ],
             capture_output=True,
             text=True,
-            timeout=max(timeout, 120),
+            timeout=_media_subprocess_timeout(timeout),
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
@@ -321,7 +325,7 @@ def _transcribe_audio_bytes(
     *,
     filename: str,
     content_type: str,
-    timeout: float,
+    timeout: float | None,
     plugin_overrides: dict[str, Any] | None,
     use_cache: bool = False,
     refresh_cache: bool | None = None,
@@ -431,7 +435,7 @@ def _build_request(
     *,
     filename: str,
     content_type: str,
-    timeout: float,
+    timeout: float | None,
     plugin_overrides: dict[str, Any] | None,
     resolved_config: dict[str, Any] | None = None,
 ) -> TranscriptionRequest:
@@ -550,7 +554,7 @@ def _resolved_transcription_config(
     data: bytes,
     filename: str,
     content_type: str,
-    timeout: float,
+    timeout: float | None,
     plugin_overrides: dict[str, Any] | None,
 ) -> dict[str, Any]:
     config = _normalized_transcription_config(plugin_overrides)
@@ -586,7 +590,7 @@ def _auto_diarization_decision(
     data: bytes,
     filename: str,
     content_type: str,
-    timeout: float,
+    timeout: float | None,
     config: dict[str, Any],
 ) -> TranscriptionGateDecision:
     gates = list(loaded_transcription_gates())

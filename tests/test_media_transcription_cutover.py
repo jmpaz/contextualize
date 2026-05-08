@@ -8,7 +8,11 @@ import requests
 from contextualize.references.audio_transcription import transcribe_audio_bytes
 from contextualize.references.file import FileReference
 from contextualize.references.url import URLReference
-from contextualize.references.youtube import YouTubeReference
+
+try:
+    from contextualize.references.youtube import YouTubeReference
+except ModuleNotFoundError:
+    YouTubeReference = None
 
 
 class _DummyResponse:
@@ -38,20 +42,14 @@ class _DummyResponse:
         raise ValueError("no json payload")
 
 
-def test_transcribe_audio_bytes_requires_openai_compatible_configuration(
+def test_transcribe_audio_bytes_requires_loaded_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("OPENAI_TRANSCRIPTION_API_BASE", raising=False)
     monkeypatch.delenv("OPENAI_TRANSCRIPTION_URL", raising=False)
     monkeypatch.delenv("OPENAI_TRANSCRIPTION_API_KEY", raising=False)
 
-    with pytest.raises(
-        RuntimeError,
-        match=(
-            "OPENAI_TRANSCRIPTION_API_BASE, OPENAI_TRANSCRIPTION_URL, or "
-            "OPENAI_TRANSCRIPTION_API_KEY"
-        ),
-    ):
+    with pytest.raises(RuntimeError, match="No transcription providers are loaded"):
         transcribe_audio_bytes(b"audio", filename="sample.mp3")
 
 
@@ -66,12 +64,12 @@ def test_file_reference_uses_media_transcription_for_video(
     def _transcribe(
         path: str | Path,
         *,
-        timeout: float = 600,
+        timeout: float | None = None,
         use_cache: bool = True,
         refresh_cache: bool | None = None,
     ) -> str:
         calls.append(str(path))
-        assert timeout == 600
+        assert timeout is None
         assert use_cache is True
         assert refresh_cache is False
         return "video transcript"
@@ -109,10 +107,10 @@ def test_url_reference_uses_media_transcription_for_video_content_type(
         *,
         filename: str,
         content_type: str | None = None,
-        timeout: float = 600,
+        timeout: float | None = None,
     ) -> str:
         assert data == b"video-bytes"
-        assert timeout == 600
+        assert timeout is None
         captured["filename"] = filename
         captured["content_type"] = content_type or ""
         return "video transcript"
@@ -152,7 +150,7 @@ def test_url_reference_media_transcription_failure_is_error(
         *,
         filename: str,
         content_type: str | None = None,
-        timeout: float = 600,
+        timeout: float | None = None,
     ) -> str:
         raise RuntimeError("broken")
 
@@ -167,6 +165,8 @@ def test_url_reference_media_transcription_failure_is_error(
 def test_youtube_reference_uses_shared_media_transcription(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if YouTubeReference is None:
+        pytest.skip("YouTubeReference is provided by the external ytdlp plugin")
     audio_dir = tmp_path / "yt-audio"
     audio_dir.mkdir()
     audio_path = audio_dir / "audio.mp3"
@@ -177,9 +177,9 @@ def test_youtube_reference_uses_shared_media_transcription(
     def _extract_audio(self: YouTubeReference) -> Path:
         return audio_path
 
-    def _transcribe(path: str | Path, *, timeout: float = 600) -> str:
+    def _transcribe(path: str | Path, *, timeout: float | None = None) -> str:
         assert str(path) == str(audio_path)
-        assert timeout == 600
+        assert timeout is None
         return "yt transcript"
 
     monkeypatch.setattr(YouTubeReference, "_extract_audio", _extract_audio)

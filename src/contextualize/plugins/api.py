@@ -84,7 +84,7 @@ class TranscriptionRequest:
     data: bytes
     filename: str
     content_type: str | None
-    timeout: float
+    timeout: float | None
     prompt: str
     bias_terms: tuple[str, ...]
     diarize: bool
@@ -114,7 +114,7 @@ class TranscriptionGateDecision:
 class TranscriptionGate:
     name: str
     analyze: Callable[
-        [bytes, str, str | None, float, dict[str, Any]],
+        [bytes, str, str | None, float | None, dict[str, Any]],
         TranscriptionGateDecision,
     ]
     cache_identity: Callable[[dict[str, Any]], dict[str, Any]]
