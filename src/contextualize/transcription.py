@@ -7,14 +7,20 @@ from contextualize.references.audio_transcription import transcribe_audio_bytes
 from contextualize.references.audio_transcription import transcribe_audio_file
 from contextualize.references.audio_transcription import transcribe_media_bytes
 from contextualize.references.audio_transcription import transcribe_media_file
+from contextualize.references.audio_transcription import (
+    record_transcription_routing_summary,
+)
+from contextualize.references.audio_transcription import transcription_routing_summary
 from contextualize.references.audio_transcription import _routing_cache_identity
 
 __all__ = [
+    "record_transcription_routing_summary",
     "transcribe_audio_bytes",
     "transcribe_audio_file",
     "transcribe_media_bytes",
     "transcribe_media_file",
     "transcription_routing_identity",
+    "transcription_routing_summary",
 ]
 
 

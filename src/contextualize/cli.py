@@ -642,8 +642,10 @@ def cli(
     if staged_copy and write_file:
         raise click.BadParameter("--staged-copy cannot be used with --write-file")
 
+    from .run_metadata import reset_run_metadata
     from .runtime import set_verbose_logging
 
+    reset_run_metadata()
     set_verbose_logging(verbose_logging)
 
     if append_flag:
@@ -698,6 +700,10 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
       4. Count tokens on the fully composed text.
       5. Write the final text to file, clipboard, or console.
     """
+    from .run_metadata import flush_run_metadata
+
+    flush_run_metadata()
+
     stdin_data = ctx.obj.get("stdin_data", "")
     position = ctx.obj.get("output_pos", "append")
     prompts = ctx.obj["prompt"]

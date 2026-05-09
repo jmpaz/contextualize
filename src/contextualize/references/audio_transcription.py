@@ -65,8 +65,6 @@ _VIDEO_CONTENT_TYPE_TO_SUFFIX: dict[str, str] = {
     "video/x-ms-wmv": ".wmv",
     "video/mpeg": ".mpeg",
 }
-_DEFAULT_PROVIDER_PRIORITIES = {"openai": 200, "mistral": 100}
-
 AUDIO_SUFFIXES: frozenset[str] = frozenset(_AUDIO_SUFFIX_TO_MIME)
 VIDEO_SUFFIXES: frozenset[str] = _VIDEO_SUFFIXES
 
@@ -361,6 +359,10 @@ def _transcribe_audio_bytes(
             f"Requested transcription provider '{explicit_provider}' is not loaded."
         )
     if not providers:
+        if request.diarize and explicit_provider is None:
+            raise RuntimeError(
+                "No loaded transcription provider advertises diarization support."
+            )
         raise RuntimeError(
             "No transcription providers are loaded. Install a plugin that exposes transcription providers."
         )
@@ -395,14 +397,26 @@ def _transcribe_audio_bytes(
                 cached_result = get_cached_local_media_transcript_result(cache_identity)
                 if cached_result is not None:
                     _log(f"transcript cache hit for {filename} via {provider.name}")
-                    return _result_from_cached_payload(
+                    result = _result_from_cached_payload(
                         cached_result,
                         fallback_model=provider.name,
                         fallback_provider=provider.name,
                     )
+                    _record_transcription_result_metadata(
+                        request, result, filename=filename, source="transcript-cache"
+                    )
+                    return result
                 cached = get_cached_local_media_transcript(cache_identity)
                 if cached is not None:
                     _log(f"transcript cache hit for {filename} via {provider.name}")
+                    _record_transcription_routing_metadata(
+                        request,
+                        provider=provider.name,
+                        model=_effective_provider_model(provider, request)
+                        or provider.name,
+                        filename=filename,
+                        source="transcript-cache",
+                    )
                     return TranscriptionResult(
                         text=cached,
                         model=provider.name,
@@ -439,6 +453,9 @@ def _transcribe_audio_bytes(
                 source_suffix=cache_source_suffix,
             )
             _log(f"stored transcript cache for {filename} via {provider.name}")
+        _record_transcription_result_metadata(
+            request, result, filename=filename, source="request"
+        )
         return result
 
     if cache_only:
@@ -526,7 +543,7 @@ def _normalized_transcription_config(
     if not isinstance(provider, str):
         provider = None
     provider = (provider or "auto").strip().lower()
-    if provider not in {"auto", "openai", "mistral"}:
+    if not provider:
         provider = "auto"
     model = raw.get("model")
     if isinstance(model, str):
@@ -561,9 +578,7 @@ def _normalized_transcription_config(
         "diarize": bool(raw.get("diarize", False)),
         "speakers": speakers if speakers and speakers > 0 else None,
         "auto_diarize": bool(raw.get("auto_diarize", False)),
-        "auto_diarize_provider": str(raw.get("auto_diarize_provider") or "mistral")
-        .strip()
-        .lower(),
+        "auto_diarize_provider": _string_or_none(raw.get("auto_diarize_provider")),
         "timestamp_granularities": timestamp_granularities,
         "explicit_provider": explicit_provider,
         "explicit_diarize": "diarize" in raw,
@@ -580,7 +595,6 @@ def _resolved_transcription_config(
     plugin_overrides: dict[str, Any] | None,
 ) -> dict[str, Any]:
     config = _normalized_transcription_config(plugin_overrides)
-    _route_requested_diarization(config)
     if not config.get("auto_diarize"):
         return config
     if config.get("explicit_diarize") or config.get("explicit_speakers"):
@@ -596,25 +610,10 @@ def _resolved_transcription_config(
     if not decision.needs_diarization:
         return config
 
-    if not config.get("explicit_provider") and config.get("provider") == "auto":
-        provider = str(config.get("auto_diarize_provider") or "mistral").strip().lower()
-        if provider in {"mistral", "local"}:
-            config["provider"] = provider
-
-    if config.get("provider") in {"mistral", "local"}:
-        config["diarize"] = True
-        if decision.speaker_count:
-            config["speakers"] = decision.speaker_count
+    config["diarize"] = True
+    if decision.speaker_count:
+        config["speakers"] = decision.speaker_count
     return config
-
-
-def _route_requested_diarization(config: dict[str, Any]) -> None:
-    if not config.get("diarize"):
-        return
-    if config.get("explicit_provider"):
-        return
-    if config.get("provider") == "auto":
-        config["provider"] = "mistral"
 
 
 def _auto_diarization_decision(
@@ -683,13 +682,6 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
-def _selected_provider_name(plugin_overrides: dict[str, Any] | None) -> str | None:
-    provider = _normalized_transcription_config(plugin_overrides).get("provider")
-    if provider in {None, "auto"}:
-        return None
-    return provider
-
-
 def _selected_provider_name_from_config(config: dict[str, Any]) -> str | None:
     provider = config.get("provider")
     if provider in {None, "auto"}:
@@ -726,6 +718,122 @@ def _routing_cache_identity(
     }
 
 
+def transcription_routing_summary(
+    *,
+    filename: str,
+    content_type: str,
+    plugin_overrides: dict[str, Any] | None,
+) -> dict[str, Any]:
+    request = _build_request(
+        b"",
+        filename=filename,
+        content_type=content_type,
+        timeout=0,
+        plugin_overrides=plugin_overrides,
+    )
+    resolved_config = _resolved_transcription_config(
+        data=b"",
+        filename=filename,
+        content_type=content_type,
+        timeout=0,
+        plugin_overrides=plugin_overrides,
+    )
+    explicit_provider = _selected_provider_name_from_config(resolved_config)
+    providers = _ordered_providers(explicit_provider, resolved_config)
+    provider = providers[0] if providers else None
+    return _summary_from_provider(request, resolved_config, provider)
+
+
+def record_transcription_routing_summary(
+    *,
+    filename: str,
+    content_type: str,
+    plugin_overrides: dict[str, Any] | None,
+    source: str,
+) -> None:
+    summary = transcription_routing_summary(
+        filename=filename,
+        content_type=content_type,
+        plugin_overrides=plugin_overrides,
+    )
+    from contextualize.run_metadata import record_transcription
+
+    record_transcription(filename=filename, source=source, **summary)
+
+
+def _summary_from_provider(
+    request: TranscriptionRequest,
+    config: dict[str, Any],
+    provider: TranscriptionProvider | None,
+) -> dict[str, Any]:
+    return {
+        "provider": provider.name if provider is not None else None,
+        "model": _effective_provider_model(provider, request) if provider else request.model,
+        "diarize": request.diarize,
+        "speakers": request.speaker_count,
+        "language": request.language or _string_or_none(config.get("language")),
+    }
+
+
+def _record_transcription_result_metadata(
+    request: TranscriptionRequest,
+    result: TranscriptionResult,
+    *,
+    filename: str,
+    source: str,
+) -> None:
+    _record_transcription_routing_metadata(
+        request,
+        provider=result.provider,
+        model=result.model,
+        filename=filename,
+        source=source,
+    )
+
+
+def _record_transcription_routing_metadata(
+    request: TranscriptionRequest,
+    *,
+    provider: str | None,
+    model: str | None,
+    filename: str,
+    source: str,
+) -> None:
+    from contextualize.run_metadata import record_transcription
+
+    record_transcription(
+        provider=provider,
+        model=model,
+        diarize=request.diarize,
+        speakers=request.speaker_count,
+        language=request.language,
+        filename=filename,
+        source=source,
+    )
+
+
+def _model_from_provider_identity(provider_identity: dict[str, Any]) -> str | None:
+    return _string_or_none(provider_identity.get("model"))
+
+
+def _effective_provider_model(
+    provider: TranscriptionProvider, request: TranscriptionRequest
+) -> str | None:
+    provider_identity = provider.cache_identity(request)
+    return (
+        request.model
+        or _model_from_provider_identity(provider_identity)
+        or provider.default_model
+    )
+
+
+def _string_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
 def _ordered_providers(
     explicit_provider: str | None,
     config: dict[str, Any],
@@ -733,9 +841,10 @@ def _ordered_providers(
     loaded = list(loaded_transcription_providers())
     if explicit_provider:
         return [provider for provider in loaded if provider.name == explicit_provider]
+    if config.get("diarize"):
+        loaded = [provider for provider in loaded if provider.supports_diarization]
 
-    priorities = dict(_DEFAULT_PROVIDER_PRIORITIES)
-    priorities.update(config.get("priorities") or {})
+    priorities = dict(config.get("priorities") or {})
     loaded.sort(
         key=lambda provider: (
             -int(priorities.get(provider.name, provider.priority)),

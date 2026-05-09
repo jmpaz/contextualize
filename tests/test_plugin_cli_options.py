@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import types
 from pathlib import Path
 
@@ -113,6 +114,72 @@ def test_cat_transcribe_refresh_sets_audio_refresh(monkeypatch, tmp_path: Path) 
 
     assert result.exit_code == 0
     assert captured["refresh_audio"] is True
+
+
+def test_cli_writes_run_metadata_sidecar_without_changing_stdout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(plugin_loader, "_iter_plugin_entrypoints", lambda: [])
+    clear_loaded_plugins_cache()
+
+    note_path = tmp_path / "note.txt"
+    note_path.write_text("hello", encoding="utf-8")
+    metadata_path = tmp_path / "run-metadata.json"
+
+    def _create_file_references(*args, **kwargs):
+        from contextualize.run_metadata import record_transcription
+
+        record_transcription(
+            provider="mistral",
+            model="voxtral-mini-latest",
+            diarize=True,
+            speakers=2,
+            language=None,
+            filename="media.mp3",
+            source="request",
+        )
+        return {
+            "refs": [
+                types.SimpleNamespace(
+                    output="hello",
+                    file_content="hello",
+                    original_file_content="hello",
+                    path=str(note_path),
+                )
+            ],
+            "concatenated": "hello",
+            "ignored_files": [],
+            "ignored_folders": {},
+        }
+
+    monkeypatch.setattr(
+        "contextualize.references.create_file_references", _create_file_references
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["cat", str(note_path)],
+        env={"CONTEXTUALIZE_RUN_METADATA_PATH": str(metadata_path)},
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "hello\n"
+    assert json.loads(metadata_path.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "transcriptions": [
+            {
+                "provider": "mistral",
+                "model": "voxtral-mini-latest",
+                "diarize": True,
+                "speakers": 2,
+                "language": None,
+                "filename": "media.mp3",
+                "source": "request",
+            }
+        ]
+    }
 
 
 def test_cat_help_groups_plugin_options_into_plugin_sections(monkeypatch) -> None:

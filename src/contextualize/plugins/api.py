@@ -127,6 +127,8 @@ class TranscriptionProvider:
     transcribe: Callable[[TranscriptionRequest], TranscriptionResult]
     cache_identity: Callable[[TranscriptionRequest], dict[str, Any]]
     is_available: Callable[[], bool] | None = None
+    supports_diarization: bool = False
+    default_model: str | None = None
 
 
 @dataclass(frozen=True)

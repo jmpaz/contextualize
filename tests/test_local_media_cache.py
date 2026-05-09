@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -10,11 +11,13 @@ from contextualize.plugins.api import (
     TranscriptionRequest,
     TranscriptionResult,
 )
+from contextualize.run_metadata import flush_run_metadata, reset_run_metadata
 from contextualize.runtime import reset_verbose_logging, set_verbose_logging
 from contextualize.transcription import (
     transcribe_audio_file,
     transcribe_media_file,
     transcription_routing_identity,
+    transcription_routing_summary,
 )
 from contextualize.references.file import FileReference
 
@@ -32,12 +35,20 @@ def _configure_local_media_cache(
     return cache_root
 
 
-def _provider(name: str, transcribe_fn) -> TranscriptionProvider:
+def _provider(
+    name: str,
+    transcribe_fn,
+    *,
+    supports_diarization: bool = False,
+    default_model: str | None = None,
+) -> TranscriptionProvider:
     return TranscriptionProvider(
         name=name,
         priority=200,
         transcribe=transcribe_fn,
         cache_identity=lambda _request: {"provider": name},
+        supports_diarization=supports_diarization,
+        default_model=default_model,
     )
 
 
@@ -269,7 +280,10 @@ def test_transcribe_audio_file_routes_diarization_to_mistral(
 
     monkeypatch.setattr(
         "contextualize.references.audio_transcription.loaded_transcription_providers",
-        lambda: (_provider("openai", _openai), _provider("mistral", _mistral)),
+        lambda: (
+            _provider("openai", _openai),
+            _provider("mistral", _mistral, supports_diarization=True),
+        ),
     )
 
     assert (
@@ -337,7 +351,10 @@ def test_transcribe_audio_file_routes_auto_provider_diarization_to_mistral(
 
     monkeypatch.setattr(
         "contextualize.references.audio_transcription.loaded_transcription_providers",
-        lambda: (_provider("openai", _openai), _provider("mistral", _mistral)),
+        lambda: (
+            _provider("openai", _openai),
+            _provider("mistral", _mistral, supports_diarization=True),
+        ),
     )
 
     assert (
@@ -355,7 +372,29 @@ def test_transcribe_audio_file_routes_auto_provider_diarization_to_mistral(
     assert calls == ["mistral"]
 
 
-def test_transcription_routing_identity_routes_diarization_to_mistral(
+def test_transcribe_audio_file_diarized_auto_requires_capable_provider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    def _openai(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("provider without diarization should not run")
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _openai),),
+    )
+
+    with pytest.raises(RuntimeError, match="diarization support"):
+        transcribe_audio_file(
+            audio_path,
+            plugin_overrides={"transcribe": {"diarize": True, "speakers": 2}},
+        )
+
+
+def test_transcription_routing_identity_uses_diarization_capability(
     monkeypatch,
 ) -> None:
     def _openai(_request: TranscriptionRequest) -> TranscriptionResult:
@@ -366,7 +405,10 @@ def test_transcription_routing_identity_routes_diarization_to_mistral(
 
     monkeypatch.setattr(
         "contextualize.references.audio_transcription.loaded_transcription_providers",
-        lambda: (_provider("openai", _openai), _provider("mistral", _mistral)),
+        lambda: (
+            _provider("openai", _openai),
+            _provider("mistral", _mistral, supports_diarization=True),
+        ),
     )
 
     identity = transcription_routing_identity(
@@ -375,10 +417,125 @@ def test_transcription_routing_identity_routes_diarization_to_mistral(
         plugin_overrides={"transcribe": {"diarize": True, "speakers": 2}},
     )
 
-    assert identity["explicit_provider"] == "mistral"
+    assert identity["explicit_provider"] is None
     assert identity["providers"] == [{"provider": "mistral"}]
     assert identity["resolved_config"]["diarize"] is True
     assert identity["resolved_config"]["speakers"] == 2
+
+
+def test_transcription_routing_summary_routes_diarization_to_mistral(
+    monkeypatch,
+) -> None:
+    def _openai(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("routing summary should not transcribe")
+
+    def _mistral(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("routing summary should not transcribe")
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (
+            _provider("openai", _openai),
+            TranscriptionProvider(
+                name="mistral",
+                priority=100,
+                transcribe=_mistral,
+                cache_identity=lambda request: {
+                    "provider": "mistral",
+                    "model": request.model or "voxtral-mini-latest",
+                },
+                supports_diarization=True,
+                default_model="voxtral-mini-latest",
+            ),
+        ),
+    )
+
+    summary = transcription_routing_summary(
+        filename="media.mp3",
+        content_type="audio/mpeg",
+        plugin_overrides={"transcribe": {"diarize": True, "speakers": 2}},
+    )
+
+    assert summary == {
+        "provider": "mistral",
+        "model": "voxtral-mini-latest",
+        "diarize": True,
+        "speakers": 2,
+        "language": None,
+    }
+
+
+def test_transcription_run_metadata_records_request_and_cache_events(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+    metadata_path = tmp_path / "run-metadata.json"
+    monkeypatch.setenv("CONTEXTUALIZE_RUN_METADATA_PATH", str(metadata_path))
+    reset_run_metadata()
+
+    calls: list[int] = []
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append(1)
+        return TranscriptionResult(
+            text="audio transcript",
+            model="voxtral-mini-latest",
+            provider="mistral",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (
+            _provider("mistral", _transcribe, supports_diarization=True),
+        ),
+    )
+
+    try:
+        assert (
+            transcribe_audio_file(
+                audio_path,
+                plugin_overrides={"transcribe": {"diarize": True, "speakers": 2}},
+            )
+            == "audio transcript"
+        )
+        assert (
+            transcribe_audio_file(
+                audio_path,
+                plugin_overrides={"transcribe": {"diarize": True, "speakers": 2}},
+            )
+            == "audio transcript"
+        )
+        flush_run_metadata()
+    finally:
+        reset_run_metadata()
+
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert calls == [1]
+    assert payload == {
+        "version": 1,
+        "transcriptions": [
+            {
+                "provider": "mistral",
+                "model": "voxtral-mini-latest",
+                "diarize": True,
+                "speakers": 2,
+                "language": None,
+                "filename": "clip.mp3",
+                "source": "request",
+            },
+            {
+                "provider": "mistral",
+                "model": "voxtral-mini-latest",
+                "diarize": True,
+                "speakers": 2,
+                "language": None,
+                "filename": "clip.mp3",
+                "source": "transcript-cache",
+            },
+        ],
+    }
 
 
 def test_transcribe_audio_file_keeps_explicit_openai_diarization_provider(
