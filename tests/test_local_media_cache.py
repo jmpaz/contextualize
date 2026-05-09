@@ -10,9 +10,11 @@ from contextualize.plugins.api import (
     TranscriptionRequest,
     TranscriptionResult,
 )
-from contextualize.references.audio_transcription import (
+from contextualize.runtime import reset_verbose_logging, set_verbose_logging
+from contextualize.transcription import (
     transcribe_audio_file,
     transcribe_media_file,
+    transcription_routing_identity,
 )
 from contextualize.references.file import FileReference
 
@@ -280,6 +282,38 @@ def test_transcribe_audio_file_routes_diarization_to_mistral(
     assert calls == ["mistral"]
 
 
+def test_transcribe_audio_file_verbose_logs_provider_progress(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        return TranscriptionResult(
+            text="audio transcript",
+            model=request.model or "server-default",
+            provider="openai",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+    token = set_verbose_logging(True)
+    try:
+        result = transcribe_audio_file(audio_path)
+    finally:
+        reset_verbose_logging(token)
+
+    captured = capsys.readouterr()
+    assert result == "audio transcript"
+    assert captured.out == ""
+    assert "[audio-transcription] transcription routing" in captured.err
+    assert "[audio-transcription] transcription request start" in captured.err
+    assert "[audio-transcription] transcription request finished" in captured.err
+
+
 def test_transcribe_audio_file_routes_auto_provider_diarization_to_mistral(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -319,6 +353,32 @@ def test_transcribe_audio_file_routes_auto_provider_diarization_to_mistral(
         == "[Speaker 1] hello"
     )
     assert calls == ["mistral"]
+
+
+def test_transcription_routing_identity_routes_diarization_to_mistral(
+    monkeypatch,
+) -> None:
+    def _openai(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("routing identity should not transcribe")
+
+    def _mistral(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise AssertionError("routing identity should not transcribe")
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _openai), _provider("mistral", _mistral)),
+    )
+
+    identity = transcription_routing_identity(
+        filename="media.mp3",
+        content_type="audio/mpeg",
+        plugin_overrides={"transcribe": {"diarize": True, "speakers": 2}},
+    )
+
+    assert identity["explicit_provider"] == "mistral"
+    assert identity["providers"] == [{"provider": "mistral"}]
+    assert identity["resolved_config"]["diarize"] is True
+    assert identity["resolved_config"]["speakers"] == 2
 
 
 def test_transcribe_audio_file_keeps_explicit_openai_diarization_provider(

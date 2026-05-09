@@ -137,6 +137,7 @@ def transcribe_media_file(
         if use_cache and not should_refresh:
             cached_result = get_cached_local_media_transcript_result(cache_identity)
             if cached_result is not None:
+                _log(f"video transcript cache hit for {media_path.name}")
                 return _result_from_cached_payload(
                     cached_result,
                     fallback_model="cached",
@@ -144,7 +145,9 @@ def transcribe_media_file(
                 ).text
             cached = get_cached_local_media_transcript(cache_identity)
             if cached is not None:
+                _log(f"video transcript cache hit for {media_path.name}")
                 return cached
+            _log(f"video transcript cache miss for {media_path.name}")
 
         from contextualize.runtime import get_cache_only
 
@@ -166,6 +169,7 @@ def transcribe_media_file(
                 source_sha256=source_sha256,
                 source_suffix=suffix,
             )
+            _log(f"stored video transcript cache for {media_path.name}")
         return result.text
     raise RuntimeError(
         f"Unsupported media suffix for transcription: {suffix or '<none>'}"
@@ -280,6 +284,7 @@ def _transcribe_video_path(
     source_suffix = (cache_source_path or video_path).suffix.lower()
     with tempfile.TemporaryDirectory() as tmpdir:
         extracted_path = Path(tmpdir) / "audio.wav"
+        _log(f"extracting audio stream from video {video_path.name}")
         result = subprocess.run(
             [
                 "ffmpeg",
@@ -306,6 +311,7 @@ def _transcribe_video_path(
             raise RuntimeError(f"ffmpeg video audio extraction failed: {detail}")
         if not extracted_path.exists() or extracted_path.stat().st_size == 0:
             raise RuntimeError("Video transcription failed: no audio stream found")
+        _log(f"audio stream extracted from video {video_path.name}")
         return _transcribe_audio_bytes(
             extracted_path.read_bytes(),
             filename=f"{(cache_source_path or video_path).stem or 'media'}.wav",
@@ -367,6 +373,12 @@ def _transcribe_audio_bytes(
 
     cache_only = get_cache_only()
     errors: list[str] = []
+    _log(
+        "transcription routing "
+        f"filename={filename} provider={explicit_provider or 'auto'} "
+        f"candidates={','.join(provider.name for provider in providers)} "
+        f"model={request.model or 'default'} diarize={request.diarize}"
+    )
     for provider in providers:
         cache_identity = None
         if cache_source_sha256 and cache_source_suffix:
@@ -396,10 +408,16 @@ def _transcribe_audio_bytes(
                         model=provider.name,
                         provider=provider.name,
                     )
+                _log(f"transcript cache miss for {filename} via {provider.name}")
         if cache_only:
             continue
         try:
+            _log(f"transcription request start for {filename} via {provider.name}")
             result = provider.transcribe(request)
+            _log(
+                "transcription request finished "
+                f"for {filename} via {provider.name} model={result.model}"
+            )
         except (
             TranscriptionProviderUnavailableError,
             TranscriptionProviderUnsupportedError,
