@@ -30,6 +30,21 @@ let
     '') cfg.envFiles}
     exec ${cfg.package}/bin/contextualize "$@"
   '';
+  direnvFile = pkgs.writeText "contextualize.envrc" ''
+    ${if cfg.cxPluginsDevDir == null then ''
+      use flake ${lib.escapeShellArg cfg.devDir}
+    '' else ''
+      if [ -d ${lib.escapeShellArg cfg.cxPluginsDevDir} ]; then
+        use flake ${lib.escapeShellArg cfg.devDir} --override-input cx-plugins ${lib.escapeShellArg "path:${cfg.cxPluginsDevDir}"}
+      else
+        use flake ${lib.escapeShellArg cfg.devDir}
+      fi
+    ''}
+    ${envLoader}
+    ${lib.concatMapStringsSep "\n" (envFile: ''
+      load_contextualize_env_file ${lib.escapeShellArg envFile}
+    '') cfg.envFiles}
+  '';
 in
 {
   options.programs.contextualize = {
@@ -75,22 +90,14 @@ in
   config = lib.mkIf cfg.enable {
     home.packages = [ wrapper ];
 
-    home.file = lib.mkIf cfg.enableDirenv {
-      "${cfg.direnvTarget}".text = ''
-        ${if cfg.cxPluginsDevDir == null then ''
-          use flake ${lib.escapeShellArg cfg.devDir}
-        '' else ''
-          if [ -d ${lib.escapeShellArg cfg.cxPluginsDevDir} ]; then
-            use flake ${lib.escapeShellArg cfg.devDir} --override-input cx-plugins ${lib.escapeShellArg "path:${cfg.cxPluginsDevDir}"}
-          else
-            use flake ${lib.escapeShellArg cfg.devDir}
-          fi
-        ''}
-        ${envLoader}
-        ${lib.concatMapStringsSep "\n" (envFile: ''
-          load_contextualize_env_file ${lib.escapeShellArg envFile}
-        '') cfg.envFiles}
-      '';
-    };
+    home.activation.contextualizeDirenv = lib.mkIf cfg.enableDirenv (
+      lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        target=${lib.escapeShellArg "${config.home.homeDirectory}/${cfg.direnvTarget}"}
+        if [ -L "$target" ]; then
+          $DRY_RUN_CMD rm "$target"
+        fi
+        $DRY_RUN_CMD ${pkgs.coreutils}/bin/install -D -m 0644 ${direnvFile} "$target"
+      ''
+    );
   };
 }

@@ -167,6 +167,14 @@
             UV_PYTHON = python.interpreter;
             UV_PYTHON_DOWNLOADS = "never";
           };
+          shellHook = ''
+            contextualize_dev_root=$(git -C . rev-parse --show-toplevel 2>/dev/null || pwd)
+            contextualize_pythonpath="$contextualize_dev_root/src"
+            if [ -d "$contextualize_dev_root/../cx-plugins/src" ]; then
+              contextualize_pythonpath="$contextualize_pythonpath:$contextualize_dev_root/../cx-plugins/src"
+            fi
+            export PYTHONPATH="$contextualize_pythonpath''${PYTHONPATH:+:$PYTHONPATH}"
+          '';
         };
       }) // {
         homeManagerModules.default = import ./nix/home-manager.nix self;
