@@ -156,6 +156,7 @@
 
         devShells.default = pkgs.mkShell {
           packages = [
+            venv
             pkgs.exiftool
             pkgs.ffmpeg
             pkgs.git

@@ -59,6 +59,12 @@ in
       description = "Local contextualize checkout used by the managed direnv file.";
     };
 
+    cxPluginsDevDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "${config.home.homeDirectory}/dev/cx-plugins";
+      description = "Optional local cx-plugins checkout used by the managed direnv file.";
+    };
+
     direnvTarget = lib.mkOption {
       type = lib.types.str;
       default = "dev/contextualize/.envrc";
@@ -71,7 +77,15 @@ in
 
     home.file = lib.mkIf cfg.enableDirenv {
       "${cfg.direnvTarget}".text = ''
-        use flake ${cfg.devDir}
+        ${if cfg.cxPluginsDevDir == null then ''
+          use flake ${lib.escapeShellArg cfg.devDir}
+        '' else ''
+          if [ -d ${lib.escapeShellArg cfg.cxPluginsDevDir} ]; then
+            use flake ${lib.escapeShellArg cfg.devDir} --override-input cx-plugins ${lib.escapeShellArg "path:${cfg.cxPluginsDevDir}"}
+          else
+            use flake ${lib.escapeShellArg cfg.devDir}
+          fi
+        ''}
         ${envLoader}
         ${lib.concatMapStringsSep "\n" (envFile: ''
           load_contextualize_env_file ${lib.escapeShellArg envFile}
