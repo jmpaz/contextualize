@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from contextualize.render import codex
+from contextualize.render import codex, markitdown
+
+
+def test_default_codex_app_server_image_model_is_gpt_5_4(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    assert markitdown._resolve_app_server_request_model("") == "gpt-5.4"
 
 
 def test_describe_image_starts_ephemeral_app_server_thread(
