@@ -59,9 +59,13 @@ contextualize cat [PATH...] [--ignore PATH] [--format md|xml|shell|raw] [--label
 ```
 
 `PATH` may also start with a git repo spec such as `github:user/repo` or `https://host/repo.git:path`.
-It can also be an `http(s)` URL pointing to a UTF-8 file.
-It can also be a Bluesky `bsky.app` URL or an `at://` ATProto URI.
-It can also be a SoundCloud track/playlist/artist URL or URN (`soundcloud:tracks:*`, `soundcloud:playlists:*`, `soundcloud:users:*`).
+
+It can also be:
+- an `http(s)` URL pointing to a UTF-8 file.
+- a Bluesky `bsky.app` URL or an `at://` ATProto URI.
+- a SoundCloud track/playlist/artist URL or URN (`soundcloud:tracks:*`, `soundcloud:playlists:*`, `soundcloud:users:*`).
+- a WhatsApp exported chat archive zip.
+
 Multiple paths can be separated with commas after the colon.
 Brace expressions and glob patterns in those paths are expanded after cloning.
 The `.git` suffix is optional and the repo will be cloned to `~/.local/share/contextualize/cache/git/` on first use.
@@ -69,7 +73,7 @@ If no paths are provided and stdin includes `http(s)` URLs, `cat` extracts them 
 Use `--list` to print Markdown bullets for refs exposed by git targets or plugins with a `list_targets` hook without reading full file contents.
 
 Non-text files supported by [markitdown](https://github.com/microsoft/markitdown) are automatically converted to text.
-For Are.na, ATProto, and Discord media descriptions, source media bytes are cached locally; use `--refresh-media` to force a re-fetch.
+For Are.na, ATProto, Discord, and WhatsApp media descriptions, media conversions are cached locally; use `--refresh-media` to force a re-fetch.
 
 | option | description |
 |--------|-------------|

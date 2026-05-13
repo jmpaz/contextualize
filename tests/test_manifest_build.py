@@ -6,6 +6,7 @@ from pathlib import Path
 from contextualize.manifest.build import _resolve_spec_to_seed_refs, build_payload_impl
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
+from contextualize.references.helpers import split_spec_symbols
 
 
 def test_manifest_build_routes_custom_scheme_through_plugins(
@@ -52,6 +53,15 @@ def test_manifest_build_routes_custom_scheme_through_plugins(
     assert trace_items == []
     assert "demo body" in seed_refs[0].output
     assert trace_inputs[0].path == "demo://abc"
+
+
+def test_whatsapp_targets_are_not_split_as_symbol_selectors() -> None:
+    target = "whatsapp:zip:/tmp/WhatsApp%20Chat%20-%20Manu.zip?chat=manu"
+
+    path, symbols = split_spec_symbols(target)
+
+    assert path == target
+    assert symbols == []
 
 
 def test_manifest_build_counts_git_url_inputs_in_trace(

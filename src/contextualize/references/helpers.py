@@ -169,6 +169,8 @@ def looks_like_windows_drive(spec: str) -> bool:
 def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
     if spec.startswith("at://"):
         return spec, []
+    if spec.startswith("whatsapp:"):
+        return spec, []
     if _SOUNDCLOUD_URN_RE.match(spec.strip()):
         return spec, []
     if is_http_url(spec) or looks_like_windows_drive(spec):
