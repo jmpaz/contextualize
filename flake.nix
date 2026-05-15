@@ -31,7 +31,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         lib = nixpkgs.lib;
         python = pkgs.python312;
-        mkContextualize = { contextualizeSrc ? self.outPath, cxPluginsSrc ? cx-plugins, sourcePreference ? "wheel" }:
+        mkContextualize = { contextualizeSrc ? self.outPath, cxPluginsSrc ? cx-plugins, extraPluginSrcs ? [], sourcePreference ? "wheel" }:
           let
             cleanContextualizeSrc = lib.cleanSourceWith {
               src = contextualizeSrc;
@@ -51,12 +51,25 @@
             cxPluginsWorkspace = uv2nix.lib.workspace.loadWorkspace {
               workspaceRoot = cxPluginsSrc;
             };
+            extraPluginWorkspaces = map (src:
+              uv2nix.lib.workspace.loadWorkspace {
+                workspaceRoot = src;
+              }
+            ) extraPluginSrcs;
             overlay = workspace.mkPyprojectOverlay {
               inherit sourcePreference;
             };
             cxPluginsOverlay = cxPluginsWorkspace.mkPyprojectOverlay {
               inherit sourcePreference;
             };
+            extraPluginOverlays = map (pluginWorkspace:
+              pluginWorkspace.mkPyprojectOverlay {
+                inherit sourcePreference;
+              }
+            ) extraPluginWorkspaces;
+            extraPluginDeps = lib.foldl' (
+              deps: pluginWorkspace: deps // pluginWorkspace.deps.default
+            ) {} extraPluginWorkspaces;
             pyprojectOverrides = final: prev: {
               contextualize = prev.contextualize.overrideAttrs (_old: {
                 src = cleanContextualizeSrc;
@@ -99,15 +112,18 @@
               (pkgs.callPackage pyproject-nix.build.packages {
                 inherit python;
               }).overrideScope (
-                lib.composeManyExtensions [
+                lib.composeManyExtensions ([
                   pyproject-build-systems.overlays.wheel
                   overlay
                   cxPluginsOverlay
+                ] ++ extraPluginOverlays ++ [
                   pyprojectOverrides
-                ]
+                ])
               );
             unwrapped =
-              pythonSet.mkVirtualEnv "contextualize-env-unwrapped" workspace.deps.all;
+              pythonSet.mkVirtualEnv "contextualize-env-unwrapped" (
+                workspace.deps.all // extraPluginDeps
+              );
           in
           pkgs.symlinkJoin {
             name = "contextualize-env";
