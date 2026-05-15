@@ -32,6 +32,9 @@ def build_payload(
     link_depth: int = 0,
     link_scope: str = "all",
     link_skip: list[str] | None = None,
+    target_depth: int = 0,
+    target_scope: str = "all",
+    include_parent: bool = True,
     exclude_keys: list[str] | None = None,
     map_mode: bool = False,
     map_keys: list[str] | None = None,
@@ -49,6 +52,9 @@ def build_payload(
         link_depth_default=link_depth,
         link_scope_default=link_scope,
         link_skip_default=link_skip or [],
+        target_depth_default=target_depth,
+        target_scope_default=target_scope,
+        include_parent_default=include_parent,
         exclude_keys=exclude_keys,
         map_mode=map_mode,
         map_keys=map_keys,
@@ -69,6 +75,9 @@ def _prepare_manifest_payload(
     int,
     str,
     list[str],
+    int,
+    str,
+    bool,
     timedelta | None,
 ]:
     if not isinstance(data, dict):
@@ -91,6 +100,14 @@ def _prepare_manifest_payload(
     elif isinstance(link_skip_default, str):
         link_skip_default = [link_skip_default]
 
+    target_depth_default = int(cfg.get("target-depth", 0) or 0)
+    target_scope_default = (cfg.get("target-scope", "all") or "all").lower()
+    if target_scope_default not in {"first", "all"}:
+        raise ValueError("target-scope must be 'first' or 'all'")
+    include_parent_default = cfg.get("include-parent", True)
+    if not isinstance(include_parent_default, bool):
+        raise ValueError("include-parent must be a boolean")
+
     context_cfg = cfg.get("context", {})
     raw_ttl = context_cfg.get("cache-ttl") if isinstance(context_cfg, dict) else None
     manifest_cache_ttl = None
@@ -108,6 +125,9 @@ def _prepare_manifest_payload(
         link_depth_default,
         link_scope_default,
         link_skip_default,
+        target_depth_default,
+        target_scope_default,
+        include_parent_default,
         manifest_cache_ttl,
     )
 
@@ -133,6 +153,9 @@ def render_manifest(
       - link-depth: default depth for Markdown link traversal
       - link-scope: "first" or "all" (default: all)
       - link-skip: list of paths to skip when resolving Markdown links
+      - target-depth: default depth for embedded plugin target traversal
+      - target-scope: "first" or "all" (default: all)
+      - include-parent: include original targets when resolving embedded targets
       - context.cache-ttl: default cache TTL for URL content
     """
     with open(manifest_path, "r", encoding="utf-8") as fh:
@@ -145,6 +168,9 @@ def render_manifest(
         link_depth_default,
         link_scope_default,
         link_skip_default,
+        target_depth_default,
+        target_scope_default,
+        include_parent_default,
         manifest_cache_ttl,
     ) = _prepare_manifest_payload(data, base_dir_default)
 
@@ -158,6 +184,9 @@ def render_manifest(
         link_depth=link_depth_default,
         link_scope=link_scope_default,
         link_skip=link_skip_default,
+        target_depth=target_depth_default,
+        target_scope=target_scope_default,
+        include_parent=include_parent_default,
         exclude_keys=exclude_keys,
         map_mode=map_mode,
         map_keys=map_keys,
@@ -193,6 +222,9 @@ def render_manifest_data(
         link_depth_default,
         link_scope_default,
         link_skip_default,
+        target_depth_default,
+        target_scope_default,
+        include_parent_default,
         manifest_cache_ttl,
     ) = _prepare_manifest_payload(data, manifest_cwd)
 
@@ -206,6 +238,9 @@ def render_manifest_data(
         link_depth=link_depth_default,
         link_scope=link_scope_default,
         link_skip=link_skip_default,
+        target_depth=target_depth_default,
+        target_scope=target_scope_default,
+        include_parent=include_parent_default,
         exclude_keys=exclude_keys,
         map_mode=map_mode,
         map_keys=map_keys,

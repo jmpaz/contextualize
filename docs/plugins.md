@@ -18,6 +18,7 @@ Each plugin module should export:
 - `can_resolve(target: str, context: dict) -> bool`
 - `resolve(target: str, context: dict) -> list[dict]`
 - optional `list_targets(target: str, context: dict) -> list[dict]`
+- optional `materialize(target: str, context: dict) -> list[dict]`
 - optional `register_auth_command(group) -> None`
 
 `resolve` should return items shaped like:
@@ -43,6 +44,23 @@ available refs without reading all content. It should return items shaped like:
   "target": "scheme://target/item",
   "label": "optional display label",
   "kind": "optional item kind",
+  "metadata": {},
+}
+```
+
+`materialize` lets a plugin expose a listed child target as one or more ordinary
+files so the normal resolver stack can claim them. This is for embedded targets
+such as a Discord attachment that should be re-read as a zip, image, or audio
+file instead of being rendered by the parent provider. It should return items
+shaped like:
+
+```python
+{
+  "source": "scheme://target/item",
+  "label": "optional display label",
+  "filename": "export.zip",
+  "content": b"...",
+  "content_type": "application/zip",
   "metadata": {},
 }
 ```

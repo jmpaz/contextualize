@@ -64,6 +64,120 @@ def test_hydrate_manifest_uses_custom_plugin_scheme(
     )
 
 
+def test_hydrate_manifest_preserves_colon_plugin_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class _ColonEntrypoint:
+        name = "colon"
+        value = "contextualize_plugins.colon:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "colon"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith("note:")
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "note/doc.md",
+                    "content": "hello from colon target",
+                    "metadata": {"context_subpath": "note/doc.md"},
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_ColonEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "components": [{"name": "main", "files": ["note:voice/abc"]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    rel_paths = {
+        path.relative_to(context_dir).as_posix() for path, _ in plan.files_to_write
+    }
+    assert "note/doc.md" in rel_paths
+
+
+def test_hydrate_manifest_follows_component_embedded_targets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class _EmbeddedEntrypoint:
+        name = "embedded"
+        value = "contextualize_plugins.embedded:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "asset://")
+            )
+            plugin.resolve = lambda _target, _context: []
+            plugin.list_targets = lambda _target, _context: [
+                {"target": "asset://child", "label": "child.txt"}
+            ]
+            plugin.materialize = lambda _target, _context: [
+                {
+                    "source": "asset://child",
+                    "label": "child.txt",
+                    "filename": "child.txt",
+                    "content": b"child content",
+                    "content_type": "text/plain",
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "by-component",
+                }
+            },
+            "components": [
+                {
+                    "name": "main",
+                    "target-depth": 1,
+                    "include-parent": False,
+                    "files": ["root://thread"],
+                }
+            ],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    assert [
+        (path.relative_to(context_dir).as_posix(), content)
+        for path, content in plan.files_to_write
+    ] == [("main/child.txt", "child content")]
+
+
 def test_hydrate_manifest_fails_for_unresolved_external_scheme(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

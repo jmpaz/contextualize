@@ -254,3 +254,60 @@ def test_injected_http_target_uses_plugin_and_inherits_cache_flags(
     assert result["concatenated"] == (
         "<paste>\nresolved via plugin refresh=True use_cache=False\n</paste>"
     )
+
+
+def test_embedded_target_materialization_uses_normal_file_resolver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _EmbeddedEntrypoint:
+        name = "embedded"
+        value = "contextualize_plugins.embedded:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "asset://")
+            )
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target.startswith("root://"):
+                    raise AssertionError("parent should not be resolved")
+                return []
+
+            plugin.resolve = resolve
+            plugin.list_targets = lambda _target, _context: [
+                {
+                    "target": "asset://child",
+                    "label": "child.md",
+                    "kind": "attachment:text",
+                }
+            ]
+            plugin.materialize = lambda _target, _context: [
+                {
+                    "source": "asset://child",
+                    "label": "child.md",
+                    "filename": "child.md",
+                    "content": b"child content",
+                    "content_type": "text/markdown",
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://thread"],
+        format="raw",
+        target_depth=1,
+        include_parent=False,
+    )
+
+    assert result["concatenated"] == "child content"

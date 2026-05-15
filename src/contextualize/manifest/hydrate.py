@@ -59,6 +59,9 @@ class HydrateOverrides:
     cache_ttl: timedelta | None = None
     refresh_cache: bool = False
     plugin_overrides: dict[str, Any] | None = None
+    target_depth: int | None = None
+    target_scope: str | None = None
+    include_parent: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,9 @@ def build_inline_hydration_plan(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     plugin_overrides: dict[str, Any] | None = None,
+    target_depth: int = 0,
+    target_scope: str = "all",
+    include_parent: bool = True,
 ) -> HydratePlan:
     from ..utils import brace_expand
 
@@ -200,6 +206,9 @@ def build_inline_hydration_plan(
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
             local_base=local_base,
+            target_depth=target_depth,
+            target_scope=target_scope,
+            include_parent=include_parent,
         )
         for item in items:
             subpath = _split_subpath(item.context_subpath)
@@ -395,6 +404,21 @@ def build_hydration_plan_data(
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
+    target_depth_default = int(
+        overrides.target_depth
+        if overrides.target_depth is not None
+        else cfg.get("target-depth", 0) or 0
+    )
+    target_scope_default = _normalize_target_scope(
+        overrides.target_scope or cfg.get("target-scope", "all") or "all",
+        label="target-scope",
+    )
+    include_parent_default = _normalize_bool(
+        overrides.include_parent
+        if overrides.include_parent is not None
+        else cfg.get("include-parent", True),
+        label="include-parent",
+    )
     context_dir = context_cfg["dir"]
     has_local_sources = _manifest_has_local_sources(components)
     manifest_plugin_providers = _manifest_plugin_providers(components)
@@ -446,6 +470,15 @@ def build_hydration_plan_data(
         component_plugin_overrides = _parse_plugin_config_mapping(
             comp,
             prefix=f"component '{comp_name}'",
+        )
+        comp_target_depth = int(comp.get("target-depth", target_depth_default) or 0)
+        comp_target_scope = _normalize_target_scope(
+            comp.get("target-scope", target_scope_default) or "all",
+            label=f"Component '{comp_name}' target-scope",
+        )
+        comp_include_parent = _normalize_bool(
+            comp.get("include-parent", include_parent_default),
+            label=f"Component '{comp_name}' include-parent",
         )
 
         if (
@@ -502,7 +535,16 @@ def build_hydration_plan_data(
             spec_jobs = get_payload_spec_jobs()
             prepared_specs: list[dict[str, Any]] = []
             pending_by_key: dict[
-                tuple[Any, ...], tuple[str, Any | None, bool, dict[str, Any] | None]
+                tuple[Any, ...],
+                tuple[
+                    str,
+                    Any | None,
+                    bool,
+                    dict[str, Any] | None,
+                    int,
+                    str,
+                    bool,
+                ],
             ] = {}
 
             for spec_index, (file_spec, force_git, spec_root) in enumerate(
@@ -529,6 +571,17 @@ def build_hydration_plan_data(
                 plugin_overrides_key = _plugin_overrides_cache_key(
                     effective_plugin_overrides
                 )
+                file_target_depth = int(
+                    file_opts.get("target-depth", comp_target_depth) or 0
+                )
+                file_target_scope = _normalize_target_scope(
+                    file_opts.get("target-scope", comp_target_scope) or "all",
+                    label=f"Component '{comp_name}' file[{spec_index}] target-scope",
+                )
+                file_include_parent = _normalize_bool(
+                    file_opts.get("include-parent", comp_include_parent),
+                    label=f"Component '{comp_name}' file[{spec_index}] include-parent",
+                )
 
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
                 cache_alias = alias_hint if isinstance(alias_hint, str) else None
@@ -538,6 +591,9 @@ def build_hydration_plan_data(
                     comp_gitignore,
                     cache_alias,
                     plugin_overrides_key,
+                    file_target_depth,
+                    file_target_scope,
+                    file_include_parent,
                 )
                 if (
                     spec_cache_key not in resolved_spec_cache
@@ -548,6 +604,9 @@ def build_hydration_plan_data(
                         alias_hint,
                         force_git,
                         effective_plugin_overrides,
+                        file_target_depth,
+                        file_target_scope,
+                        file_include_parent,
                     )
 
                 prepared_specs.append(
@@ -565,7 +624,7 @@ def build_hydration_plan_data(
                 (
                     index,
                     (
-                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, epo=effective_plugin_overrides: (
+                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, epo=effective_plugin_overrides, td=target_depth, ts=target_scope, ip=include_parent: (
                             _resolve_spec_items(
                                 rs,
                                 base_dir,
@@ -577,6 +636,9 @@ def build_hydration_plan_data(
                                 refresh_cache=context_cfg["refresh_cache"],
                                 force_git=fg,
                                 plugin_overrides=epo,
+                                target_depth=td,
+                                target_scope=ts,
+                                include_parent=ip,
                             )
                         )
                     ),
@@ -588,6 +650,9 @@ def build_hydration_plan_data(
                         alias_hint,
                         force_git,
                         effective_plugin_overrides,
+                        target_depth,
+                        target_scope,
+                        include_parent,
                     ),
                 ) in enumerate(pending_by_key.items())
             ]
@@ -897,6 +962,21 @@ def _resolve_context_config(
         "cache_ttl": cache_ttl,
         "refresh_cache": refresh_cache,
     }
+
+
+def _normalize_target_scope(value: Any, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string")
+    normalized = value.lower()
+    if normalized not in {"first", "all"}:
+        raise ValueError(f"{label} must be 'first' or 'all'")
+    return normalized
+
+
+def _normalize_bool(value: Any, *, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be a boolean")
+    return value
 
 
 def _resolve_agents(
@@ -1421,6 +1501,9 @@ def _resolve_external_items_via_refs(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     plugin_overrides: dict[str, Any] | None = None,
+    target_depth: int = 0,
+    target_scope: str = "all",
+    include_parent: bool = True,
 ) -> list[ResolvedItem]:
     refs = create_file_references(
         [target],
@@ -1431,6 +1514,9 @@ def _resolve_external_items_via_refs(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
         plugin_overrides=plugin_overrides,
+        target_depth=target_depth,
+        target_scope=target_scope,
+        include_parent=include_parent,
     )["refs"]
 
     plugin_refs = [ref for ref in refs if isinstance(ref, PluginReference)]
@@ -1506,6 +1592,25 @@ def _resolve_external_items_via_refs(
                 )
             )
             continue
+        ref_path_raw = getattr(ref, "path", None) or getattr(ref, "url", None)
+        ref_content = getattr(ref, "file_content", None)
+        if isinstance(ref_path_raw, str) and isinstance(ref_content, str):
+            source_path = Path(ref_path_raw).name or "item"
+            context_path = _apply_filename_hint(source_path, alias)
+            items.append(
+                ResolvedItem(
+                    source_type="plugin:materialized",
+                    source_ref=target,
+                    source_rev=None,
+                    source_path=source_path,
+                    context_subpath=context_path,
+                    content=ref_content,
+                    manifest_spec=target,
+                    alias=alias if isinstance(alias, str) else None,
+                    plugin_name="materialized",
+                )
+            )
+            continue
         raise ValueError(f"Unsupported external reference type for target: {target}")
 
     if not items:
@@ -1527,6 +1632,9 @@ def _resolve_spec_items(
     force_git: bool = False,
     plugin_overrides: dict[str, Any] | None = None,
     local_base: str | None = None,
+    target_depth: int = 0,
+    target_scope: str = "all",
+    include_parent: bool = True,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
     spec_opts = parse_target_spec(spec)
@@ -1590,6 +1698,9 @@ def _resolve_spec_items(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
+            target_depth=target_depth,
+            target_scope=target_scope,
+            include_parent=include_parent,
         )
 
     tgt = parse_git_target(target)
@@ -1604,6 +1715,9 @@ def _resolve_spec_items(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
+            target_depth=target_depth,
+            target_scope=target_scope,
+            include_parent=include_parent,
         )
 
     base = "" if os.path.isabs(target) else base_dir
@@ -1627,7 +1741,13 @@ def _resolve_spec_items(
             ignore_patterns = ignore_cache[cache_key]
 
         refs = create_file_references(
-            [full], ignore_patterns=ignore_patterns, format="raw", text_only=False
+            [full],
+            ignore_patterns=ignore_patterns,
+            format="raw",
+            text_only=False,
+            target_depth=target_depth,
+            target_scope=target_scope,
+            include_parent=include_parent,
         )["refs"]
         for ref in refs:
             try:

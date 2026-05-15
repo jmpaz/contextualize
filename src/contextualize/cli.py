@@ -1397,6 +1397,23 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
 )
 @click.option(
+    "--target-depth",
+    type=int,
+    default=None,
+    help="Follow embedded plugin targets this many levels deep.",
+)
+@click.option(
+    "--target-scope",
+    type=click.Choice(["first", "all"], case_sensitive=False),
+    default=None,
+    help="Resolve embedded targets from only the first input ('first') or all inputs ('all').",
+)
+@click.option(
+    "--include-parent/--children-only",
+    default=None,
+    help="Include original targets when embedded targets are followed.",
+)
+@click.option(
     "--trace",
     is_flag=True,
     help="Output an itemized list of files prepared for hydration.",
@@ -1422,6 +1439,9 @@ def hydrate_cmd(
     transcribe_refresh,
     refresh_all,
     cache_ttl,
+    target_depth,
+    target_scope,
+    include_parent,
     trace,
     **extra_params,
 ):
@@ -1508,6 +1528,9 @@ def hydrate_cmd(
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
                 plugin_overrides=plugin_overrides,
+                target_depth=target_depth or 0,
+                target_scope=(target_scope or "all").lower(),
+                include_parent=True if include_parent is None else include_parent,
             )
         except (ValueError, FileNotFoundError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -1542,6 +1565,9 @@ def hydrate_cmd(
             cache_ttl=parsed_cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
+            target_depth=target_depth,
+            target_scope=target_scope.lower() if target_scope else None,
+            include_parent=include_parent,
         )
         cwd = os.getcwd()
         data = None
@@ -1710,6 +1736,23 @@ def hydrate_cmd(
     help="Paths to skip when resolving Markdown links. Can be specified multiple times.",
 )
 @click.option(
+    "--target-depth",
+    type=int,
+    default=0,
+    help="Follow embedded plugin targets this many levels deep.",
+)
+@click.option(
+    "--target-scope",
+    type=click.Choice(["first", "all"], case_sensitive=False),
+    default="all",
+    help="Resolve embedded targets from only the first input ('first') or all inputs ('all').",
+)
+@click.option(
+    "--include-parent/--children-only",
+    default=True,
+    help="Include the original target when embedded targets are followed.",
+)
+@click.option(
     "--trace",
     is_flag=True,
     help="Show paths crawled during execution.",
@@ -1804,6 +1847,9 @@ def cat_cmd(
     link_depth,
     link_scope,
     link_skip,
+    target_depth,
+    target_scope,
+    include_parent,
     trace,
     list_mode,
     rev,
@@ -1921,6 +1967,9 @@ def cat_cmd(
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
                 plugin_overrides=plugin_overrides,
+                target_depth=target_depth,
+                target_scope=target_scope.lower(),
+                include_parent=include_parent,
             )
         except (MarkItDownConversionError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc

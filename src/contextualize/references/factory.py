@@ -5,11 +5,16 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from ..plugins.resolve import resolve_plugin_references
+from ..plugins.resolve import (
+    list_plugin_targets,
+    materialize_plugin_target,
+    resolve_plugin_references,
+)
 from ..git.target import parse_git_target
 from ..utils import brace_expand, count_tokens
 from .file import FileReference
@@ -49,12 +54,19 @@ def create_file_references(
     discord_overrides: dict | None = None,
     atproto_overrides: dict | None = None,
     soundcloud_overrides: dict[str, Any] | None = None,
+    target_depth: int = 0,
+    target_scope: str = "all",
+    include_parent: bool = True,
+    _embedded_seen: set[str] | None = None,
 ):
     """
     Build a list of file references from the specified paths.
 
     If `inject` is true, {cx::...} markers are resolved before wrapping.
     """
+    target_scope = (target_scope or "all").lower()
+    if target_scope not in {"first", "all"}:
+        raise ValueError("target_scope must be 'first' or 'all'")
 
     def is_ignored(path, gitignore_patterns):
         from pathspec import PathSpec
@@ -130,6 +142,45 @@ def create_file_references(
     ):
         if provider_overrides is not None:
             effective_plugin_overrides.setdefault(provider_name, provider_overrides)
+
+    embedded_seed_targets = [
+        str(parse_target_spec(raw_path).get("target", raw_path))
+        for raw_path in expanded_all_paths
+    ]
+    if target_depth > 0 and not include_parent:
+        seed_targets = embedded_seed_targets
+        if target_scope == "first":
+            seed_targets = seed_targets[:1]
+        file_references = _resolve_embedded_target_refs(
+            seed_targets,
+            ignore_patterns=ignore_patterns,
+            format=format,
+            label=label,
+            label_suffix=label_suffix,
+            include_token_count=include_token_count,
+            token_target=token_target,
+            inject=inject,
+            depth=depth,
+            trace_collector=trace_collector,
+            text_only=text_only,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=effective_plugin_overrides,
+            arena_overrides=arena_overrides,
+            discord_overrides=discord_overrides,
+            atproto_overrides=atproto_overrides,
+            soundcloud_overrides=soundcloud_overrides,
+            target_depth=target_depth,
+            target_scope=target_scope,
+            seen=_embedded_seen,
+        )
+        return {
+            "refs": file_references,
+            "concatenated": concat_refs(file_references),
+            "ignored_files": ignored_files,
+            "ignored_folders": {},
+        }
 
     for raw_path in expanded_all_paths:
         spec_opts = parse_target_spec(raw_path)
@@ -353,6 +404,38 @@ def create_file_references(
         r for r in file_references if not getattr(r, "cache_miss", False)
     ]
 
+    if target_depth > 0:
+        seed_targets = embedded_seed_targets
+        if target_scope == "first":
+            seed_targets = seed_targets[:1]
+        embedded_refs = _resolve_embedded_target_refs(
+            seed_targets,
+            ignore_patterns=ignore_patterns,
+            format=format,
+            label=label,
+            label_suffix=label_suffix,
+            include_token_count=include_token_count,
+            token_target=token_target,
+            inject=inject,
+            depth=depth,
+            trace_collector=trace_collector,
+            text_only=text_only,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=effective_plugin_overrides,
+            arena_overrides=arena_overrides,
+            discord_overrides=discord_overrides,
+            atproto_overrides=atproto_overrides,
+            soundcloud_overrides=soundcloud_overrides,
+            target_depth=target_depth,
+            target_scope=target_scope,
+            seen=_embedded_seen,
+        )
+        file_references = (
+            [*file_references, *embedded_refs] if include_parent else embedded_refs
+        )
+
     return {
         "refs": file_references,
         "concatenated": concat_refs(file_references),
@@ -364,3 +447,208 @@ def create_file_references(
 def concat_refs(file_references):
     """Concatenate references into a single string with the chosen format."""
     return "\n\n".join(ref.output for ref in file_references)
+
+
+def _resolve_embedded_target_refs(
+    seed_targets: list[str],
+    *,
+    ignore_patterns,
+    format: str,
+    label: str,
+    label_suffix: str | None,
+    include_token_count: bool,
+    token_target: str,
+    inject: bool,
+    depth: int,
+    trace_collector,
+    text_only: bool,
+    use_cache: bool,
+    cache_ttl: timedelta | None,
+    refresh_cache: bool,
+    plugin_overrides: dict[str, Any],
+    arena_overrides: dict | None,
+    discord_overrides: dict | None,
+    atproto_overrides: dict | None,
+    soundcloud_overrides: dict[str, Any] | None,
+    target_depth: int,
+    target_scope: str,
+    seen: set[str] | None,
+) -> list[Any]:
+    if target_depth <= 0:
+        return []
+    if seen is None:
+        seen = set(seed_targets)
+
+    refs: list[Any] = []
+    frontier = list(seed_targets)
+    for _ in range(target_depth):
+        next_frontier: list[str] = []
+        for target in frontier:
+            try:
+                listed = list_plugin_targets(
+                    target,
+                    overrides=plugin_overrides,
+                    use_cache=use_cache,
+                    cache_ttl=cache_ttl,
+                    refresh_cache=refresh_cache,
+                )
+            except Exception as exc:
+                print(
+                    f"Warning: embedded target listing failed for {target}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            for item in listed.items:
+                child = item.get("target")
+                if not isinstance(child, str) or not child or child in seen:
+                    continue
+                seen.add(child)
+                next_frontier.append(child)
+                refs.extend(
+                    _resolve_embedded_child_refs(
+                        child,
+                        ignore_patterns=ignore_patterns,
+                        format=format,
+                        label=label,
+                        label_suffix=label_suffix,
+                        include_token_count=include_token_count,
+                        token_target=token_target,
+                        inject=inject,
+                        depth=depth,
+                        trace_collector=trace_collector,
+                        text_only=text_only,
+                        use_cache=use_cache,
+                        cache_ttl=cache_ttl,
+                        refresh_cache=refresh_cache,
+                        plugin_overrides=plugin_overrides,
+                        arena_overrides=arena_overrides,
+                        discord_overrides=discord_overrides,
+                        atproto_overrides=atproto_overrides,
+                        soundcloud_overrides=soundcloud_overrides,
+                        seen=seen,
+                    )
+                )
+        if target_scope == "first" and next_frontier:
+            next_frontier = next_frontier[:1]
+        frontier = next_frontier
+        if not frontier:
+            break
+    return refs
+
+
+def _resolve_embedded_child_refs(
+    target: str,
+    *,
+    ignore_patterns,
+    format: str,
+    label: str,
+    label_suffix: str | None,
+    include_token_count: bool,
+    token_target: str,
+    inject: bool,
+    depth: int,
+    trace_collector,
+    text_only: bool,
+    use_cache: bool,
+    cache_ttl: timedelta | None,
+    refresh_cache: bool,
+    plugin_overrides: dict[str, Any],
+    arena_overrides: dict | None,
+    discord_overrides: dict | None,
+    atproto_overrides: dict | None,
+    soundcloud_overrides: dict[str, Any] | None,
+    seen: set[str],
+) -> list[Any]:
+    try:
+        materialized = materialize_plugin_target(
+            target,
+            overrides=plugin_overrides,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        )
+    except Exception as exc:
+        print(
+            f"Warning: embedded target materialization failed for {target}: {exc}",
+            file=sys.stderr,
+        )
+        materialized = None
+
+    if materialized is not None and materialized.files:
+        refs: list[Any] = []
+        with tempfile.TemporaryDirectory(prefix="contextualize-target-") as tmpdir:
+            for file_item in materialized.files:
+                path = Path(tmpdir) / _safe_materialized_filename(
+                    str(file_item.get("filename") or "attachment")
+                )
+                path.write_bytes(file_item["content"])
+                try:
+                    result = create_file_references(
+                        [str(path)],
+                        ignore_patterns=ignore_patterns,
+                        format=format,
+                        label=label,
+                        label_suffix=label_suffix,
+                        include_token_count=include_token_count,
+                        token_target=token_target,
+                        inject=inject,
+                        depth=depth,
+                        trace_collector=trace_collector,
+                        text_only=text_only,
+                        use_cache=use_cache,
+                        cache_ttl=cache_ttl,
+                        refresh_cache=refresh_cache,
+                        plugin_overrides=plugin_overrides,
+                        arena_overrides=arena_overrides,
+                        discord_overrides=discord_overrides,
+                        atproto_overrides=atproto_overrides,
+                        soundcloud_overrides=soundcloud_overrides,
+                        target_depth=0,
+                        _embedded_seen=seen,
+                    )
+                    refs.extend(result["refs"])
+                except Exception as exc:
+                    print(
+                        f"Warning: embedded materialized target failed for {target}: {exc}",
+                        file=sys.stderr,
+                    )
+        return refs
+
+    try:
+        result = create_file_references(
+            [target],
+            ignore_patterns=ignore_patterns,
+            format=format,
+            label=label,
+            label_suffix=label_suffix,
+            include_token_count=include_token_count,
+            token_target=token_target,
+            inject=inject,
+            depth=depth,
+            trace_collector=trace_collector,
+            text_only=text_only,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            plugin_overrides=plugin_overrides,
+            arena_overrides=arena_overrides,
+            discord_overrides=discord_overrides,
+            atproto_overrides=atproto_overrides,
+            soundcloud_overrides=soundcloud_overrides,
+            target_depth=0,
+            _embedded_seen=seen,
+        )
+    except Exception as exc:
+        print(
+            f"Warning: embedded target resolution failed for {target}: {exc}",
+            file=sys.stderr,
+        )
+        return []
+    return list(result["refs"])
+
+
+def _safe_materialized_filename(filename: str) -> str:
+    name = Path(filename).name.strip()
+    if not name or name in {".", ".."}:
+        return "attachment"
+    return re.sub(r"[^A-Za-z0-9._ -]+", "-", name).strip() or "attachment"

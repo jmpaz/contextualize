@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from .api import PluginContext, PluginDocument, PluginListItem, PluginTargetDescriptor
+from .api import (
+    PluginContext,
+    PluginDocument,
+    PluginListItem,
+    PluginMaterializedFile,
+    PluginTargetDescriptor,
+)
 from .loader import get_loaded_plugins
 from .reference import PluginReference, PluginResolvedDocument
 
@@ -17,6 +23,14 @@ def _warn(message: str) -> None:
 @dataclass(frozen=True)
 class PluginListResult:
     items: tuple[PluginListItem, ...]
+    matched: bool
+    supported: bool
+    plugin_name: str | None = None
+
+
+@dataclass(frozen=True)
+class PluginMaterializeResult:
+    files: tuple[PluginMaterializedFile, ...]
     matched: bool
     supported: bool
     plugin_name: str | None = None
@@ -92,6 +106,48 @@ def _normalize_plugin_list_item(
     if isinstance(metadata_raw, dict):
         normalized["metadata"] = dict(metadata_raw)
     return normalized
+
+
+def _normalize_plugin_materialized_file(
+    plugin_name: str,
+    target: str,
+    item: PluginMaterializedFile,
+    *,
+    index: int,
+) -> PluginMaterializedFile | None:
+    filename_raw = item.get("filename")
+    content_raw = item.get("content")
+    if not isinstance(filename_raw, str) or not filename_raw.strip():
+        _warn(
+            f"plugin '{plugin_name}' returned invalid filename for '{target}' "
+            f"(item {index})"
+        )
+        return None
+    if not isinstance(content_raw, bytes):
+        _warn(
+            f"plugin '{plugin_name}' returned invalid materialized content for "
+            f"'{target}' (item {index})"
+        )
+        return None
+    source_raw = item.get("source", target)
+    label_raw = item.get("label", filename_raw)
+    metadata_raw = item.get("metadata", {})
+    content_type_raw = item.get("content_type")
+    metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
+    metadata.setdefault("plugin_name", plugin_name)
+    metadata.setdefault("provider", plugin_name)
+    return {
+        "source": source_raw if isinstance(source_raw, str) and source_raw else target,
+        "label": label_raw
+        if isinstance(label_raw, str) and label_raw
+        else filename_raw,
+        "filename": filename_raw.strip(),
+        "content": content_raw,
+        "content_type": content_type_raw
+        if isinstance(content_type_raw, str) and content_type_raw.strip()
+        else None,
+        "metadata": metadata,
+    }
 
 
 def _build_context(
@@ -228,8 +284,16 @@ def list_plugin_targets(
     target: str,
     *,
     overrides: dict[str, Any] | None = None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
 ) -> PluginListResult:
-    context = _build_inspection_context(overrides)
+    context = _build_inspection_context(
+        overrides,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
     for plugin in get_loaded_plugins():
         try:
             matched = bool(plugin.can_resolve(target, context))
@@ -271,7 +335,70 @@ def list_plugin_targets(
     return PluginListResult((), False, False, None)
 
 
-def _build_inspection_context(overrides: dict[str, Any] | None) -> PluginContext:
+def materialize_plugin_target(
+    target: str,
+    *,
+    overrides: dict[str, Any] | None = None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> PluginMaterializeResult:
+    context = _build_inspection_context(
+        overrides,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+    for plugin in get_loaded_plugins():
+        try:
+            matched = bool(plugin.can_resolve(target, context))
+        except Exception as exc:
+            _warn(f"plugin '{plugin.name}' can_resolve failed for '{target}': {exc}")
+            continue
+        if not matched:
+            continue
+        if plugin.materialize is None:
+            return PluginMaterializeResult((), True, False, plugin.name)
+
+        try:
+            files = plugin.materialize(target, context)
+        except Exception as exc:
+            _warn(f"plugin '{plugin.name}' materialize failed for '{target}': {exc}")
+            return PluginMaterializeResult((), True, False, plugin.name)
+        if not isinstance(files, list):
+            _warn(f"plugin '{plugin.name}' returned non-list materialization for '{target}'")
+            return PluginMaterializeResult((), True, False, plugin.name)
+
+        normalized_files: list[PluginMaterializedFile] = []
+        for index, item in enumerate(files):
+            if not isinstance(item, dict):
+                _warn(
+                    f"plugin '{plugin.name}' returned non-mapping materialized file for "
+                    f"'{target}' (item {index})"
+                )
+                return PluginMaterializeResult((), True, False, plugin.name)
+            normalized = _normalize_plugin_materialized_file(
+                plugin.name,
+                target,
+                item,
+                index=index,
+            )
+            if normalized is None:
+                return PluginMaterializeResult((), True, False, plugin.name)
+            normalized_files.append(normalized)
+        return PluginMaterializeResult(tuple(normalized_files), True, True, plugin.name)
+    return PluginMaterializeResult((), False, False, None)
+
+
+def _build_inspection_context(
+    overrides: dict[str, Any] | None,
+    *,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> PluginContext:
+    from contextualize.runtime import get_cache_only
+
     return _build_context(
         format="raw",
         label="relative",
@@ -280,10 +407,10 @@ def _build_inspection_context(overrides: dict[str, Any] | None) -> PluginContext
         token_target="cl100k_base",
         inject=False,
         depth=5,
-        use_cache=True,
-        cache_ttl=None,
-        refresh_cache=False,
-        cache_only=False,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+        cache_only=get_cache_only(),
         overrides=overrides or {},
     )
 

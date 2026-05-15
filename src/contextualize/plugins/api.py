@@ -22,6 +22,15 @@ class PluginListItem(TypedDict, total=False):
     metadata: dict[str, Any]
 
 
+class PluginMaterializedFile(TypedDict, total=False):
+    source: str
+    label: str
+    filename: str
+    content: bytes
+    content_type: str | None
+    metadata: dict[str, Any]
+
+
 class PluginContext(TypedDict, total=False):
     format: str
     label: str
@@ -47,6 +56,7 @@ class PluginTargetDescriptor(TypedDict, total=False):
 CanResolveFn = Callable[[str, PluginContext], bool]
 ResolveFn = Callable[[str, PluginContext], list[PluginDocument]]
 ListTargetsFn = Callable[[str, PluginContext], list[PluginListItem]]
+MaterializeFn = Callable[[str, PluginContext], list[PluginMaterializedFile]]
 RegisterAuthCommandFn = Callable[[Any], None]
 ClassifyTargetFn = Callable[[str, PluginContext], PluginTargetDescriptor | None]
 NormalizeManifestConfigFn = Callable[[dict[str, Any] | None], dict[str, Any] | None]
@@ -139,6 +149,7 @@ class LoadedPlugin:
     can_resolve: CanResolveFn
     resolve: ResolveFn
     list_targets: ListTargetsFn | None = None
+    materialize: MaterializeFn | None = None
     register_auth_command: RegisterAuthCommandFn | None = None
     classify_target: ClassifyTargetFn | None = None
     normalize_manifest_config: NormalizeManifestConfigFn | None = None

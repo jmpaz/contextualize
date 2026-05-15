@@ -167,6 +167,13 @@ def looks_like_windows_drive(spec: str) -> bool:
 
 
 def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
+    try:
+        from ..plugins.resolve import classify_plugin_target
+
+        if classify_plugin_target(spec) is not None:
+            return spec, []
+    except Exception:
+        pass
     if spec.startswith("at://"):
         return spec, []
     if spec.startswith("whatsapp:"):
