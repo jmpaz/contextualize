@@ -9,6 +9,7 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from ..plugins.resolve import (
     list_plugin_targets,
@@ -32,6 +33,21 @@ from .helpers import (
 from .url import URLReference
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _target_suffix(target: str) -> str:
+    if is_http_url(target):
+        return Path(urlparse(target).path).suffix.lower()
+    return Path(target).suffix.lower()
+
+
+def _allows_embedded_direct_resolution(target: str, *, plugin_matched: bool) -> bool:
+    if plugin_matched:
+        return True
+    if is_http_url(target):
+        suffix = _target_suffix(target)
+        return suffix in MARKITDOWN_PREFERRED_EXTENSIONS or is_media_suffix(suffix)
+    return not _EXTERNAL_SCHEME_RE.match(target)
 
 
 def create_file_references(
@@ -560,6 +576,32 @@ def _resolve_embedded_child_refs(
     seen: set[str],
 ) -> list[Any]:
     try:
+        plugin_refs, plugin_claimed = resolve_plugin_references(
+            target,
+            format=format,
+            label=label,
+            label_suffix=label_suffix,
+            include_token_count=include_token_count,
+            token_target=token_target,
+            inject=inject,
+            depth=depth,
+            trace_collector=trace_collector,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+            overrides=plugin_overrides,
+        )
+    except Exception as exc:
+        print(
+            f"Warning: embedded plugin target resolution failed for {target}: {exc}",
+            file=sys.stderr,
+        )
+        plugin_refs = []
+        plugin_claimed = False
+    if plugin_refs:
+        return plugin_refs
+
+    try:
         materialized = materialize_plugin_target(
             target,
             overrides=plugin_overrides,
@@ -573,6 +615,10 @@ def _resolve_embedded_child_refs(
             file=sys.stderr,
         )
         materialized = None
+
+    plugin_matched = plugin_claimed or bool(
+        materialized is not None and materialized.matched
+    )
 
     if materialized is not None and materialized.files:
         refs: list[Any] = []
@@ -613,6 +659,9 @@ def _resolve_embedded_child_refs(
                         file=sys.stderr,
                     )
         return refs
+
+    if not _allows_embedded_direct_resolution(target, plugin_matched=plugin_matched):
+        return []
 
     try:
         result = create_file_references(

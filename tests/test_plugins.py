@@ -8,6 +8,7 @@ import pytest
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
 from contextualize.references import create_file_references
+from contextualize.references import factory as reference_factory
 
 
 def _reset_plugin_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -311,3 +312,144 @@ def test_embedded_target_materialization_uses_normal_file_resolver(
     )
 
     assert result["concatenated"] == "child content"
+
+
+def test_embedded_target_resolves_plugin_claimed_child_without_materialization(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _EmbeddedEntrypoint:
+        name = "embedded"
+        value = "contextualize_plugins.embedded:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "child://")
+            )
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target.startswith("root://"):
+                    raise AssertionError("parent should not be resolved")
+                return [
+                    {
+                        "source": target,
+                        "label": "child.md",
+                        "content": "child content",
+                    }
+                ]
+
+            plugin.resolve = resolve
+            plugin.list_targets = lambda _target, _context: [
+                {"target": "child://one", "label": "child.md"}
+            ]
+            plugin.materialize = lambda _target, _context: pytest.fail(
+                "resolved plugin children should not be materialized"
+            )
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://thread"],
+        format="raw",
+        target_depth=1,
+        include_parent=False,
+    )
+
+    assert result["concatenated"] == "child content"
+
+
+def test_embedded_target_skips_unclaimed_plain_http_link(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _EmbeddedEntrypoint:
+        name = "embedded"
+        value = "contextualize_plugins.embedded:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith("root://")
+            plugin.resolve = lambda _target, _context: []
+            plugin.list_targets = lambda _target, _context: [
+                {
+                    "target": "https://x.com/example/status/1?s=20",
+                    "label": "tweet",
+                }
+            ]
+            return plugin
+
+    def _url_reference(*_args, **_kwargs):
+        raise AssertionError("plain embedded links should not be fetched directly")
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+    )
+    monkeypatch.setattr(reference_factory, "URLReference", _url_reference)
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://thread"],
+        format="raw",
+        target_depth=1,
+        include_parent=False,
+    )
+
+    assert result["concatenated"] == ""
+
+
+def test_embedded_target_allows_file_like_http_link(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _EmbeddedEntrypoint:
+        name = "embedded"
+        value = "contextualize_plugins.embedded:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith("root://")
+            plugin.resolve = lambda _target, _context: []
+            plugin.list_targets = lambda _target, _context: [
+                {
+                    "target": "https://files.example/paper.pdf?download=1",
+                    "label": "paper",
+                }
+            ]
+            return plugin
+
+    class _URLReference:
+        def __init__(self, url: str, **_kwargs) -> None:
+            assert url == "https://files.example/paper.pdf?download=1"
+            self.output = "pdf content"
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+    )
+    monkeypatch.setattr(reference_factory, "URLReference", _URLReference)
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://thread"],
+        format="raw",
+        target_depth=1,
+        include_parent=False,
+    )
+
+    assert result["concatenated"] == "pdf content"
