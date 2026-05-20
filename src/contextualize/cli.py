@@ -2549,7 +2549,7 @@ def shell_cmd(ctx, commands, format, capture_stderr, shell_executable):
 
 
 def main():
-    cli()
+    cli(prog_name="contextualize")
 
 
 if __name__ == "__main__":

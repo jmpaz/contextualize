@@ -366,7 +366,9 @@ def materialize_plugin_target(
             _warn(f"plugin '{plugin.name}' materialize failed for '{target}': {exc}")
             return PluginMaterializeResult((), True, False, plugin.name)
         if not isinstance(files, list):
-            _warn(f"plugin '{plugin.name}' returned non-list materialization for '{target}'")
+            _warn(
+                f"plugin '{plugin.name}' returned non-list materialization for '{target}'"
+            )
             return PluginMaterializeResult((), True, False, plugin.name)
 
         normalized_files: list[PluginMaterializedFile] = []

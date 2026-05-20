@@ -586,9 +586,7 @@ def build_payload_impl(
             )
         comp_include_parent = comp.get("include-parent", include_parent_default)
         if not isinstance(comp_include_parent, bool):
-            raise ValueError(
-                f"Component '{name}' include-parent must be a boolean"
-            )
+            raise ValueError(f"Component '{name}' include-parent must be a boolean")
 
         comp_link_skip = comp.get("link-skip", link_skip_default)
         if comp_link_skip is None:

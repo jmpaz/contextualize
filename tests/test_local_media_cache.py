@@ -487,9 +487,7 @@ def test_transcription_run_metadata_records_request_and_cache_events(
 
     monkeypatch.setattr(
         "contextualize.references.audio_transcription.loaded_transcription_providers",
-        lambda: (
-            _provider("mistral", _transcribe, supports_diarization=True),
-        ),
+        lambda: (_provider("mistral", _transcribe, supports_diarization=True),),
     )
 
     try:

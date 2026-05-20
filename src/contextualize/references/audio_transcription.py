@@ -768,7 +768,9 @@ def _summary_from_provider(
 ) -> dict[str, Any]:
     return {
         "provider": provider.name if provider is not None else None,
-        "model": _effective_provider_model(provider, request) if provider else request.model,
+        "model": _effective_provider_model(provider, request)
+        if provider
+        else request.model,
         "diarize": request.diarize,
         "speakers": request.speaker_count,
         "language": request.language or _string_or_none(config.get("language")),

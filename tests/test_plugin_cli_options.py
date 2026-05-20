@@ -10,7 +10,11 @@ from click.testing import CliRunner
 from contextualize import cli
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
-from contextualize.runtime import get_refresh_audio, reset_refresh_audio, set_refresh_audio
+from contextualize.runtime import (
+    get_refresh_audio,
+    reset_refresh_audio,
+    set_refresh_audio,
+)
 
 
 def test_cat_passes_plugin_cli_overrides_into_file_reference_creation(
@@ -178,7 +182,7 @@ def test_cli_writes_run_metadata_sidecar_without_changing_stdout(
                 "filename": "media.mp3",
                 "source": "request",
             }
-        ]
+        ],
     }
 
 
