@@ -23,6 +23,7 @@ def test_describe_image_starts_ephemeral_app_server_thread(
 
     class _FakeClient:
         def __init__(self, **_kwargs: Any) -> None:
+            self._closed = False
             self._events = [
                 {
                     "method": "item/completed",
@@ -48,6 +49,7 @@ def test_describe_image_starts_ephemeral_app_server_thread(
             return self
 
         def __exit__(self, *_args: Any) -> None:
+            self._closed = True
             return None
 
         def initialize(self) -> None:
@@ -68,6 +70,10 @@ def test_describe_image_starts_ephemeral_app_server_thread(
             return {}
 
         def next_event(self, *, timeout_seconds: float | None = None) -> dict[str, Any]:
+            if self._closed:
+                raise codex.CodexAppServerError(
+                    "client closed before event collection"
+                )
             return self._events.pop(0)
 
     monkeypatch.setattr(codex, "_CodexAppServerClient", _FakeClient)

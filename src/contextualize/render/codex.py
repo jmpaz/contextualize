@@ -345,12 +345,12 @@ def describe_image_with_codex_app_server(
         if effort_name:
             turn_params["effort"] = effort_name
         turn_id = _turn_id(client.request("turn/start", params=turn_params))
-    return _collect_turn_text(
-        client,
-        turn_id=turn_id,
-        timeout_seconds=timeout_seconds,
-        requested_model=model_name or None,
-    )
+        return _collect_turn_text(
+            client,
+            turn_id=turn_id,
+            timeout_seconds=timeout_seconds,
+            requested_model=model_name or None,
+        )
 
 
 def transcribe_image_batches_with_codex_app_server(
