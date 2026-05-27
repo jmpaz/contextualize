@@ -345,12 +345,69 @@ def describe_image_with_codex_app_server(
         if effort_name:
             turn_params["effort"] = effort_name
         turn_id = _turn_id(client.request("turn/start", params=turn_params))
-        return _collect_turn_text(
-            client,
-            turn_id=turn_id,
-            timeout_seconds=timeout_seconds,
-            requested_model=model_name or None,
-        )
+    return _collect_turn_text(
+        client,
+        turn_id=turn_id,
+        timeout_seconds=timeout_seconds,
+        requested_model=model_name or None,
+    )
+
+
+def transcribe_image_batches_with_codex_app_server(
+    image_batches: list[list[Path]],
+    *,
+    prompts: list[str],
+    command: str,
+    model: str | None = None,
+    effort: str | None = None,
+    timeout_seconds: float = 30.0,
+) -> list[CodexImageDescriptionResult]:
+    if len(image_batches) != len(prompts):
+        raise CodexAppServerError("Image batch and prompt counts do not match")
+    if not image_batches:
+        return []
+    for batch in image_batches:
+        if not batch:
+            raise CodexAppServerError("Image batch cannot be empty")
+        for image_path in batch:
+            if not image_path.exists():
+                raise CodexAppServerError(f"Image path does not exist: {image_path}")
+
+    results: list[CodexImageDescriptionResult] = []
+    with _CodexAppServerClient(
+        command=command,
+        startup_timeout_seconds=min(10.0, timeout_seconds),
+        request_timeout_seconds=timeout_seconds,
+    ) as client:
+        client.initialize()
+        start_params: dict[str, Any] = {"cwd": str(Path.cwd()), "ephemeral": True}
+        thread_id = _thread_id(client.request("thread/start", params=start_params))
+        model_name = (model or "").strip()
+        effort_name = (effort or "").strip()
+        for batch, prompt in zip(image_batches, prompts, strict=True):
+            input_items: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            input_items.extend(
+                {"type": "localImage", "path": str(image_path)}
+                for image_path in batch
+            )
+            turn_params: dict[str, Any] = {
+                "threadId": thread_id,
+                "input": input_items,
+            }
+            if model_name:
+                turn_params["model"] = model_name
+            if effort_name:
+                turn_params["effort"] = effort_name
+            turn_id = _turn_id(client.request("turn/start", params=turn_params))
+            results.append(
+                _collect_turn_text(
+                    client,
+                    turn_id=turn_id,
+                    timeout_seconds=timeout_seconds,
+                    requested_model=model_name or None,
+                )
+            )
+    return results
 
 
 def _collect_turn_text(

@@ -165,6 +165,30 @@ _AUDIO_FORMAT_BY_SUFFIX: dict[str, str] = {
     ".pcm": "pcm16",
     ".pcm16": "pcm16",
 }
+_PDF_SUFFIXES = frozenset({".pdf"})
+_PDF_BATCH_TRANSCRIPTION_PROMPT = (
+    "Transcribe these consecutive scanned PDF pages into clean Markdown prose. "
+    "The images are supplied in page order and belong to the same document. "
+    "Earlier page batches may already be present in this thread; use that "
+    "context only to continue the transcription naturally. Return only text "
+    "from the supplied images, not earlier pages. Preserve the "
+    "author's wording, punctuation, emphasis, true headings, paragraphs, and "
+    "footnotes, but repair layout artifacts from the scan. Use logical reading "
+    "order, not visual placement. Reflow wrapped lines into paragraphs; do not "
+    "preserve source line breaks. Join words split by line-end hyphenation. "
+    "Ignore running headers, footers, page numbers, decorative pull quotes, "
+    "and repeated text that is not part of the main body. For columns or inset "
+    "text, follow the main body reading order and do not let callouts interrupt "
+    "paragraphs. Do not summarize or describe the page. Return only the "
+    "transcribed text. If no text is readable, return an empty string."
+)
+_PDFTOPPM_ENV = "PDFTOPPM_PATH"
+_PDF_OCR_DPI_ENV = "CONTEXTUALIZE_MD_PDF_OCR_DPI"
+_PDF_OCR_TIMEOUT_ENV = "CONTEXTUALIZE_MD_PDF_OCR_TIMEOUT"
+_PDF_OCR_BATCH_SIZE_ENV = "CONTEXTUALIZE_MD_PDF_OCR_BATCH_SIZE"
+_DEFAULT_PDF_OCR_DPI = 180
+_DEFAULT_PDF_OCR_TIMEOUT_SECONDS = 180.0
+_DEFAULT_PDF_OCR_BATCH_SIZE = 5
 _IMAGE_PROVIDER_MODES = frozenset({"auto", "app-server", "openrouter"})
 _DEFAULT_IMAGE_PROVIDER_MODE = "auto"
 _DEFAULT_CODEX_APP_SERVER_COMMAND = "codex app-server --listen stdio://"
@@ -259,6 +283,13 @@ def _ffprobe_path() -> str | None:
     if configured:
         return configured
     return shutil.which("ffprobe")
+
+
+def _pdftoppm_path() -> str | None:
+    configured = (os.getenv(_PDFTOPPM_ENV) or "").strip()
+    if configured:
+        return configured
+    return shutil.which("pdftoppm")
 
 
 def _mktemp_output(suffix: str) -> Path:
@@ -619,6 +650,88 @@ def _maybe_convert_gif_to_mp4(path: Path) -> Path:
     return _transcode_video_to_mp4(path)
 
 
+def _pdf_ocr_dpi() -> int:
+    raw = (os.getenv(_PDF_OCR_DPI_ENV) or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = _DEFAULT_PDF_OCR_DPI
+        if 72 <= value <= 300:
+            return value
+    return _DEFAULT_PDF_OCR_DPI
+
+
+def _pdf_ocr_timeout_seconds() -> float:
+    raw = (os.getenv(_PDF_OCR_TIMEOUT_ENV) or "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = _DEFAULT_PDF_OCR_TIMEOUT_SECONDS
+        if value > 0:
+            return value
+    return _DEFAULT_PDF_OCR_TIMEOUT_SECONDS
+
+
+def _pdf_ocr_batch_size() -> int:
+    raw = (os.getenv(_PDF_OCR_BATCH_SIZE_ENV) or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = _DEFAULT_PDF_OCR_BATCH_SIZE
+        if 1 <= value <= 20:
+            return value
+    return _DEFAULT_PDF_OCR_BATCH_SIZE
+
+
+def _has_extractable_pdf_text(markdown: str) -> bool:
+    return bool(markdown.strip())
+
+
+def _rendered_pdf_page_number(path: Path) -> int | None:
+    match = re.search(r"-(\d+)\.png$", path.name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _render_pdf_pages_to_png(path: Path, output_dir: Path, *, dpi: int) -> list[Path]:
+    pdftoppm = _pdftoppm_path()
+    if pdftoppm is None:
+        raise MarkItDownConversionError(
+            f"Scanned PDF OCR fallback requires pdftoppm for {path}"
+        )
+    prefix = output_dir / "page"
+    cmd = [pdftoppm, "-png", "-r", str(dpi), str(path), str(prefix)]
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise MarkItDownConversionError(
+            f"Failed to invoke pdftoppm for scanned PDF OCR of {path}: {exc}"
+        ) from exc
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or "unknown pdftoppm error"
+        raise MarkItDownConversionError(
+            f"Failed to render scanned PDF pages for {path}: {stderr}"
+        )
+    page_paths = sorted(
+        output_dir.glob("page-*.png"),
+        key=lambda page: _rendered_pdf_page_number(page) or 0,
+    )
+    if not page_paths:
+        raise MarkItDownConversionError(
+            f"Scanned PDF OCR rendered no page images for {path}"
+        )
+    return page_paths
+
+
 def _read_cache_entry(key: str) -> dict[str, Any] | None:
     path = _cache_entry_path(key)
     try:
@@ -826,8 +939,13 @@ def _resolve_image_provider(
     )
 
 
-def _app_server_image_markdown_from_path(
-    image_path: Path, *, prompt: str, model: str, app_server_command: str
+def _app_server_image_text_from_path(
+    image_path: Path,
+    *,
+    prompt: str,
+    model: str,
+    app_server_command: str,
+    timeout_seconds: float | None = None,
 ) -> str:
     from .codex import (
         CodexAppServerError,
@@ -848,6 +966,7 @@ def _app_server_image_markdown_from_path(
             command=app_server_command,
             model=requested_model,
             effort=effort,
+            timeout_seconds=timeout_seconds or 30.0,
         )
     except CodexAppServerError as exc:
         if (
@@ -864,6 +983,7 @@ def _app_server_image_markdown_from_path(
                 command=app_server_command,
                 model=_DEFAULT_CODEX_APP_SERVER_MODEL,
                 effort=effort,
+                timeout_seconds=timeout_seconds or 30.0,
             )
         else:
             raise
@@ -881,7 +1001,19 @@ def _app_server_image_markdown_from_path(
             "  model used: "
             f"provider=codex-app-server model={effective_model} effort={effort}"
         )
-    return _format_auto_generated_description(description_result.text.strip())
+    return description_result.text.strip()
+
+
+def _app_server_image_markdown_from_path(
+    image_path: Path, *, prompt: str, model: str, app_server_command: str
+) -> str:
+    text = _app_server_image_text_from_path(
+        image_path,
+        prompt=prompt,
+        model=model,
+        app_server_command=app_server_command,
+    )
+    return _format_auto_generated_description(text)
 
 
 def _app_server_image_markdown_from_bytes(
@@ -1175,6 +1307,369 @@ def _image_cache_lookup(
     return key, None
 
 
+def _markdown_cache_lookup(
+    payload: dict[str, Any],
+) -> tuple[str, MarkItDownResult | None]:
+    key = _cache_key(payload)
+    cached = _read_cache_entry(key)
+    if isinstance(cached, dict):
+        cached_markdown = cached.get("markdown")
+        cached_title = cached.get("title")
+        if isinstance(cached_markdown, str):
+            return (
+                key,
+                MarkItDownResult(
+                    markdown=cached_markdown,
+                    title=cached_title if isinstance(cached_title, str) else None,
+                ),
+            )
+    return key, None
+
+
+def _pdf_ocr_cache_payload(
+    file_md5: str,
+    *,
+    dpi: int,
+    batch_size: int,
+    prompt: str,
+    base_url: str,
+    model: str,
+    provider_selection: _ImageProviderSelection,
+    app_server_command: str,
+) -> dict[str, Any]:
+    model_for_cache = model
+    if provider_selection.effective_provider == "app-server":
+        model_for_cache = _resolve_app_server_request_model(model)
+    return {
+        "type": "pdf-ocr",
+        "file_md5": file_md5,
+        "dpi": dpi,
+        "batch_size": batch_size,
+        "prompt": prompt,
+        "provider_mode": provider_selection.requested_mode,
+        "effective_provider": provider_selection.effective_provider,
+        "provider": base_url,
+        "model": model_for_cache,
+        "app_server_command": app_server_command,
+        "markitdown_version": _markitdown_version(),
+        "renderer": "pdftoppm-png-v1",
+    }
+
+
+def _extract_llm_description_text(markdown: str) -> str:
+    match = re.search(
+        r"(?ms)^# Description(?: \(auto-generated\))?:?\s*(?P<text>.*)$",
+        markdown,
+    )
+    if match:
+        return match.group("text").strip()
+    return markdown.strip()
+
+
+def _openrouter_image_text_from_path(image_path: Path, *, prompt: str) -> str:
+    llm_client, llm_model = _build_llm_config()
+    if llm_client is None or llm_model is None:
+        raise MarkItDownConversionError(
+            "OpenRouter/OpenAI image OCR requires OPENAI_API_KEY or OPENROUTER_API_KEY"
+        )
+    from markitdown import MarkItDown
+
+    try:
+        result = MarkItDown(
+            llm_client=llm_client,
+            llm_model=llm_model,
+            llm_prompt=prompt,
+        ).convert(image_path)
+    except Exception as exc:
+        raise MarkItDownConversionError(
+            f"Image OCR failed for rendered PDF page {image_path.name}: {exc}"
+        ) from exc
+    markdown = getattr(result, "markdown", None)
+    if not isinstance(markdown, str):
+        markdown = str(result)
+    text = _extract_llm_description_text(markdown)
+    if not text:
+        raise MarkItDownConversionError(
+            f"Image OCR returned no text for rendered PDF page {image_path.name}"
+        )
+    return text
+
+
+def _chunks(values: list[Path], size: int) -> list[list[Path]]:
+    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
+def _page_numbers(page_paths: list[Path]) -> list[int]:
+    return [
+        page_number
+        for page_path in page_paths
+        if (page_number := _rendered_pdf_page_number(page_path)) is not None
+    ]
+
+
+def _page_range_label(page_paths: list[Path]) -> str:
+    page_numbers = _page_numbers(page_paths)
+    if not page_numbers:
+        return "unknown pages"
+    if len(page_numbers) == 1:
+        return f"page {page_numbers[0]}"
+    return f"pages {page_numbers[0]}-{page_numbers[-1]}"
+
+
+def _pdf_batch_prompt(page_paths: list[Path], *, total_pages: int) -> str:
+    page_label = _page_range_label(page_paths)
+    return (
+        f"{_PDF_BATCH_TRANSCRIPTION_PROMPT}\n\n"
+        f"These images are {page_label} of {total_pages}."
+    )
+
+
+def _join_pdf_ocr_sections(sections: list[str]) -> str:
+    joined: list[str] = []
+    for section in (section.strip() for section in sections):
+        if not section:
+            continue
+        if not joined:
+            joined.append(section)
+            continue
+        previous = joined[-1].rstrip()
+        current = section.lstrip()
+        if _continues_previous_paragraph(previous, current):
+            joiner = "" if previous.endswith("-") else " "
+            if previous.endswith("-"):
+                previous = previous[:-1].rstrip()
+            joined[-1] = f"{previous}{joiner}{current}"
+        else:
+            joined.append(current)
+    return "\n\n".join(joined).strip()
+
+
+def _continues_previous_paragraph(previous: str, current: str) -> bool:
+    if not previous or not current:
+        return False
+    if "\n\n" in previous[-120:] or current.startswith(("#", "-", "*", ">")):
+        return False
+    if previous.endswith((".", "!", "?", ":", ";", '"', "'", "”", "’", ")", "]")):
+        return False
+    return bool(re.match(r"^[a-z,;:)\]'\"]", current))
+
+
+def _app_server_pdf_batch_texts_from_pages(
+    page_paths: list[Path],
+    *,
+    model: str,
+    app_server_command: str,
+    per_page_timeout_seconds: float,
+    batch_size: int,
+) -> list[str]:
+    from .codex import (
+        CodexAppServerError,
+        transcribe_image_batches_with_codex_app_server,
+    )
+
+    batches = _chunks(page_paths, batch_size)
+    prompts = [
+        _pdf_batch_prompt(batch, total_pages=len(page_paths)) for batch in batches
+    ]
+    requested_model = _resolve_app_server_request_model(model)
+    effort = _DEFAULT_CODEX_APP_SERVER_EFFORT
+    turn_timeout = per_page_timeout_seconds * max((len(batch) for batch in batches), default=1)
+    _verbose_log(
+        "  sending to model: "
+        "provider=codex-app-server "
+        f"model={requested_model} effort={effort} endpoint=turn/start "
+        f"batches={len(batches)} batch_size={batch_size}"
+    )
+    try:
+        results = transcribe_image_batches_with_codex_app_server(
+            batches,
+            prompts=prompts,
+            command=app_server_command,
+            model=requested_model,
+            effort=effort,
+            timeout_seconds=turn_timeout,
+        )
+    except CodexAppServerError as exc:
+        if (
+            requested_model != _DEFAULT_CODEX_APP_SERVER_MODEL
+            and _is_app_server_model_unsupported_error(exc)
+        ):
+            _verbose_log(
+                "  codex app-server rejected requested model; retrying with default: "
+                f"model={_DEFAULT_CODEX_APP_SERVER_MODEL} effort={effort}"
+            )
+            try:
+                results = transcribe_image_batches_with_codex_app_server(
+                    batches,
+                    prompts=prompts,
+                    command=app_server_command,
+                    model=_DEFAULT_CODEX_APP_SERVER_MODEL,
+                    effort=effort,
+                    timeout_seconds=turn_timeout,
+                )
+            except CodexAppServerError as retry_exc:
+                raise MarkItDownConversionError(
+                    f"Scanned PDF OCR failed for rendered page batch "
+                    f"{_page_range_label(batches[0])}: {retry_exc}"
+                ) from retry_exc
+        else:
+            raise MarkItDownConversionError(
+                f"Scanned PDF OCR failed for rendered page batch "
+                f"{_page_range_label(batches[0])}: {exc}"
+            ) from exc
+
+    for result in results:
+        if result.rerouted_to_model:
+            from_model = result.rerouted_from_model or requested_model
+            reason = result.reroute_reason or "unspecified"
+            _verbose_log(
+                "  model rerouted: "
+                f"provider=codex-app-server from={from_model} "
+                f"to={result.rerouted_to_model} reason={reason}"
+            )
+    return [result.text.strip() for result in results if result.text.strip()]
+
+
+def _pdf_page_image_text(
+    image_path: Path,
+    *,
+    prompt: str,
+    model: str,
+    provider_selection: _ImageProviderSelection,
+    app_server_command: str,
+    timeout_seconds: float,
+) -> str:
+    try:
+        if provider_selection.effective_provider == "app-server":
+            return _app_server_image_text_from_path(
+                image_path,
+                prompt=prompt,
+                model=model,
+                app_server_command=app_server_command,
+                timeout_seconds=timeout_seconds,
+            )
+        return _openrouter_image_text_from_path(image_path, prompt=prompt)
+    except MarkItDownConversionError:
+        raise
+    except Exception as exc:
+        raise MarkItDownConversionError(
+            f"Scanned PDF OCR failed for rendered page {image_path.name}: {exc}"
+        ) from exc
+
+
+def _convert_scanned_pdf_to_markdown(
+    path: Path,
+    *,
+    refresh_images: bool = False,
+    source_label: str | None = None,
+) -> MarkItDownResult:
+    label = source_label or str(path)
+    (
+        llm_enabled,
+        base_url,
+        model,
+        _image_prompt_value,
+        _exiftool_path,
+        provider_mode,
+        app_server_command,
+    ) = _image_context()
+    provider_selection = _resolve_image_provider(
+        provider_mode, app_server_command=app_server_command
+    )
+    if (
+        provider_selection.requested_mode == "app-server"
+        and not provider_selection.app_server_live
+    ):
+        detail = provider_selection.app_server_error or "app-server unavailable"
+        raise MarkItDownConversionError(
+            "PDF has no embedded text; scanned PDF OCR was configured for "
+            f"codex app-server, but app-server is unavailable for {label}: {detail}"
+        )
+    if (
+        provider_selection.requested_mode != "openrouter"
+        and not provider_selection.app_server_live
+        and provider_selection.app_server_error
+    ):
+        _verbose_log(
+            "  app-server probe failed; falling back to OpenRouter image OCR: "
+            f"{provider_selection.app_server_error}"
+        )
+        logging.getLogger(__name__).warning(
+            "Codex app-server unavailable; falling back to OpenRouter image OCR: %s",
+            provider_selection.app_server_error,
+        )
+    if provider_selection.effective_provider != "app-server" and not llm_enabled:
+        raise MarkItDownConversionError(
+            "PDF has no embedded text; scanned PDF OCR requires a live codex "
+            f"app-server or OPENAI_API_KEY/OPENROUTER_API_KEY: {label}"
+        )
+
+    dpi = _pdf_ocr_dpi()
+    timeout_seconds = _pdf_ocr_timeout_seconds()
+    batch_size = _pdf_ocr_batch_size()
+    prompt = _PDF_BATCH_TRANSCRIPTION_PROMPT
+    cache_payload = _pdf_ocr_cache_payload(
+        _file_md5(path),
+        dpi=dpi,
+        batch_size=batch_size,
+        prompt=prompt,
+        base_url=base_url,
+        model=model,
+        provider_selection=provider_selection,
+        app_server_command=app_server_command,
+    )
+    cache_key, cached = _markdown_cache_lookup(cache_payload)
+    if cached and not _refresh_images_enabled(refresh_images):
+        return cached
+
+    _verbose_log(
+        "  rendering scanned PDF pages for OCR: "
+        f"renderer=pdftoppm dpi={dpi} timeout={timeout_seconds:g}s "
+        f"batch_size={batch_size} path={label}"
+    )
+    with tempfile.TemporaryDirectory(prefix="contextualize-pdf-ocr-") as tmp_dir:
+        page_paths = _render_pdf_pages_to_png(path, Path(tmp_dir), dpi=dpi)
+        if provider_selection.effective_provider == "app-server":
+            sections = _app_server_pdf_batch_texts_from_pages(
+                page_paths,
+                model=model,
+                app_server_command=app_server_command,
+                per_page_timeout_seconds=timeout_seconds,
+                batch_size=batch_size,
+            )
+        else:
+            sections = [
+                text
+                for page_path in page_paths
+                if (
+                    text := _pdf_page_image_text(
+                        page_path,
+                        prompt=_pdf_batch_prompt(
+                            [page_path], total_pages=len(page_paths)
+                        ),
+                        model=model,
+                        provider_selection=provider_selection,
+                        app_server_command=app_server_command,
+                        timeout_seconds=timeout_seconds,
+                    ).strip()
+                )
+            ]
+
+    markdown = _join_pdf_ocr_sections(sections)
+    if not markdown:
+        raise MarkItDownConversionError(
+            f"PDF has no embedded text and OCR returned no readable text: {label}"
+        )
+    result = MarkItDownResult(markdown=markdown, title=None)
+    _write_cache_entry(
+        cache_key,
+        payload=cache_payload,
+        markdown=result.markdown,
+        title=result.title,
+    )
+    return result
+
+
 def _convert_markitdown(
     source: object,
     *,
@@ -1279,6 +1774,7 @@ def convert_path_to_markdown(
     source_url: str | None = None,
 ) -> MarkItDownResult:
     path_obj = Path(path)
+    is_pdf = path_obj.suffix.lower() in _PDF_SUFFIXES
     is_image = path_obj.suffix.lower() in _IMAGE_SUFFIXES
     is_video = _is_video_media(suffix=path_obj.suffix.lower())
     is_audio = _is_audio_media(suffix=path_obj.suffix.lower())
@@ -1487,6 +1983,11 @@ def convert_path_to_markdown(
             pass
 
     markdown, title = _convert_markitdown_with_normalization(path_obj)
+    if is_pdf and not _has_extractable_pdf_text(markdown):
+        return _convert_scanned_pdf_to_markdown(
+            path_obj,
+            refresh_images=refresh_images,
+        )
 
     if (
         is_image
@@ -1516,6 +2017,10 @@ def convert_response_to_markdown(
         str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip()
     )
     url_suffix = Path(urlparse(str(response.url)).path).suffix.lower()
+    is_pdf = url_suffix in _PDF_SUFFIXES or content_type in {
+        "application/pdf",
+        "application/x-pdf",
+    }
     is_image = url_suffix in _IMAGE_SUFFIXES or content_type.startswith("image/")
     is_video = _is_video_media(suffix=url_suffix, content_type=content_type)
     is_audio = _is_audio_media(suffix=url_suffix, content_type=content_type)
@@ -1741,6 +2246,18 @@ def convert_response_to_markdown(
         try:
             temp_path.write_bytes(response.content)
             markdown, title = _convert_markitdown_with_normalization(temp_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    if is_pdf and not _has_extractable_pdf_text(markdown):
+        temp_path = _mktemp_output(".pdf")
+        try:
+            temp_path.write_bytes(response.content)
+            return _convert_scanned_pdf_to_markdown(
+                temp_path,
+                refresh_images=refresh_images,
+                source_label=str(response.url),
+            )
         finally:
             temp_path.unlink(missing_ok=True)
 
