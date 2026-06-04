@@ -1306,6 +1306,21 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
 @cli.command("hydrate", cls=PluginGroupedCommand)
 @click.argument("paths", nargs=-1, type=str)
 @click.option(
+    "--managed",
+    is_flag=True,
+    help="Hydrate registered managed contexts instead of direct paths.",
+)
+@click.option(
+    "--managed-registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Managed context registry path.",
+)
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Exit non-zero when any managed context fails.",
+)
+@click.option(
     "--dir",
     "context_dir",
     type=click.Path(),
@@ -1422,6 +1437,9 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
 def hydrate_cmd(
     ctx,
     paths,
+    managed,
+    managed_registry,
+    strict,
     context_dir,
     access,
     path_strategy,
@@ -1459,6 +1477,7 @@ def hydrate_cmd(
     from .plugins import collect_plugin_cli_overrides
 
     from .manifest.hydrate import (
+        HydrateOverrides,
         apply_hydration_plan,
         clear_context_dir,
         find_untracked_files,
@@ -1495,15 +1514,66 @@ def hydrate_cmd(
     command_params.update(extra_params)
     plugin_overrides = collect_plugin_cli_overrides("hydrate", command_params)
 
+    prompt_value = agents_prompt
+    if prompt_value is not None and not prompt_value.strip():
+        raise click.BadParameter("--agents-prompt cannot be empty")
+
+    access_value = access.lower() if access else None
+    path_strategy_value = path_strategy.lower() if path_strategy else None
+    overrides = HydrateOverrides(
+        context_dir=context_dir,
+        access=access_value,
+        path_strategy=path_strategy_value,
+        agents_prompt=prompt_value,
+        agents_filenames=tuple(agents_filenames),
+        omit_meta=omit_meta,
+        copy=copy_files,
+        use_cache=use_cache,
+        cache_ttl=parsed_cache_ttl,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
+        target_depth=target_depth,
+        target_scope=target_scope.lower() if target_scope else None,
+        include_parent=include_parent,
+    )
+
+    if managed:
+        from .manifest.managed import hydrate_managed_contexts
+
+        try:
+            statuses = hydrate_managed_contexts(
+                list(paths),
+                registry_path=managed_registry,
+                overrides=overrides,
+            )
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        failed = [status for status in statuses if status.result == "failed"]
+        for status in statuses:
+            parts = [f"managed {status.name}: {status.result}"]
+            if status.context_dir:
+                parts.append(f"-> {status.context_dir}")
+            if status.reason:
+                parts.append(f"({status.reason})")
+            message = " ".join(parts)
+            click.echo(message, err=status.result in {"failed", "skipped"})
+        if strict and failed:
+            raise click.ClickException(f"{len(failed)} managed context(s) failed")
+        return None
+
     manifest_path = None
     inline_targets: list[str] = []
 
-    if (
-        len(paths) == 1
-        and paths[0].endswith((".yaml", ".yml"))
-        and os.path.isfile(paths[0])
-    ):
-        manifest_path = paths[0]
+    if len(paths) == 1:
+        candidate = os.path.expanduser(paths[0])
+        if os.path.isfile(candidate):
+            from .manifest.source import path_contains_manifest
+
+            if candidate.endswith((".yaml", ".yml")) or path_contains_manifest(candidate):
+                manifest_path = candidate
+        if manifest_path is None:
+            inline_targets = list(paths)
     elif paths:
         inline_targets = list(paths)
 
@@ -1540,35 +1610,8 @@ def hydrate_cmd(
         except ImportError:
             raise click.ClickException("pyyaml is required")
 
-        from .manifest.hydrate import (
-            HydrateOverrides,
-            build_hydration_plan,
-            build_hydration_plan_data,
-        )
+        from .manifest.hydrate import build_hydration_plan, build_hydration_plan_data
 
-        prompt_value = agents_prompt
-        if prompt_value is not None and not prompt_value.strip():
-            raise click.BadParameter("--agents-prompt cannot be empty")
-
-        access_value = access.lower() if access else None
-        path_strategy_value = path_strategy.lower() if path_strategy else None
-
-        overrides = HydrateOverrides(
-            context_dir=context_dir,
-            access=access_value,
-            path_strategy=path_strategy_value,
-            agents_prompt=prompt_value,
-            agents_filenames=tuple(agents_filenames),
-            omit_meta=omit_meta,
-            copy=copy_files,
-            use_cache=use_cache,
-            cache_ttl=parsed_cache_ttl,
-            refresh_cache=refresh_cache,
-            plugin_overrides=plugin_overrides,
-            target_depth=target_depth,
-            target_scope=target_scope.lower() if target_scope else None,
-            include_parent=include_parent,
-        )
         cwd = os.getcwd()
         data = None
         if not manifest_path:

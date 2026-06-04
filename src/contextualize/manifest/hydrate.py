@@ -42,6 +42,7 @@ from .manifest import (
     coerce_file_spec,
     normalize_components,
 )
+from .source import load_manifest_source
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
@@ -361,17 +362,11 @@ def build_hydration_plan(
     overrides: HydrateOverrides,
     cwd: str,
 ) -> HydratePlan:
-    import yaml
-
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
-    if not isinstance(data, dict):
-        raise ValueError("Manifest must be a mapping with 'config' and 'components'")
-    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+    source = load_manifest_source(manifest_path)
     return build_hydration_plan_data(
-        data,
-        manifest_dir,
-        manifest_path=manifest_path,
+        source.data,
+        source.manifest_cwd,
+        manifest_path=source.manifest_path,
         overrides=overrides,
         cwd=cwd,
     )

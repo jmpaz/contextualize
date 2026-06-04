@@ -7,10 +7,9 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-import yaml
-
 from .build import build_payload_impl
 from .manifest import normalize_components
+from .source import load_manifest_source
 
 
 @dataclass
@@ -158,10 +157,9 @@ def render_manifest(
       - include-parent: include original targets when resolving embedded targets
       - context.cache-ttl: default cache TTL for URL content
     """
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
-
-    base_dir_default = os.path.dirname(os.path.abspath(manifest_path))
+    source = load_manifest_source(manifest_path)
+    data = source.data
+    base_dir_default = source.manifest_cwd
     (
         comps,
         base_dir,

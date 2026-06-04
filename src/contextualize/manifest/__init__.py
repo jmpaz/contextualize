@@ -25,6 +25,15 @@ from .hydrate import (
     hydrate_manifest_data,
     plan_matches_existing,
 )
+from .managed import (
+    ManagedContext,
+    ManagedHydrationStatus,
+    default_managed_registry_path,
+    default_managed_status_path,
+    hydrate_managed_contexts,
+    load_managed_contexts,
+)
+from .source import ManifestSource, load_manifest_source, load_manifest_text
 
 __all__ = [
     "GROUP_BASE_KEY",
@@ -48,4 +57,13 @@ __all__ = [
     "hydrate_manifest",
     "hydrate_manifest_data",
     "plan_matches_existing",
+    "ManagedContext",
+    "ManagedHydrationStatus",
+    "default_managed_registry_path",
+    "default_managed_status_path",
+    "hydrate_managed_contexts",
+    "load_managed_contexts",
+    "ManifestSource",
+    "load_manifest_source",
+    "load_manifest_text",
 ]
