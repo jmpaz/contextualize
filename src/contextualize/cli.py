@@ -1885,7 +1885,9 @@ def hydrate_cmd(
         if os.path.isfile(candidate):
             from .manifest.source import path_contains_manifest
 
-            if candidate.endswith((".yaml", ".yml")) or path_contains_manifest(candidate):
+            if candidate.endswith((".yaml", ".yml", ".nix")) or path_contains_manifest(
+                candidate
+            ):
                 manifest_path = candidate
         if manifest_path is None:
             inline_targets = list(paths)

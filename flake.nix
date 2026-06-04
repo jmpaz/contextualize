@@ -30,6 +30,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         lib = nixpkgs.lib;
+        contextualizeNix = import ./nix/lib.nix { inherit lib; };
         python = pkgs.python312;
         mkContextualize = { contextualizeSrc ? self.outPath, cxPluginsSrc ? cx-plugins, extraPluginSrcs ? [], sourcePreference ? "wheel" }:
           let
@@ -168,7 +169,10 @@
         checks.default = venv;
         checks.plugins = pluginCheck;
 
-        lib.mkContextualize = mkContextualize;
+        lib = {
+          mkContextualize = mkContextualize;
+          nix = contextualizeNix;
+        };
 
         devShells.default = pkgs.mkShell {
           packages = [

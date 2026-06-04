@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,10 +27,17 @@ _FENCE_RE = re.compile(
 
 def load_manifest_source(path: str | os.PathLike[str]) -> ManifestSource:
     source_path = Path(path).expanduser()
+    manifest_cwd = str(source_path.resolve().parent)
+    if source_path.suffix.lower() == ".nix":
+        return ManifestSource(
+            data=_load_nix_manifest_source(source_path, manifest_cwd),
+            manifest_cwd=manifest_cwd,
+            manifest_path=str(source_path.resolve()),
+        )
+
     with source_path.open("r", encoding="utf-8") as fh:
         text = fh.read()
 
-    manifest_cwd = str(source_path.resolve().parent)
     data = load_manifest_text(
         text,
         source_label=str(source_path),
@@ -61,7 +70,9 @@ def load_manifest_text(
             )
 
     if require_entire_document and direct_error is not None:
-        raise ValueError(f"Invalid YAML in {source_label}: {direct_error}") from direct_error
+        raise ValueError(
+            f"Invalid YAML in {source_label}: {direct_error}"
+        ) from direct_error
 
     labeled_errors: list[str] = []
     for match in _FENCE_RE.finditer(text):
@@ -90,6 +101,33 @@ def path_contains_manifest(path: str | os.PathLike[str]) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def _load_nix_manifest_source(path: Path, cwd: str) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            ["nix", "eval", "--json", "--file", str(path.resolve())],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError("Nix is required to load .nix manifests") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise ValueError(f"Failed to evaluate Nix manifest {path}{suffix}") from exc
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Nix manifest {path} did not evaluate to JSON") from exc
+    if not _is_manifest_mapping(data):
+        raise ValueError(
+            f"Nix manifest {path} must evaluate to a mapping with 'components'"
+        )
+    return data
 
 
 def _is_manifest_mapping(value: Any) -> bool:

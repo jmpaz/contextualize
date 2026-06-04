@@ -276,7 +276,15 @@ def test_contexts_hydrate_prefixes_context_warnings(
     runner = CliRunner()
     result = runner.invoke(
         cli.cli,
-        ["contexts", "hydrate", "--registry", str(registry_path), "demo"],
+        [
+            "contexts",
+            "hydrate",
+            "--registry",
+            str(registry_path),
+            "--status",
+            str(tmp_path / "status.json"),
+            "demo",
+        ],
     )
 
     assert result.exit_code == 0
