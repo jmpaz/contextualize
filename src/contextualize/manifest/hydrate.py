@@ -2553,7 +2553,11 @@ def _clear_context_dir(path: Path) -> None:
             item.unlink()
 
 
-def find_untracked_files(path: Path) -> list[str]:
+def find_untracked_files(
+    path: Path,
+    *,
+    planned_paths: set[str] | None = None,
+) -> list[str]:
     if not path.exists() or not path.is_dir():
         return []
 
@@ -2586,6 +2590,8 @@ def find_untracked_files(path: Path) -> list[str]:
             except ValueError:
                 continue
             if rel_path not in tracked_paths:
+                if planned_paths is not None and rel_path in planned_paths:
+                    continue
                 untracked.append(rel_path)
 
     return untracked

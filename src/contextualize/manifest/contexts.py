@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+from contextlib import redirect_stderr
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,7 +104,8 @@ def hydrate_contexts(
                 )
             )
             continue
-        statuses.append(_hydrate_one(context, effective_overrides))
+        with redirect_stderr(_ContextStderrPrefixer(context.name, sys.stderr)):
+            statuses.append(_hydrate_one(context, effective_overrides))
 
     write_context_status(statuses, status_path=status_path)
     return statuses
@@ -261,7 +264,10 @@ def _prepare_existing_context(plan, replace: str) -> tuple[str, str | None] | No
     if replace == "never":
         return ("skipped", "context exists and replacement policy is never")
     if replace == "guarded":
-        untracked = find_untracked_files(plan.context_dir)
+        untracked = find_untracked_files(
+            plan.context_dir,
+            planned_paths=_planned_paths(plan),
+        )
         if untracked:
             sample = ", ".join(untracked[:5])
             suffix = "" if len(untracked) <= 5 else f", and {len(untracked) - 5} more"
@@ -271,9 +277,19 @@ def _prepare_existing_context(plan, replace: str) -> tuple[str, str | None] | No
 
 
 def _planned_file_count(plan) -> int:
-    written_paths = {path.as_posix() for path, _ in plan.files_to_write}
-    symlinked_paths = {path.as_posix() for path, _ in plan.files_to_symlink}
-    return len(written_paths | symlinked_paths)
+    return len(_planned_paths(plan))
+
+
+def _planned_paths(plan) -> set[str]:
+    written_paths = {
+        path.relative_to(plan.context_dir).as_posix()
+        for path, _ in plan.files_to_write
+    }
+    symlinked_paths = {
+        path.relative_to(plan.context_dir).as_posix()
+        for path, _ in plan.files_to_symlink
+    }
+    return written_paths | symlinked_paths
 
 
 def _status_from_result(
@@ -334,3 +350,31 @@ def _manifest_source_label(context: ContextEntry) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class _ContextStderrPrefixer:
+    def __init__(self, name: str, target) -> None:
+        self.name = name
+        self.target = target
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._write_line(line, newline=True)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._write_line(self._buffer, newline=False)
+            self._buffer = ""
+        self.target.flush()
+
+    def _write_line(self, line: str, *, newline: bool) -> None:
+        if line:
+            self.target.write(f"context {self.name}: {line}")
+        if newline:
+            self.target.write("\n")
