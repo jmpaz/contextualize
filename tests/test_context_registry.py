@@ -6,10 +6,10 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from contextualize import cli
-from contextualize.manifest.managed import hydrate_managed_contexts
+from contextualize.manifest.contexts import hydrate_contexts
 
 
-def test_hydrate_managed_context_from_registry_data(tmp_path: Path) -> None:
+def test_hydrate_context_from_registry_data(tmp_path: Path) -> None:
     target_dir = tmp_path / "repo"
     target_dir.mkdir()
     registry_path = tmp_path / "registry.json"
@@ -40,7 +40,7 @@ def test_hydrate_managed_context_from_registry_data(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    statuses = hydrate_managed_contexts(
+    statuses = hydrate_contexts(
         ["demo"],
         registry_path=registry_path,
         status_path=status_path,
@@ -54,7 +54,7 @@ def test_hydrate_managed_context_from_registry_data(tmp_path: Path) -> None:
     assert status_data["contexts"]["demo"]["result"] == "hydrated"
 
 
-def test_hydrate_managed_context_guarded_skips_untracked_context(
+def test_hydrate_context_guarded_skips_untracked_context(
     tmp_path: Path,
 ) -> None:
     target_dir = tmp_path / "repo"
@@ -89,7 +89,7 @@ def test_hydrate_managed_context_guarded_skips_untracked_context(
         encoding="utf-8",
     )
 
-    statuses = hydrate_managed_contexts(
+    statuses = hydrate_contexts(
         ["demo"],
         registry_path=registry_path,
         status_path=tmp_path / "status.json",
@@ -100,7 +100,7 @@ def test_hydrate_managed_context_guarded_skips_untracked_context(
     assert (context_dir / "handmade.md").read_text(encoding="utf-8") == "keep"
 
 
-def test_hydrate_managed_cli_uses_registry(tmp_path: Path) -> None:
+def test_contexts_hydrate_cli_uses_registry(tmp_path: Path) -> None:
     target_dir = tmp_path / "repo"
     target_dir.mkdir()
     registry_path = tmp_path / "registry.json"
@@ -132,13 +132,52 @@ def test_hydrate_managed_cli_uses_registry(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(
         cli.cli,
-        ["hydrate", "--managed", "--managed-registry", str(registry_path), "demo"],
+        ["contexts", "hydrate", "--registry", str(registry_path), "demo"],
         env={"XDG_STATE_HOME": str(tmp_path / "state")},
     )
 
     assert result.exit_code == 0
-    assert "managed demo: hydrated" in result.output
+    assert "context demo: hydrated" in result.output
     assert (target_dir / ".context/main/notes/text-001.md").exists()
+
+
+def test_contexts_list_cli_uses_registry(tmp_path: Path) -> None:
+    target_dir = tmp_path / "repo"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "manifest": {
+                            "data": {
+                                "config": {
+                                    "context": {
+                                        "dir": ".context",
+                                        "include-meta": False,
+                                    }
+                                },
+                                "components": [{"name": "main", "text": "hello"}],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(registry_path)],
+    )
+
+    assert result.exit_code == 0
+    assert f"demo\t{target_dir}" in result.output
 
 
 def test_hydrate_cli_treats_text_file_with_manifest_block_as_manifest(

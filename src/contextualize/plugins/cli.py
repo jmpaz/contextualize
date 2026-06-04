@@ -15,8 +15,16 @@ def _warn(message: str) -> None:
 
 def sync_plugin_cli_commands(root: click.Group) -> None:
     loaded = get_loaded_plugins()
-    for command_name in ("cat", "hydrate", "payload"):
-        command = root.commands.get(command_name)
+    commands = [
+        ("cat", root.commands.get("cat")),
+        ("hydrate", root.commands.get("hydrate")),
+        ("payload", root.commands.get("payload")),
+    ]
+    contexts = root.commands.get("contexts")
+    if isinstance(contexts, click.Group):
+        commands.append(("hydrate", contexts.commands.get("hydrate")))
+
+    for command_name, command in commands:
         if command is None:
             continue
         synced = set(getattr(command, _SYNCED_PLUGINS_ATTR, set()))

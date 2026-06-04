@@ -14,6 +14,7 @@ from .utils import add_prompt_wrappers, count_tokens, wrap_text
 COMMAND_GROUPS = (
     ("Sources", ("cat", "map", "shell", "paste")),
     ("Manifest", ("hydrate", "payload")),
+    ("Context Registry", ("contexts",)),
     ("Plugins", ("plugins", "auth")),
 )
 HELP_COL_MAX = 30
@@ -150,6 +151,8 @@ def _collect_used_global_option_labels(ctx: click.Context) -> list[str]:
     parent = ctx.parent
     if parent is None:
         return []
+    while parent.parent is not None:
+        parent = parent.parent
     get_source = getattr(parent, "get_parameter_source", None)
     used: list[str] = []
     if callable(get_source):
@@ -463,6 +466,7 @@ preprocess_args()
         "shell",
         "paste",
         "hydrate",
+        "contexts",
         "payload",
         "plugins",
         "auth",
@@ -1303,23 +1307,362 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     raise click.ClickException(f"{path} exists. Use --overwrite to replace it.")
 
 
-@cli.command("hydrate", cls=PluginGroupedCommand)
-@click.argument("paths", nargs=-1, type=str)
+def _echo_context_hydration_statuses(statuses, *, label: str) -> None:
+    for status in statuses:
+        parts = [f"{label} {status.name}: {status.result}"]
+        if status.context_dir:
+            parts.append(f"-> {status.context_dir}")
+        if status.reason:
+            parts.append(f"({status.reason})")
+        click.echo(" ".join(parts), err=status.result in {"failed", "skipped"})
+
+
+def _context_hydrate_overrides(
+    ctx,
+    *,
+    context_dir,
+    access,
+    path_strategy,
+    agents_filenames,
+    agents_prompt,
+    omit_meta,
+    copy_files,
+    use_cache,
+    refresh_cache,
+    refresh_media,
+    refresh_images,
+    refresh_videos,
+    refresh_audio,
+    transcribe_refresh,
+    refresh_all,
+    cache_ttl,
+    target_depth,
+    target_scope,
+    include_parent,
+    extra_params,
+):
+    from .plugins import collect_plugin_cli_overrides
+
+    from .manifest.hydrate import HydrateOverrides
+
+    parsed_cache_ttl = None
+    if cache_ttl is not None:
+        from .cache import parse_duration
+
+        try:
+            parsed_cache_ttl = parse_duration(cache_ttl)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+
+    refresh_cache = refresh_cache or refresh_all
+    refresh_media = refresh_media or refresh_all
+    refresh_images = refresh_images or refresh_media
+    refresh_videos = refresh_videos or refresh_media
+    refresh_audio = refresh_audio or transcribe_refresh or refresh_media
+    from .runtime import (
+        set_refresh_audio,
+        set_refresh_cache,
+        set_refresh_images,
+        set_refresh_videos,
+    )
+
+    set_refresh_cache(refresh_cache)
+    set_refresh_images(refresh_images)
+    set_refresh_videos(refresh_videos)
+    set_refresh_audio(refresh_audio)
+    command_params = dict(ctx.params)
+    command_params.update(extra_params)
+    plugin_overrides = collect_plugin_cli_overrides("hydrate", command_params)
+
+    prompt_value = agents_prompt
+    if prompt_value is not None and not prompt_value.strip():
+        raise click.BadParameter("--agents-prompt cannot be empty")
+
+    return HydrateOverrides(
+        context_dir=context_dir,
+        access=access.lower() if access else None,
+        path_strategy=path_strategy.lower() if path_strategy else None,
+        agents_prompt=prompt_value,
+        agents_filenames=tuple(agents_filenames),
+        omit_meta=omit_meta,
+        copy=copy_files,
+        use_cache=use_cache,
+        cache_ttl=parsed_cache_ttl,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
+        target_depth=target_depth,
+        target_scope=target_scope.lower() if target_scope else None,
+        include_parent=include_parent,
+    )
+
+
+@cli.group("contexts")
+def contexts_cmd() -> None:
+    """Work with registered context manifests."""
+
+
+@contexts_cmd.command("list")
 @click.option(
-    "--managed",
-    is_flag=True,
-    help="Hydrate registered managed contexts instead of direct paths.",
+    "--registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Context registry path (default: XDG contextualize/contexts.json).",
+)
+def contexts_list_cmd(registry) -> None:
+    """List registered contexts."""
+    from .manifest.contexts import load_context_registry
+
+    try:
+        contexts = load_context_registry(registry)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    for name in sorted(contexts):
+        context = contexts[name]
+        click.echo(f"{name}\t{context.target_dir}")
+
+
+@contexts_cmd.command("status")
+@click.option(
+    "--status",
+    "status_path",
+    type=click.Path(dir_okay=False),
+    help="Context status path (default: XDG contextualize/contexts/status.json).",
+)
+def contexts_status_cmd(status_path) -> None:
+    """Print the latest context hydration status."""
+    import json
+    from pathlib import Path
+
+    from .manifest.contexts import default_context_status_path
+
+    path = (
+        Path(status_path).expanduser()
+        if status_path
+        else default_context_status_path()
+    )
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except OSError as exc:
+        raise click.ClickException(str(exc)) from exc
+    contexts = payload.get("contexts") if isinstance(payload, dict) else None
+    if not isinstance(contexts, dict):
+        raise click.ClickException("Context status must contain a 'contexts' mapping")
+    for name in sorted(contexts):
+        status = contexts[name]
+        result = (
+            status.get("result", "unknown")
+            if isinstance(status, dict)
+            else "unknown"
+        )
+        reason = status.get("reason") if isinstance(status, dict) else None
+        target_dir = status.get("target_dir") if isinstance(status, dict) else None
+        parts = [f"context {name}: {result}"]
+        if target_dir:
+            parts.append(f"at {target_dir}")
+        if reason:
+            parts.append(f"({reason})")
+        click.echo(" ".join(parts), err=result in {"failed", "skipped"})
+
+
+@contexts_cmd.command("hydrate", cls=PluginGroupedCommand)
+@click.argument("names", nargs=-1, type=str)
+@click.option(
+    "--registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Context registry path (default: XDG contextualize/contexts.json).",
 )
 @click.option(
-    "--managed-registry",
-    type=click.Path(exists=True, dir_okay=False),
-    help="Managed context registry path.",
+    "--status",
+    "status_path",
+    type=click.Path(dir_okay=False),
+    help="Status JSON path (default: XDG contextualize/contexts/status.json).",
 )
 @click.option(
     "--strict",
     is_flag=True,
-    help="Exit non-zero when any managed context fails.",
+    help="Exit non-zero when any context fails.",
 )
+@click.option(
+    "--dir",
+    "context_dir",
+    type=click.Path(),
+    help="Override manifest context root directory.",
+)
+@click.option(
+    "--access",
+    type=click.Choice(["read-only", "writable"], case_sensitive=False),
+    help="Override context folder access mode.",
+)
+@click.option(
+    "--path-strategy",
+    type=click.Choice(["on-disk", "by-component"], case_sensitive=False),
+    help="Override path layout strategy.",
+)
+@click.option(
+    "--agents-filename",
+    "agents_filenames",
+    multiple=True,
+    help="Filename to write agent prompt content.",
+)
+@click.option(
+    "--agents-prompt",
+    "agents_prompt",
+    type=str,
+    help="Agent prompt content.",
+)
+@click.option(
+    "--omit-meta",
+    is_flag=True,
+    help="Omit manifest and index metadata.",
+)
+@click.option(
+    "--copy",
+    "copy_files",
+    is_flag=True,
+    help="Copy files instead of symlinking.",
+)
+@click.option(
+    "--cache/--no-cache",
+    "use_cache",
+    default=None,
+    help="Enable/disable URL caching (default: enabled).",
+)
+@click.option(
+    "--refresh",
+    "refresh_cache",
+    is_flag=True,
+    help="Force refresh all cached URLs.",
+)
+@click.option(
+    "--refresh-media",
+    is_flag=True,
+    help="Force refresh cached media conversions.",
+)
+@click.option(
+    "--refresh-images",
+    is_flag=True,
+    help="Force refresh cached image conversions.",
+)
+@click.option(
+    "--refresh-videos",
+    is_flag=True,
+    help="Force refresh cached video conversions.",
+)
+@click.option(
+    "--refresh-audio",
+    is_flag=True,
+    help="Force refresh cached audio conversions.",
+)
+@click.option(
+    "--transcribe-refresh",
+    is_flag=True,
+    help="Force refresh cached audio transcriptions.",
+)
+@click.option(
+    "--refresh-all",
+    is_flag=True,
+    help="Force refresh URL and media caches.",
+)
+@click.option(
+    "--cache-ttl",
+    type=str,
+    help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
+)
+@click.option(
+    "--target-depth",
+    type=int,
+    default=None,
+    help="Follow embedded plugin targets this many levels deep.",
+)
+@click.option(
+    "--target-scope",
+    type=click.Choice(["first", "all"], case_sensitive=False),
+    default=None,
+    help="Resolve embedded targets from only the first input or all inputs.",
+)
+@click.option(
+    "--include-parent/--children-only",
+    default=None,
+    help="Include original targets when embedded targets are followed.",
+)
+@click.pass_context
+def contexts_hydrate_cmd(
+    ctx,
+    names,
+    registry,
+    status_path,
+    strict,
+    context_dir,
+    access,
+    path_strategy,
+    agents_filenames,
+    agents_prompt,
+    omit_meta,
+    copy_files,
+    use_cache,
+    refresh_cache,
+    refresh_media,
+    refresh_images,
+    refresh_videos,
+    refresh_audio,
+    transcribe_refresh,
+    refresh_all,
+    cache_ttl,
+    target_depth,
+    target_scope,
+    include_parent,
+    **extra_params,
+):
+    """Hydrate one or more registered contexts."""
+    used_options = _collect_used_global_option_labels(ctx)
+    if used_options:
+        click.echo(f"ignoring global options [{', '.join(used_options)}]", err=True)
+
+    from .manifest.contexts import hydrate_contexts
+
+    overrides = _context_hydrate_overrides(
+        ctx,
+        context_dir=context_dir,
+        access=access,
+        path_strategy=path_strategy,
+        agents_filenames=agents_filenames,
+        agents_prompt=agents_prompt,
+        omit_meta=omit_meta,
+        copy_files=copy_files,
+        use_cache=use_cache,
+        refresh_cache=refresh_cache,
+        refresh_media=refresh_media,
+        refresh_images=refresh_images,
+        refresh_videos=refresh_videos,
+        refresh_audio=refresh_audio,
+        transcribe_refresh=transcribe_refresh,
+        refresh_all=refresh_all,
+        cache_ttl=cache_ttl,
+        target_depth=target_depth,
+        target_scope=target_scope,
+        include_parent=include_parent,
+        extra_params=extra_params,
+    )
+    try:
+        statuses = hydrate_contexts(
+            list(names),
+            registry_path=registry,
+            status_path=status_path,
+            overrides=overrides,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    failed = [status for status in statuses if status.result == "failed"]
+    _echo_context_hydration_statuses(statuses, label="context")
+    if strict and failed:
+        raise click.ClickException(f"{len(failed)} context(s) failed")
+    return None
+
+
+@cli.command("hydrate", cls=PluginGroupedCommand)
+@click.argument("paths", nargs=-1, type=str)
 @click.option(
     "--dir",
     "context_dir",
@@ -1437,9 +1780,6 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
 def hydrate_cmd(
     ctx,
     paths,
-    managed,
-    managed_registry,
-    strict,
     context_dir,
     access,
     path_strategy,
@@ -1536,31 +1876,6 @@ def hydrate_cmd(
         target_scope=target_scope.lower() if target_scope else None,
         include_parent=include_parent,
     )
-
-    if managed:
-        from .manifest.managed import hydrate_managed_contexts
-
-        try:
-            statuses = hydrate_managed_contexts(
-                list(paths),
-                registry_path=managed_registry,
-                overrides=overrides,
-            )
-        except (OSError, ValueError) as exc:
-            raise click.ClickException(str(exc)) from exc
-
-        failed = [status for status in statuses if status.result == "failed"]
-        for status in statuses:
-            parts = [f"managed {status.name}: {status.result}"]
-            if status.context_dir:
-                parts.append(f"-> {status.context_dir}")
-            if status.reason:
-                parts.append(f"({status.reason})")
-            message = " ".join(parts)
-            click.echo(message, err=status.result in {"failed", "skipped"})
-        if strict and failed:
-            raise click.ClickException(f"{len(failed)} managed context(s) failed")
-        return None
 
     manifest_path = None
     inline_targets: list[str] = []

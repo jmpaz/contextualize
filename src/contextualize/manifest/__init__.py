@@ -25,13 +25,14 @@ from .hydrate import (
     hydrate_manifest_data,
     plan_matches_existing,
 )
-from .managed import (
-    ManagedContext,
-    ManagedHydrationStatus,
-    default_managed_registry_path,
-    default_managed_status_path,
-    hydrate_managed_contexts,
-    load_managed_contexts,
+from .contexts import (
+    ContextEntry,
+    ContextHydrationStatus,
+    default_context_registry_path,
+    default_context_status_path,
+    hydrate_contexts,
+    load_context_registry,
+    write_context_status,
 )
 from .source import ManifestSource, load_manifest_source, load_manifest_text
 
@@ -57,12 +58,13 @@ __all__ = [
     "hydrate_manifest",
     "hydrate_manifest_data",
     "plan_matches_existing",
-    "ManagedContext",
-    "ManagedHydrationStatus",
-    "default_managed_registry_path",
-    "default_managed_status_path",
-    "hydrate_managed_contexts",
-    "load_managed_contexts",
+    "ContextEntry",
+    "ContextHydrationStatus",
+    "default_context_registry_path",
+    "default_context_status_path",
+    "hydrate_contexts",
+    "load_context_registry",
+    "write_context_status",
     "ManifestSource",
     "load_manifest_source",
     "load_manifest_text",

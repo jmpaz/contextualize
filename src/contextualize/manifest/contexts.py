@@ -1,4 +1,4 @@
-"""Managed manifest hydration registry support."""
+"""Context registry hydration support."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _REPLACE_POLICIES = {"guarded", "always", "never"}
 
 
 @dataclass(frozen=True)
-class ManagedContext:
+class ContextEntry:
     name: str
     target_dir: Path
     manifest: dict[str, Any]
@@ -33,7 +33,7 @@ class ManagedContext:
 
 
 @dataclass(frozen=True)
-class ManagedHydrationStatus:
+class ContextHydrationStatus:
     name: str
     target_dir: str
     manifest_source: str
@@ -46,46 +46,46 @@ class ManagedHydrationStatus:
     replace: str = "guarded"
 
 
-def default_managed_registry_path() -> Path:
+def default_context_registry_path() -> Path:
     config_home = os.environ.get("XDG_CONFIG_HOME")
     if config_home:
-        return Path(config_home) / "contextualize" / "managed-contexts.json"
-    return Path.home() / ".config" / "contextualize" / "managed-contexts.json"
+        return Path(config_home) / "contextualize" / "contexts.json"
+    return Path.home() / ".config" / "contextualize" / "contexts.json"
 
 
-def default_managed_status_path() -> Path:
+def default_context_status_path() -> Path:
     state_home = os.environ.get("XDG_STATE_HOME")
     if state_home:
-        return Path(state_home) / "contextualize" / "managed-contexts" / "status.json"
-    return Path.home() / ".local" / "state" / "contextualize" / "managed-contexts" / "status.json"
+        return Path(state_home) / "contextualize" / "contexts" / "status.json"
+    return Path.home() / ".local" / "state" / "contextualize" / "contexts" / "status.json"
 
 
-def load_managed_contexts(
+def load_context_registry(
     registry_path: str | os.PathLike[str] | None = None,
-) -> dict[str, ManagedContext]:
-    path = Path(registry_path).expanduser() if registry_path else default_managed_registry_path()
+) -> dict[str, ContextEntry]:
+    path = Path(registry_path).expanduser() if registry_path else default_context_registry_path()
     with path.open("r", encoding="utf-8") as fh:
         raw = json.load(fh)
     contexts = raw.get("contexts") if isinstance(raw, dict) else None
     if not isinstance(contexts, dict):
-        raise ValueError("Managed context registry must contain a 'contexts' mapping")
+        raise ValueError("Context registry must contain a 'contexts' mapping")
     return {
-        name: _parse_managed_context(name, value)
+        name: _parse_context_entry(name, value)
         for name, value in contexts.items()
     }
 
 
-def hydrate_managed_contexts(
+def hydrate_contexts(
     names: list[str] | tuple[str, ...] | None = None,
     *,
     registry_path: str | os.PathLike[str] | None = None,
     status_path: str | os.PathLike[str] | None = None,
     overrides: HydrateOverrides | None = None,
-) -> list[ManagedHydrationStatus]:
-    contexts = load_managed_contexts(registry_path)
+) -> list[ContextHydrationStatus]:
+    contexts = load_context_registry(registry_path)
     selected_names = list(names or contexts.keys())
     effective_overrides = overrides or HydrateOverrides()
-    statuses: list[ManagedHydrationStatus] = []
+    statuses: list[ContextHydrationStatus] = []
 
     for name in selected_names:
         context = contexts.get(name)
@@ -97,23 +97,23 @@ def hydrate_managed_contexts(
                     manifest_source="",
                     context_dir=None,
                     result="failed",
-                    reason=f"managed context is not registered: {name}",
+                    reason=f"context is not registered: {name}",
                     replace="guarded",
                 )
             )
             continue
         statuses.append(_hydrate_one(context, effective_overrides))
 
-    write_managed_status(statuses, status_path=status_path)
+    write_context_status(statuses, status_path=status_path)
     return statuses
 
 
-def write_managed_status(
-    statuses: list[ManagedHydrationStatus],
+def write_context_status(
+    statuses: list[ContextHydrationStatus],
     *,
     status_path: str | os.PathLike[str] | None = None,
 ) -> None:
-    path = Path(status_path).expanduser() if status_path else default_managed_status_path()
+    path = Path(status_path).expanduser() if status_path else default_context_status_path()
     previous: dict[str, Any] = {}
     if path.exists():
         try:
@@ -137,26 +137,26 @@ def write_managed_status(
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _parse_managed_context(name: str, raw: Any) -> ManagedContext:
+def _parse_context_entry(name: str, raw: Any) -> ContextEntry:
     if not isinstance(raw, dict):
-        raise ValueError(f"Managed context '{name}' must be a mapping")
+        raise ValueError(f"Context '{name}' must be a mapping")
     target_dir = raw.get("targetDir") or raw.get("target_dir")
     if not isinstance(target_dir, str) or not target_dir:
-        raise ValueError(f"Managed context '{name}' targetDir must be a non-empty string")
+        raise ValueError(f"Context '{name}' targetDir must be a non-empty string")
     manifest = raw.get("manifest")
     if not isinstance(manifest, dict):
-        raise ValueError(f"Managed context '{name}' manifest must be a mapping")
+        raise ValueError(f"Context '{name}' manifest must be a mapping")
     sources = [key for key in ("source", "text", "data") if key in manifest]
     if len(sources) != 1:
         raise ValueError(
-            f"Managed context '{name}' manifest must set exactly one of source, text, or data"
+            f"Context '{name}' manifest must set exactly one of source, text, or data"
         )
     replace = raw.get("replace", "guarded")
     if replace not in _REPLACE_POLICIES:
         raise ValueError(
-            f"Managed context '{name}' replace must be one of: always, guarded, never"
+            f"Context '{name}' replace must be one of: always, guarded, never"
         )
-    return ManagedContext(
+    return ContextEntry(
         name=name,
         target_dir=Path(os.path.expanduser(target_dir)),
         manifest=manifest,
@@ -165,9 +165,9 @@ def _parse_managed_context(name: str, raw: Any) -> ManagedContext:
 
 
 def _hydrate_one(
-    context: ManagedContext,
+    context: ContextEntry,
     overrides: HydrateOverrides,
-) -> ManagedHydrationStatus:
+) -> ContextHydrationStatus:
     target_dir = context.target_dir
     manifest_source = _manifest_source_label(context)
     if not target_dir.is_dir():
@@ -217,14 +217,14 @@ def _hydrate_one(
         )
 
 
-def _build_plan(context: ManagedContext, overrides: HydrateOverrides):
+def _build_plan(context: ContextEntry, overrides: HydrateOverrides):
     target_dir = context.target_dir.resolve()
     manifest = context.manifest
     cwd = str(target_dir)
     if "source" in manifest:
         source = manifest["source"]
         if not isinstance(source, str) or not source:
-            raise ValueError(f"Managed context '{context.name}' manifest.source must be a string")
+            raise ValueError(f"Context '{context.name}' manifest.source must be a string")
         source_path = Path(os.path.expanduser(source))
         if not source_path.is_absolute():
             source_path = target_dir / source_path
@@ -232,8 +232,8 @@ def _build_plan(context: ManagedContext, overrides: HydrateOverrides):
     if "text" in manifest:
         text = manifest["text"]
         if not isinstance(text, str):
-            raise ValueError(f"Managed context '{context.name}' manifest.text must be a string")
-        data = load_manifest_text(text, source_label=f"managed context '{context.name}'")
+            raise ValueError(f"Context '{context.name}' manifest.text must be a string")
+        data = load_manifest_text(text, source_label=f"context '{context.name}'")
         return build_hydration_plan_data(
             data,
             manifest_cwd=cwd,
@@ -243,7 +243,7 @@ def _build_plan(context: ManagedContext, overrides: HydrateOverrides):
         )
     data = manifest["data"]
     if not isinstance(data, dict):
-        raise ValueError(f"Managed context '{context.name}' manifest.data must be a mapping")
+        raise ValueError(f"Context '{context.name}' manifest.data must be a mapping")
     return build_hydration_plan_data(
         data,
         manifest_cwd=cwd,
@@ -277,13 +277,13 @@ def _planned_file_count(plan) -> int:
 
 
 def _status_from_result(
-    context: ManagedContext,
+    context: ContextEntry,
     hydrate_result: HydrateResult,
     *,
     outcome: str,
     reason: str | None,
     manifest_source: str,
-) -> ManagedHydrationStatus:
+) -> ContextHydrationStatus:
     return _status(
         name=context.name,
         target_dir=str(context.target_dir),
@@ -308,8 +308,8 @@ def _status(
     replace: str,
     component_count: int | None = None,
     file_count: int | None = None,
-) -> ManagedHydrationStatus:
-    return ManagedHydrationStatus(
+) -> ContextHydrationStatus:
+    return ContextHydrationStatus(
         name=name,
         target_dir=target_dir,
         manifest_source=manifest_source,
@@ -323,7 +323,7 @@ def _status(
     )
 
 
-def _manifest_source_label(context: ManagedContext) -> str:
+def _manifest_source_label(context: ContextEntry) -> str:
     manifest = context.manifest
     if "source" in manifest:
         return str(manifest["source"])

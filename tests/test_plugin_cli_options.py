@@ -300,3 +300,71 @@ def test_payload_passes_plugin_cli_overrides_into_manifest_render(
     assert result.exit_code == 0
     assert result.output == "payload\n"
     assert captured["plugin_overrides"] == {"demo-cli": {"value": "hello"}}
+
+
+def test_contexts_hydrate_uses_hydrate_plugin_cli_options(monkeypatch) -> None:
+    class _DemoEntrypoint:
+        name = "demo-cli"
+        value = "contextualize_plugins.demo_cli:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "demo-cli"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda _target, _context: False
+            plugin.resolve = lambda _target, _context: []
+
+            def register_cli_options(command_name, command):
+                if command_name != "hydrate":
+                    return
+                command.params.append(
+                    click.Option(
+                        ["--demo-text"],
+                        default=None,
+                        help="demo plugin option",
+                    )
+                )
+
+            def collect_cli_overrides(command_name, params):
+                if command_name != "hydrate":
+                    return None
+                value = params.get("demo_text")
+                if not value:
+                    return None
+                return {"value": value}
+
+            plugin.register_cli_options = register_cli_options
+            plugin.collect_cli_overrides = collect_cli_overrides
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_DemoEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+    captured: dict[str, object] = {}
+
+    def _hydrate_contexts(*args, **kwargs):
+        captured["plugin_overrides"] = kwargs["overrides"].plugin_overrides
+        return [
+            types.SimpleNamespace(
+                name="demo",
+                result="hydrated",
+                context_dir=None,
+                reason=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "contextualize.manifest.contexts.hydrate_contexts", _hydrate_contexts
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "hydrate", "demo", "--demo-text", "hello"],
+    )
+
+    assert result.exit_code == 0
+    assert "context demo: hydrated" in result.output
+    assert captured["plugin_overrides"] == {"demo-cli": {"value": "hello"}}
