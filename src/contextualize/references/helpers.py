@@ -36,6 +36,7 @@ _SOUNDCLOUD_URN_RE = re.compile(
     r"^soundcloud:(tracks|playlists|users):[^/\s?#]+$",
     flags=re.IGNORECASE,
 )
+_BARE_EXTERNAL_PREFIX_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+_-]*:")
 RAW_PREFIX = "raw:"
 
 
@@ -166,6 +167,16 @@ def looks_like_windows_drive(spec: str) -> bool:
     return bool(_WINDOWS_DRIVE_RE.match(spec))
 
 
+def _looks_like_bare_external_target(spec: str) -> bool:
+    if looks_like_windows_drive(spec):
+        return False
+    match = _BARE_EXTERNAL_PREFIX_RE.match(spec)
+    if match is None:
+        return False
+    suffix = spec[match.end() :]
+    return any(marker in suffix for marker in ("/", "?", ":"))
+
+
 def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
     try:
         from ..plugins.resolve import classify_plugin_target
@@ -187,6 +198,8 @@ def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
     from ..git.target import parse_git_target
 
     if parse_git_target(spec):
+        return spec, []
+    if _looks_like_bare_external_target(spec):
         return spec, []
     return split_path_and_symbols(spec)
 

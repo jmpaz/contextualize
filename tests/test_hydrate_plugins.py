@@ -196,3 +196,27 @@ def test_hydrate_manifest_fails_for_unresolved_external_scheme(
             overrides=HydrateOverrides(),
             cwd=str(tmp_path),
         )
+
+
+def test_hydrate_manifest_fails_for_unloaded_colon_plugin_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(plugin_loader, "_iter_plugin_entrypoints", lambda: [])
+    clear_loaded_plugins_cache()
+
+    with pytest.raises(
+        ValueError,
+        match="No plugin could resolve external target: note:voice/abc.m4a",
+    ):
+        build_hydration_plan_data(
+            {
+                "config": {
+                    "context": {"dir": str(tmp_path / "ctx"), "include-meta": False}
+                },
+                "components": [{"name": "main", "files": ["note:voice/abc.m4a"]}],
+            },
+            manifest_cwd=str(tmp_path),
+            overrides=HydrateOverrides(),
+            cwd=str(tmp_path),
+        )
