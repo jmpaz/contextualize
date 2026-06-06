@@ -305,6 +305,76 @@ class PluginGroupedCommand(click.Command):
             _write_bold_section(formatter, title, plugin_records[plugin_name])
 
 
+def _video_frame_options(command):
+    command = click.option(
+        "--video-frame-max",
+        type=int,
+        default=None,
+        help="Maximum sampled video frames per video.",
+    )(command)
+    command = click.option(
+        "--video-frame-descriptions/--no-video-frame-descriptions",
+        "video_frame_descriptions",
+        default=None,
+        help="Enable or disable generated descriptions for sampled video frames.",
+    )(command)
+    command = click.option(
+        "--video-frame-mode",
+        type=click.Choice(["duration", "speech"], case_sensitive=False),
+        default=None,
+        help="Sample video frames by duration or speech segment boundaries.",
+    )(command)
+    command = click.option(
+        "--video-frames/--no-video-frames",
+        "video_frames",
+        default=None,
+        help="Enable or disable sampled video frame extraction.",
+    )(command)
+    return command
+
+
+def _video_cli_overrides(
+    params: dict[str, object],
+) -> dict[str, dict[str, object]] | None:
+    video: dict[str, object] = {}
+    if params.get("video_frames") is not None:
+        video["frames"] = bool(params.get("video_frames"))
+    mode = params.get("video_frame_mode")
+    if isinstance(mode, str) and mode:
+        video["frame-mode"] = mode.lower()
+    if params.get("video_frame_descriptions") is not None:
+        video["frame-descriptions"] = bool(params.get("video_frame_descriptions"))
+    frame_max = params.get("video_frame_max")
+    if frame_max is not None:
+        try:
+            parsed = int(frame_max)
+        except (TypeError, ValueError) as exc:
+            raise click.BadParameter("must be an integer") from exc
+        if parsed <= 0:
+            raise click.BadParameter("must be greater than 0")
+        video["frame-max"] = parsed
+    return {"video": video} if video else None
+
+
+def _merge_cli_overrides(
+    *mappings: dict[str, object] | None,
+) -> dict[str, object] | None:
+    merged: dict[str, object] = {}
+    for mapping in mappings:
+        if not mapping:
+            continue
+        for key, value in mapping.items():
+            if isinstance(value, dict):
+                current = merged.get(key)
+                if isinstance(current, dict):
+                    current.update(value)
+                else:
+                    merged[key] = dict(value)
+            else:
+                merged[key] = value
+    return merged or None
+
+
 def validate_prompt(ctx, param, value):
     """
     Ensure at most two prompt strings are provided.
@@ -1080,6 +1150,7 @@ def plugins_command(plugin_name: str | None = None) -> None:
     type=str,
     help="Cache TTL (e.g., 7d, 24h, 1w)",
 )
+@_video_frame_options
 @click.pass_context
 def payload_cmd(
     ctx,
@@ -1140,7 +1211,10 @@ def payload_cmd(
 
     command_params = dict(ctx.params)
     command_params.update(extra_params)
-    plugin_overrides = collect_plugin_cli_overrides("payload", command_params)
+    plugin_overrides = _merge_cli_overrides(
+        collect_plugin_cli_overrides("payload", command_params),
+        _video_cli_overrides(command_params),
+    )
 
     def parse_keys(values):
         keys = []
@@ -1372,7 +1446,10 @@ def _context_hydrate_overrides(
     set_refresh_audio(refresh_audio)
     command_params = dict(ctx.params)
     command_params.update(extra_params)
-    plugin_overrides = collect_plugin_cli_overrides("hydrate", command_params)
+    plugin_overrides = _merge_cli_overrides(
+        collect_plugin_cli_overrides("hydrate", command_params),
+        _video_cli_overrides(command_params),
+    )
 
     prompt_value = agents_prompt
     if prompt_value is not None and not prompt_value.strip():
@@ -1586,6 +1663,7 @@ def contexts_status_cmd(status_path) -> None:
     default=None,
     help="Include original targets when embedded targets are followed.",
 )
+@_video_frame_options
 @click.pass_context
 def contexts_hydrate_cmd(
     ctx,
@@ -1776,6 +1854,7 @@ def contexts_hydrate_cmd(
     is_flag=True,
     help="Output an itemized list of files prepared for hydration.",
 )
+@_video_frame_options
 @click.pass_context
 def hydrate_cmd(
     ctx,
@@ -1852,7 +1931,10 @@ def hydrate_cmd(
     set_refresh_audio(refresh_audio)
     command_params = dict(ctx.params)
     command_params.update(extra_params)
-    plugin_overrides = collect_plugin_cli_overrides("hydrate", command_params)
+    plugin_overrides = _merge_cli_overrides(
+        collect_plugin_cli_overrides("hydrate", command_params),
+        _video_cli_overrides(command_params),
+    )
 
     prompt_value = agents_prompt
     if prompt_value is not None and not prompt_value.strip():
@@ -2192,6 +2274,7 @@ def hydrate_cmd(
     is_flag=True,
     help="Skip processing of images and video files.",
 )
+@_video_frame_options
 @click.pass_context
 def cat_cmd(
     ctx,
@@ -2302,7 +2385,10 @@ def cat_cmd(
 
     command_params = dict(ctx.params)
     command_params.update(extra_params)
-    plugin_overrides = collect_plugin_cli_overrides("cat", command_params)
+    plugin_overrides = _merge_cli_overrides(
+        collect_plugin_cli_overrides("cat", command_params),
+        _video_cli_overrides(command_params),
+    )
 
     injection_trace_items = [] if inject and trace else None
     ignored_files = []

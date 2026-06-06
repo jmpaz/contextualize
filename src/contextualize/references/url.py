@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -12,10 +13,12 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 from ..render.text import process_text
 from ..utils import count_tokens
 from .audio_transcription import (
+    _video_suffix_from_content_type,
     is_audio_suffix,
     is_video_suffix,
     transcribe_media_bytes,
 )
+from .video_context import render_video_bytes
 from .helpers import (
     DISALLOWED_CONTENT_TYPES,
     DISALLOWED_EXTENSIONS,
@@ -304,6 +307,7 @@ class URLReference:
     _bypass_markdown_converter: bool = field(default=False, init=False, repr=False)
     _gist_filename: str | None = field(default=None, init=False, repr=False)
     _content_type: str | None = field(default=None, init=False, repr=False)
+    _skip_cache_store: bool = field(default=False, init=False, repr=False)
     cache_miss: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -342,6 +346,36 @@ class URLReference:
 
     def token_count(self, encoding: str = "cl100k_base") -> int:
         return count_tokens(self.original_file_content, target=encoding)["count"]
+
+    def _cache_url(self) -> str:
+        relevant_overrides: dict[str, object] = {}
+        if isinstance(self.plugin_overrides, dict):
+            for key in ("transcribe", "video"):
+                value = self.plugin_overrides.get(key)
+                if isinstance(value, dict):
+                    relevant_overrides[key] = dict(value)
+        if not relevant_overrides:
+            return self.url
+        payload = {
+            "version": 1,
+            "overrides": relevant_overrides,
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
+        split_url = urlsplit(self.url)
+        query = split_url.query
+        suffix = f"__contextualize_cache={digest}"
+        query = f"{query}&{suffix}" if query else suffix
+        return urlunsplit(
+            (
+                split_url.scheme,
+                split_url.netloc,
+                split_url.path,
+                query,
+                split_url.fragment,
+            )
+        )
 
     def get_label(self) -> str:
         path = urlparse(self.url).path
@@ -533,7 +567,7 @@ class URLReference:
         if self.use_cache and not self.refresh_cache:
             from ..cache import get_cached
 
-            cached = get_cached(self.url, self.cache_ttl)
+            cached = get_cached(self._cache_url(), self.cache_ttl)
             if cached is not None:
                 cached = _strip_json_ld_fences(cached)
                 self.original_file_content = cached
@@ -567,10 +601,10 @@ class URLReference:
 
         text = self._fetch_content()
 
-        if self.use_cache:
+        if self.use_cache and not self._skip_cache_store:
             from ..cache import store_cached
 
-            store_cached(self.url, text, self._content_type)
+            store_cached(self._cache_url(), text, self._content_type)
 
         return process_text(
             text,
@@ -709,19 +743,32 @@ class URLReference:
             if "." not in media_name and suffix:
                 media_name = f"{media_name}{suffix}"
             elif "." not in media_name:
-                media_name = f"{media_name}.mp3" if is_audio else f"{media_name}.mp4"
+                if is_audio:
+                    media_name = f"{media_name}.mp3"
+                else:
+                    video_suffix = _video_suffix_from_content_type(content_type) or ".mp4"
+                    media_name = f"{media_name}{video_suffix}"
             try:
-                transcribe_kwargs = {
+                media_kwargs = {
                     "filename": media_name,
                     "content_type": content_type or None,
                 }
                 if self.plugin_overrides is not None:
-                    transcribe_kwargs["plugin_overrides"] = self.plugin_overrides
-                text = transcribe_media_bytes(data, **transcribe_kwargs)
+                    media_kwargs["plugin_overrides"] = self.plugin_overrides
+                if is_video:
+                    text = render_video_bytes(
+                        data,
+                        source_url=self.url,
+                        **media_kwargs,
+                    )
+                else:
+                    text = transcribe_media_bytes(data, **media_kwargs)
             except RuntimeError as exc:
                 raise ValueError(
                     f"Media transcription failed for {self.url}: {exc}"
                 ) from exc
+            if is_video and "[transcript unavailable:" in text:
+                self._skip_cache_store = True
             self.original_file_content = text
             self.file_content = text
             if self.inject:

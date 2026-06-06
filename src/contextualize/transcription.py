@@ -6,7 +6,9 @@ from typing import Any
 from contextualize.references.audio_transcription import transcribe_audio_bytes
 from contextualize.references.audio_transcription import transcribe_audio_file
 from contextualize.references.audio_transcription import transcribe_media_bytes
+from contextualize.references.audio_transcription import transcribe_media_bytes_result
 from contextualize.references.audio_transcription import transcribe_media_file
+from contextualize.references.audio_transcription import transcribe_media_file_result
 from contextualize.references.audio_transcription import (
     record_transcription_routing_summary,
 )
@@ -18,7 +20,9 @@ __all__ = [
     "transcribe_audio_bytes",
     "transcribe_audio_file",
     "transcribe_media_bytes",
+    "transcribe_media_bytes_result",
     "transcribe_media_file",
+    "transcribe_media_file_result",
     "transcription_routing_identity",
     "transcription_routing_summary",
 ]

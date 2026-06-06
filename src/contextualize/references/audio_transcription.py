@@ -107,6 +107,23 @@ def transcribe_media_file(
     refresh_cache: bool | None = None,
     plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
+    return transcribe_media_file_result(
+        path,
+        timeout=timeout,
+        use_cache=use_cache,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
+    ).text
+
+
+def transcribe_media_file_result(
+    path: str | Path,
+    *,
+    timeout: float | None = None,
+    use_cache: bool = True,
+    refresh_cache: bool | None = None,
+    plugin_overrides: dict[str, Any] | None = None,
+) -> TranscriptionResult:
     media_path = Path(path)
     suffix = media_path.suffix.lower()
     if is_audio_suffix(suffix):
@@ -116,59 +133,15 @@ def transcribe_media_file(
             use_cache=use_cache,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
-        ).text
+        )
     if is_video_suffix(suffix):
-        source_sha256 = _sha256_file(media_path)
-        cache_identity = _transcription_cache_identity(
-            operation="video-transcription",
-            source_sha256=source_sha256,
-            source_suffix=suffix,
-            provider_identity=_routing_cache_identity(
-                filename=f"{media_path.stem or 'media'}.wav",
-                content_type="audio/wav",
-                plugin_overrides=plugin_overrides,
-            ),
-        )
-        should_refresh = _should_refresh_transcription_cache(
-            "video", refresh_cache=refresh_cache
-        )
-        if use_cache and not should_refresh:
-            cached_result = get_cached_local_media_transcript_result(cache_identity)
-            if cached_result is not None:
-                _log(f"video transcript cache hit for {media_path.name}")
-                return _result_from_cached_payload(
-                    cached_result,
-                    fallback_model="cached",
-                    fallback_provider="cache",
-                ).text
-            cached = get_cached_local_media_transcript(cache_identity)
-            if cached is not None:
-                _log(f"video transcript cache hit for {media_path.name}")
-                return cached
-            _log(f"video transcript cache miss for {media_path.name}")
-
-        from contextualize.runtime import get_cache_only
-
-        if get_cache_only():
-            raise CacheMissError(f"No cached transcript for video: {media_path.name}")
-
-        result = _transcribe_video_path(
+        return _transcribe_video_file_result(
             media_path,
             timeout=timeout,
-            use_cache=False,
+            use_cache=use_cache,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
         )
-        if use_cache and result.text.strip():
-            store_local_media_transcript_result(
-                cache_identity,
-                _result_to_cached_payload(result),
-                operation="video-transcription",
-                source_sha256=source_sha256,
-                source_suffix=suffix,
-            )
-            _log(f"stored video transcript cache for {media_path.name}")
-        return result.text
     raise RuntimeError(
         f"Unsupported media suffix for transcription: {suffix or '<none>'}"
     )
@@ -183,6 +156,25 @@ def transcribe_media_bytes(
     refresh_cache: bool | None = None,
     plugin_overrides: dict[str, Any] | None = None,
 ) -> str:
+    return transcribe_media_bytes_result(
+        data,
+        filename=filename,
+        content_type=content_type,
+        timeout=timeout,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
+    ).text
+
+
+def transcribe_media_bytes_result(
+    data: bytes,
+    *,
+    filename: str,
+    content_type: str | None = None,
+    timeout: float | None = None,
+    refresh_cache: bool | None = None,
+    plugin_overrides: dict[str, Any] | None = None,
+) -> TranscriptionResult:
     kind = _infer_media_kind(filename=filename, content_type=content_type)
     if kind == "audio":
         return _transcribe_audio_bytes(
@@ -191,7 +183,7 @@ def transcribe_media_bytes(
             content_type=content_type or _guess_audio_content_type(filename),
             timeout=timeout,
             plugin_overrides=plugin_overrides,
-        ).text
+        )
     if kind == "video":
         suffix = Path(filename).suffix.lower()
         if not suffix:
@@ -206,7 +198,7 @@ def transcribe_media_bytes(
                 refresh_cache=refresh_cache,
                 plugin_overrides=plugin_overrides,
                 cache_source_path=Path(filename),
-            ).text
+            )
     raise RuntimeError("Unsupported media payload for transcription")
 
 
@@ -265,6 +257,72 @@ def _transcribe_audio_path(
         cache_source_suffix=audio_path.suffix.lower(),
         cache_operation="audio-transcription",
     )
+
+
+def _transcribe_video_file_result(
+    media_path: Path,
+    *,
+    timeout: float | None,
+    use_cache: bool,
+    refresh_cache: bool | None,
+    plugin_overrides: dict[str, Any] | None,
+) -> TranscriptionResult:
+    suffix = media_path.suffix.lower()
+    source_sha256 = _sha256_file(media_path)
+    cache_identity = _transcription_cache_identity(
+        operation="video-transcription",
+        source_sha256=source_sha256,
+        source_suffix=suffix,
+        provider_identity=_routing_cache_identity(
+            filename=f"{media_path.stem or 'media'}.wav",
+            content_type="audio/wav",
+            plugin_overrides=plugin_overrides,
+        ),
+    )
+    should_refresh = _should_refresh_transcription_cache(
+        "video", refresh_cache=refresh_cache
+    )
+    if use_cache and not should_refresh:
+        cached_result = get_cached_local_media_transcript_result(cache_identity)
+        if cached_result is not None:
+            _log(f"video transcript cache hit for {media_path.name}")
+            return _result_from_cached_payload(
+                cached_result,
+                fallback_model="cached",
+                fallback_provider="cache",
+            )
+        cached = get_cached_local_media_transcript(cache_identity)
+        if cached is not None:
+            _log(f"video transcript cache hit for {media_path.name}")
+            return TranscriptionResult(
+                text=cached,
+                model="cached",
+                provider="cache",
+            )
+        _log(f"video transcript cache miss for {media_path.name}")
+
+    from contextualize.runtime import get_cache_only
+
+    if get_cache_only():
+        raise CacheMissError(f"No cached transcript for video: {media_path.name}")
+
+    result = _transcribe_video_path(
+        media_path,
+        timeout=timeout,
+        use_cache=False,
+        refresh_cache=refresh_cache,
+        plugin_overrides=plugin_overrides,
+    )
+    if use_cache and result.text.strip():
+        store_local_media_transcript_result(
+            cache_identity,
+            _result_to_cached_payload(result),
+            operation="video-transcription",
+            source_sha256=source_sha256,
+            source_suffix=suffix,
+        )
+        _log(f"stored video transcript cache for {media_path.name}")
+    return result
 
 
 def _transcribe_video_path(

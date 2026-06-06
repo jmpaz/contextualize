@@ -12,6 +12,7 @@ from .helpers import (
     resolve_symbol_ranges,
 )
 from .audio_transcription import is_media_suffix, is_video_suffix, transcribe_media_file
+from .video_context import render_video_file
 from ..render.markitdown import IMAGE_SUFFIXES as _IMAGE_SUFFIXES
 
 
@@ -94,13 +95,16 @@ class FileReference:
             try:
                 from ..references.audio_transcription import CacheMissError
 
-                transcribe_kwargs = {
+                media_kwargs = {
                     "use_cache": self.use_cache,
                     "refresh_cache": self.refresh_cache,
                 }
                 if self.plugin_overrides is not None:
-                    transcribe_kwargs["plugin_overrides"] = self.plugin_overrides
-                transcript = transcribe_media_file(self.path, **transcribe_kwargs)
+                    media_kwargs["plugin_overrides"] = self.plugin_overrides
+                if is_video_suffix(suffix):
+                    text = render_video_file(self.path, **media_kwargs)
+                else:
+                    text = transcribe_media_file(self.path, **media_kwargs)
             except CacheMissError:
                 self.cache_miss = True
                 return ""
@@ -108,7 +112,7 @@ class FileReference:
                 raise ValueError(
                     f"Media transcription failed for {self.path}: {e}"
                 ) from e
-            self.file_content = self.original_file_content = transcript
+            self.file_content = self.original_file_content = text
             if self.inject:
                 from ..render.inject import inject_content_in_text
 
