@@ -132,7 +132,7 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postBuild = ''
               wrapProgram $out/bin/contextualize \
-                --prefix PATH : ${lib.makeBinPath [ unwrapped pkgs.ffmpeg pkgs.poppler-utils ]}
+                --prefix PATH : ${lib.makeBinPath [ unwrapped pkgs.deno pkgs.ffmpeg pkgs.poppler-utils ]}
             '';
           };
         venv = mkContextualize {};
@@ -177,6 +177,7 @@
         devShells.default = pkgs.mkShell {
           packages = [
             venv
+            pkgs.deno
             pkgs.exiftool
             pkgs.ffmpeg
             pkgs.git
