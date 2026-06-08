@@ -117,13 +117,28 @@ def _hydrate_trace_refs(plan, read_from_dest: bool) -> list[_TraceRef]:
                 original_file_content=content,
             )
         )
+    for dest, source in plan.files_to_copy:
+        target = dest if read_from_dest else source
+        text = ""
+        try:
+            with open(target, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            pass
+        refs.append(
+            _TraceRef(
+                path=str(dest),
+                file_content=text,
+                original_file_content=text,
+            )
+        )
     for dest, source in plan.files_to_symlink:
         target = dest if read_from_dest else source
         text = ""
         try:
             with open(target, "r", encoding="utf-8") as fh:
                 text = fh.read()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             pass
         refs.append(
             _TraceRef(
@@ -2051,9 +2066,11 @@ def hydrate_cmd(
 
         subdirs_to_clear: set[str] = set()
         files_to_clear: list[Path] = []
-        all_dests = [(d, c) for d, c in plan.files_to_write] + [
-            (d, t) for d, t in plan.files_to_symlink
-        ]
+        all_dests = (
+            [(d, c) for d, c in plan.files_to_write]
+            + [(d, s) for d, s in plan.files_to_copy]
+            + [(d, t) for d, t in plan.files_to_symlink]
+        )
         for dest, _ in all_dests:
             rel = dest.relative_to(plan.context_dir)
             if len(rel.parts) > 1:
@@ -2394,8 +2411,7 @@ def cat_cmd(
     ignored_files = []
     ignored_folders = {}
 
-    def add_file_refs(paths_list):
-        """Helper to add file references for a list of paths"""
+    def add_file_refs(paths_list, *, text_only=False, binary_policy="error"):
         from .render.markitdown import MarkItDownConversionError
 
         try:
@@ -2416,6 +2432,8 @@ def cat_cmd(
                 target_depth=target_depth,
                 target_scope=target_scope.lower(),
                 include_parent=include_parent,
+                text_only=text_only,
+                binary_policy=binary_policy,
             )
         except (MarkItDownConversionError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -2513,10 +2531,6 @@ def cat_cmd(
 
     for p in expanded_all_paths:
         if p.startswith("http://") or p.startswith("https://"):
-            raw_url = github_blob_to_raw_url(p)
-            if raw_url:
-                add_file_refs([raw_url])
-                continue
             tgt = parse_git_target(p)
             if tgt:
                 repo_dir = ensure_repo(
@@ -2530,7 +2544,13 @@ def cat_cmd(
                     else [str(Path(repo_dir))]
                 )
                 for path in expanded_paths:
-                    add_file_refs([path])
+                    add_file_refs(
+                        [path], text_only=True, binary_policy="placeholder"
+                    )
+                continue
+            raw_url = github_blob_to_raw_url(p)
+            if raw_url:
+                add_file_refs([raw_url])
             else:
                 add_file_refs([p])
         elif use_rev:
@@ -2593,7 +2613,9 @@ def cat_cmd(
                     else [str(Path(repo_dir))]
                 )
                 for path in expanded_paths:
-                    add_file_refs([path])
+                    add_file_refs(
+                        [path], text_only=True, binary_policy="placeholder"
+                    )
             else:
                 add_file_refs([p])
 

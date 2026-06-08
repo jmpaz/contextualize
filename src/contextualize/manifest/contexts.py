@@ -285,11 +285,15 @@ def _planned_paths(plan) -> set[str]:
         path.relative_to(plan.context_dir).as_posix()
         for path, _ in plan.files_to_write
     }
+    copied_paths = {
+        path.relative_to(plan.context_dir).as_posix()
+        for path, _ in plan.files_to_copy
+    }
     symlinked_paths = {
         path.relative_to(plan.context_dir).as_posix()
         for path, _ in plan.files_to_symlink
     }
-    return written_paths | symlinked_paths
+    return written_paths | copied_paths | symlinked_paths
 
 
 def _status_from_result(

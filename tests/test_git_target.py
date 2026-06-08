@@ -192,6 +192,41 @@ def test_cat_routes_known_http_git_hosts_through_git_cache(monkeypatch, tmp_path
     ]
 
 
+def test_cat_git_target_renders_binary_placeholder_without_markitdown(
+    monkeypatch, tmp_path
+):
+    from click.testing import CliRunner
+
+    from contextualize import cli
+    from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
+
+    asset = tmp_path / "asset.png"
+    asset.write_bytes(b"\x89PNG\r\n\x1a\nbinary")
+
+    def fail_convert_path_to_markdown(*_args, **_kwargs):
+        raise AssertionError("git cat should not send binary files to MarkItDown")
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(plugin_loader, "_iter_plugin_entrypoints", lambda: [])
+    clear_loaded_plugins_cache()
+    monkeypatch.setattr(
+        "contextualize.git.cache.ensure_repo", lambda _target, **_kwargs: str(tmp_path)
+    )
+    monkeypatch.setattr(
+        "contextualize.render.markitdown.convert_path_to_markdown",
+        fail_convert_path_to_markdown,
+    )
+
+    result = CliRunner().invoke(
+        cli.cli,
+        ["cat", "--format", "raw", "https://github.com/org/repo:asset.png"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output == f"[binary file exists: {asset.stat().st_size} bytes]\n"
+
+
 @pytest.mark.skipif(
     os.environ.get("CONTEXTUALIZE_RUN_LIVE_GIT_TESTS") != "1",
     reason="set CONTEXTUALIZE_RUN_LIVE_GIT_TESTS=1 to run live git provider tests",

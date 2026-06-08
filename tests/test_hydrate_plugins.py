@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from contextualize.manifest.hydrate import HydrateOverrides, build_hydration_plan_data
+from contextualize.manifest.hydrate import (
+    HydrateOverrides,
+    apply_hydration_plan,
+    build_hydration_plan_data,
+)
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
 
@@ -190,6 +194,82 @@ def test_hydrate_manifest_follows_component_embedded_targets(
         (path.relative_to(context_dir).as_posix(), content)
         for path, content in plan.files_to_write
     ] == [("main/child.txt", "child content")]
+
+
+def test_hydrate_git_target_copies_binary_files_without_resolving_references(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo_dir = tmp_path / "repo"
+    asset = repo_dir / "src" / "image.png"
+    text = repo_dir / "src" / "readme.txt"
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"\x89PNG\r\n\x1a\nbinary")
+    text.write_text("hello", encoding="utf-8")
+
+    def fail_create_file_references(*_args, **_kwargs):
+        raise AssertionError("hydrate git should not resolve files as text refs")
+
+    monkeypatch.setattr(
+        "contextualize.manifest.hydrate.ensure_repo", lambda _target: str(repo_dir)
+    )
+    monkeypatch.setattr(
+        "contextualize.manifest.hydrate.create_file_references",
+        fail_create_file_references,
+    )
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "components": [
+                {"name": "main", "files": ["https://github.com/org/repo:src"]}
+            ],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    copied = {
+        dest.relative_to(context_dir).as_posix(): source
+        for dest, source in plan.files_to_copy
+    }
+    assert copied["repo/src/image.png"] == asset
+    assert copied["repo/src/readme.txt"] == text
+
+    result = apply_hydration_plan(plan)
+
+    assert result.file_count == 2
+    assert (context_dir / "repo/src/image.png").read_bytes() == asset.read_bytes()
+    assert (context_dir / "repo/src/readme.txt").read_text(encoding="utf-8") == "hello"
+
+
+def test_hydrate_local_file_with_late_invalid_utf8_is_materialized(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "asset.dat"
+    source.write_bytes((b"a" * 5000) + b"\xd8")
+    context_dir = tmp_path / "ctx"
+
+    plan = build_hydration_plan_data(
+        {
+            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "components": [{"name": "main", "files": [str(source)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(copy=True),
+        cwd=str(tmp_path),
+    )
+
+    copied = {
+        dest.relative_to(context_dir).as_posix(): copy_source
+        for dest, copy_source in plan.files_to_copy
+    }
+    assert copied == {"asset.dat": source}
+
+    apply_hydration_plan(plan)
+
+    assert (context_dir / "asset.dat").read_bytes() == source.read_bytes()
 
 
 def test_hydrate_manifest_fails_for_unresolved_external_scheme(

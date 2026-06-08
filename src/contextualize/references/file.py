@@ -217,3 +217,71 @@ class FileReference:
             return os.path.splitext(self.path)[1]
         else:
             return self._label_style
+
+
+class FileExistenceReference:
+    def __init__(
+        self,
+        path,
+        *,
+        format="md",
+        label="relative",
+        label_suffix: str | None = None,
+        include_token_count=False,
+        token_target="cl100k_base",
+    ):
+        self.path = path
+        self.format = format
+        self._label_style = label
+        self.label_suffix = label_suffix
+        self.include_token_count = include_token_count
+        self.token_target = token_target
+        self.file_content = self.original_file_content = self._content()
+        self.output = process_text(
+            self.file_content,
+            False,
+            format=self.format,
+            label=self.get_label(),
+            label_suffix=self.label_suffix,
+            token_target=self.token_target,
+            include_token_count=self.include_token_count,
+        )
+
+    @property
+    def label(self) -> str:
+        return self.get_label()
+
+    def read(self) -> str:
+        return self.original_file_content
+
+    def exists(self) -> bool:
+        return os.path.isfile(self.path)
+
+    def token_count(self, encoding: str = "cl100k_base") -> int:
+        return count_tokens(self.original_file_content, target=encoding)["count"]
+
+    def _content(self) -> str:
+        try:
+            size = os.path.getsize(self.path)
+        except OSError:
+            return "[binary file exists]"
+        return f"[binary file exists: {size} bytes]"
+
+    def get_label(self):
+        if self._label_style == "relative":
+            from ..git.target import CACHE_ROOT
+
+            cache_root = os.path.join(CACHE_ROOT, "")
+            if self.path.startswith(cache_root):
+                rel = os.path.relpath(self.path, CACHE_ROOT)
+                parts = rel.split(os.sep)
+                if parts and parts[0] in ("github", "ext"):
+                    return os.path.join(*parts[1:])
+                return rel
+            return self.path
+        elif self._label_style == "name":
+            return os.path.basename(self.path)
+        elif self._label_style == "ext":
+            return os.path.splitext(self.path)[1]
+        else:
+            return self._label_style

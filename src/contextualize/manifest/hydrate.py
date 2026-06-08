@@ -23,7 +23,6 @@ from ..plugins import (
 )
 from ..plugins.reference import PluginReference
 from ..references import URLReference, create_file_references
-from ..references.audio_transcription import is_media_suffix as _is_media_suffix
 from ..runtime import get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
@@ -35,7 +34,7 @@ from ..references.helpers import (
     resolve_symbol_ranges,
     split_spec_symbols,
 )
-from ..utils import extract_ranges
+from ..utils import brace_expand, extract_ranges
 from .manifest import (
     GROUP_BASE_KEY,
     GROUP_PATH_KEY,
@@ -45,6 +44,24 @@ from .manifest import (
 from .source import load_manifest_source
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_SOURCE_IGNORE_PATTERNS = [
+    ".git/",
+    ".gitignore",
+    ".venv/",
+    "venv/",
+    "__pycache__/",
+    "__init__.py",
+    ".tox/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "*.egg-info/",
+    ".gradle/",
+    ".cache/",
+    "node_modules/",
+    "target/",
+    "vendor/",
+]
 
 
 @dataclass(frozen=True)
@@ -84,6 +101,7 @@ class ResolvedItem:
     manifest_spec: str
     alias: str | None = None
     source_full_path: str | None = None
+    is_binary: bool = False
     source_created: str | None = None
     source_modified: str | None = None
     dir_created: str | None = None
@@ -120,6 +138,7 @@ class HydratePlan:
     include_meta: bool
     access: str
     file_timestamps: dict[Path, tuple[float, float]] = field(default_factory=dict)
+    files_to_copy: list[tuple[Path, Path]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -133,6 +152,7 @@ class _PluginPendingWrite:
 
 def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
     _write_files(plan.files_to_write)
+    _copy_files(plan.files_to_copy)
     _create_symlinks(plan.files_to_symlink)
     if plan.file_timestamps:
         _apply_timestamps(plan.file_timestamps)
@@ -140,8 +160,9 @@ def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
         _apply_read_only(plan.context_dir)
 
     written_paths = {path.as_posix() for path, _ in plan.files_to_write}
+    copied_paths = {path.as_posix() for path, _ in plan.files_to_copy}
     symlinked_paths = {path.as_posix() for path, _ in plan.files_to_symlink}
-    file_count = len(written_paths | symlinked_paths)
+    file_count = len(written_paths | copied_paths | symlinked_paths)
     return HydrateResult(
         context_dir=str(plan.context_dir),
         component_count=plan.component_count,
@@ -169,6 +190,7 @@ def build_inline_hydration_plan(
     cwd = os.getcwd()
     used_paths: set[str] = set()
     files_to_write: list[tuple[Path, str]] = []
+    files_to_copy: list[tuple[Path, Path]] = []
     files_to_symlink: list[tuple[Path, Path]] = []
     file_timestamps: dict[Path, tuple[float, float]] = {}
 
@@ -216,15 +238,17 @@ def build_inline_hydration_plan(
             rel_path = _dedupe_path(subpath, used_paths)
             _ensure_relative(rel_path)
 
-            can_symlink = (
-                not copy and item.source_type == "local" and item.source_full_path
+            _queue_hydrated_file(
+                context_dir / rel_path,
+                item,
+                item.content,
+                copy_files=copy,
+                ranges=None,
+                symbols=None,
+                files_to_write=files_to_write,
+                files_to_copy=files_to_copy,
+                files_to_symlink=files_to_symlink,
             )
-            if can_symlink:
-                files_to_symlink.append(
-                    (context_dir / rel_path, Path(item.source_full_path))
-                )
-            else:
-                files_to_write.append((context_dir / rel_path, item.content))
             file_ts = _item_file_ts(item)
             if file_ts:
                 file_timestamps[context_dir / rel_path] = file_ts
@@ -241,6 +265,7 @@ def build_inline_hydration_plan(
         include_meta=False,
         access=access,
         file_timestamps=file_timestamps,
+        files_to_copy=files_to_copy,
     )
 
 
@@ -258,6 +283,15 @@ def plan_matches_existing(plan: HydratePlan) -> bool:
         data = content.encode("utf-8")
         digest = hashlib.sha256(data).hexdigest()
         expected_hashes[rel] = (len(data), digest)
+        _collect_parent_dirs(rel, expected_dirs)
+
+    for dest, source in plan.files_to_copy:
+        rel = dest.relative_to(context_dir).as_posix()
+        try:
+            size = source.stat().st_size
+        except OSError:
+            return False
+        expected_hashes[rel] = (size, _hash_file(source))
         _collect_parent_dirs(rel, expected_dirs)
 
     for dest, source in plan.files_to_symlink:
@@ -422,6 +456,7 @@ def build_hydration_plan_data(
     used_paths: set[str] = set()
     identity_paths: dict[tuple[Any, ...], Path] = {}
     files_to_write: list[tuple[Path, str]] = []
+    files_to_copy: list[tuple[Path, Path]] = []
     files_to_symlink: list[tuple[Path, Path]] = []
     file_timestamps: dict[Path, tuple[float, float]] = {}
     index_components: dict[str, list[dict[str, Any]]] = {}
@@ -669,6 +704,7 @@ def build_hydration_plan_data(
                 for item in cached_items:
                     ranges = range_spec[:] if range_spec else None
                     symbols = symbols_spec[:] if symbols_spec else None
+                    should_skip = False
 
                     if symbols:
                         ranges, symbols, should_skip = resolve_symbol_ranges(
@@ -682,8 +718,12 @@ def build_hydration_plan_data(
                             skip_on_missing=True,
                             warn_on_partial=False,
                         )
-                        if should_skip:
-                            continue
+                    if should_skip:
+                        continue
+                    if item.is_binary and (range_spec or symbols_spec):
+                        raise ValueError(
+                            f"Range or symbol selection is only supported for text files: {item.context_subpath}"
+                        )
 
                     content = (
                         extract_ranges(item.content, ranges) if ranges else item.content
@@ -775,19 +815,17 @@ def build_hydration_plan_data(
                     )
                     continue
                 if should_write:
-                    can_symlink = (
-                        not context_cfg["copy"]
-                        and item.source_type == "local"
-                        and item.source_full_path
-                        and not ranges
-                        and not symbols
+                    _queue_hydrated_file(
+                        context_dir / rel_path,
+                        item,
+                        content,
+                        copy_files=context_cfg["copy"],
+                        ranges=ranges,
+                        symbols=symbols,
+                        files_to_write=files_to_write,
+                        files_to_copy=files_to_copy,
+                        files_to_symlink=files_to_symlink,
                     )
-                    if can_symlink:
-                        files_to_symlink.append(
-                            (context_dir / rel_path, Path(item.source_full_path))
-                        )
-                    else:
-                        files_to_write.append((context_dir / rel_path, content))
                     file_ts = _item_file_ts(item)
                     if file_ts:
                         file_timestamps[context_dir / rel_path] = file_ts
@@ -846,6 +884,7 @@ def build_hydration_plan_data(
         plugin_pending,
         context_dir,
         files_to_write,
+        files_to_copy,
         files_to_symlink,
         file_timestamps,
     )
@@ -859,6 +898,7 @@ def build_hydration_plan_data(
         include_meta=context_cfg["include_meta"],
         access=context_cfg["access"],
         file_timestamps=file_timestamps,
+        files_to_copy=files_to_copy,
     )
 
 
@@ -1614,6 +1654,45 @@ def _resolve_external_items_via_refs(
     return items
 
 
+def _source_ignore_spec(ignore_patterns: list[str] | None):
+    from pathspec import PathSpec
+
+    patterns = list(_SOURCE_IGNORE_PATTERNS)
+    if ignore_patterns:
+        for pattern in ignore_patterns:
+            if "{" in pattern and "}" in pattern:
+                patterns.extend(brace_expand(pattern))
+            else:
+                patterns.append(pattern)
+    return PathSpec.from_lines("gitwildmatch", patterns)
+
+
+def _iter_source_files(path: str, ignore_patterns: list[str] | None) -> list[str]:
+    ignore_spec = _source_ignore_spec(ignore_patterns)
+    if os.path.isfile(path):
+        return [] if ignore_spec.match_file(path) else [path]
+    files: list[str] = []
+    for root, dirs, names in os.walk(path):
+        dirs[:] = [
+            name
+            for name in dirs
+            if not ignore_spec.match_file(os.path.join(root, name))
+        ]
+        for name in names:
+            file_path = os.path.join(root, name)
+            if not ignore_spec.match_file(file_path):
+                files.append(file_path)
+    return files
+
+
+def _read_source_content(path: str) -> tuple[str, bool]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read(), False
+    except UnicodeDecodeError:
+        return "", True
+
+
 def _resolve_spec_items(
     raw_spec: str,
     base_dir: str,
@@ -1735,40 +1814,29 @@ def _resolve_spec_items(
                 ignore_cache[cache_key] = read_gitignore_patterns(repo_root)
             ignore_patterns = ignore_cache[cache_key]
 
-        refs = create_file_references(
-            [full],
-            ignore_patterns=ignore_patterns,
-            format="raw",
-            text_only=False,
-            target_depth=target_depth,
-            target_scope=target_scope,
-            include_parent=include_parent,
-        )["refs"]
-        for ref in refs:
+        for file_path in _iter_source_files(full, ignore_patterns):
             try:
-                rel_path = _relative_path(ref.path, base_dir)
+                rel_path = _relative_path(file_path, base_dir)
             except ValueError:
                 if local_base:
                     try:
-                        rel_path = _relative_path(ref.path, local_base)
+                        rel_path = _relative_path(file_path, local_base)
                     except ValueError:
-                        rel_path = Path(ref.path).name
+                        rel_path = Path(file_path).name
                 else:
-                    rel_path = Path(ref.path).name
-            is_media = _is_media_suffix(Path(ref.path).suffix)
-            context_subpath = (
-                str(Path(rel_path).with_suffix(".md")) if is_media else rel_path
-            )
+                    rel_path = Path(file_path).name
+            content, is_binary = _read_source_content(file_path)
             resolved.append(
                 ResolvedItem(
                     source_type="local",
                     source_ref=base_dir,
                     source_rev=None,
                     source_path=rel_path,
-                    context_subpath=context_subpath,
-                    content=ref.file_content,
+                    context_subpath=rel_path,
+                    content=content,
                     manifest_spec=rel_path,
-                    source_full_path=None if is_media else ref.path,
+                    source_full_path=file_path,
+                    is_binary=is_binary,
                 )
             )
     return resolved
@@ -1793,12 +1861,10 @@ def _resolve_git_items(
             raise FileNotFoundError(
                 f"Component '{component_name}' path not found: {full}"
             )
-        refs = create_file_references(
-            [full], ignore_patterns=ignore_patterns, format="raw", text_only=True
-        )["refs"]
-        for ref in refs:
-            rel_path = _relative_path(ref.path, repo_dir)
+        for file_path in _iter_source_files(full, ignore_patterns):
+            rel_path = _relative_path(file_path, repo_dir)
             manifest_spec = _format_git_spec(tgt.repo_url, tgt.rev, rel_path)
+            content, is_binary = _read_source_content(file_path)
             resolved.append(
                 ResolvedItem(
                     source_type="git",
@@ -1806,9 +1872,11 @@ def _resolve_git_items(
                     source_rev=tgt.rev,
                     source_path=rel_path,
                     context_subpath=rel_path,
-                    content=ref.file_content,
+                    content=content,
                     manifest_spec=manifest_spec,
                     alias=alias if isinstance(alias, str) else None,
+                    source_full_path=file_path,
+                    is_binary=is_binary,
                 )
             )
     return resolved
@@ -2191,7 +2259,10 @@ def _build_index_entry(
     symbols: list[str] | None,
     content: str,
 ) -> dict[str, Any]:
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if item.is_binary and item.source_full_path:
+        digest = _hash_file(Path(item.source_full_path))
+    else:
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return {
         "context_path": rel_path.as_posix(),
         "source_type": item.source_type,
@@ -2260,10 +2331,34 @@ def _plugin_rank(item: ResolvedItem, encounter_index: int) -> tuple[int, int]:
     return (rank, encounter_index)
 
 
+def _queue_hydrated_file(
+    dest: Path,
+    item: ResolvedItem,
+    content: str,
+    *,
+    copy_files: bool,
+    ranges: list[tuple[int, int]] | None,
+    symbols: list[str] | None,
+    files_to_write: list[tuple[Path, str]],
+    files_to_copy: list[tuple[Path, Path]],
+    files_to_symlink: list[tuple[Path, Path]],
+) -> None:
+    source = Path(item.source_full_path) if item.source_full_path else None
+    if source is not None and not ranges and not symbols:
+        if item.source_type == "local" and not copy_files:
+            files_to_symlink.append((dest, source))
+            return
+        if item.source_type in {"local", "git"}:
+            files_to_copy.append((dest, source))
+            return
+    files_to_write.append((dest, content))
+
+
 def _materialize_plugin_pending(
     plugin_pending: dict[tuple[Any, ...], list[_PluginPendingWrite]],
     context_dir: Path,
     files_to_write: list[tuple[Path, str]],
+    files_to_copy: list[tuple[Path, Path]],
     files_to_symlink: list[tuple[Path, Path]],
     file_timestamps: dict[Path, tuple[float, float]],
 ) -> None:
@@ -2471,6 +2566,12 @@ def _write_files(files: list[tuple[Path, str]]) -> None:
     for path, content in files:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+
+def _copy_files(files: list[tuple[Path, Path]]) -> None:
+    for dest, source in files:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
 
 
 def _create_symlinks(links: list[tuple[Path, Path]]) -> None:

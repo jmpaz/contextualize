@@ -1,5 +1,5 @@
 from .factory import concat_refs, create_file_references
-from .file import FileReference
+from .file import FileExistenceReference, FileReference
 from .helpers import (
     DISALLOWED_CONTENT_TYPES,
     DISALLOWED_EXTENSIONS,
@@ -19,6 +19,7 @@ from .url import URLReference, create_url_reference
 
 __all__ = [
     "Reference",
+    "FileExistenceReference",
     "FileReference",
     "URLReference",
     "CommandReference",

@@ -18,7 +18,7 @@ from ..plugins.resolve import (
 )
 from ..git.target import parse_git_target
 from ..utils import brace_expand, count_tokens
-from .file import FileReference
+from .file import FileExistenceReference, FileReference
 from .audio_transcription import is_media_suffix
 from .helpers import (
     MARKITDOWN_PREFERRED_EXTENSIONS,
@@ -73,6 +73,7 @@ def create_file_references(
     target_depth: int = 0,
     target_scope: str = "all",
     include_parent: bool = True,
+    binary_policy: str = "error",
     _embedded_seen: set[str] | None = None,
 ):
     """
@@ -83,6 +84,8 @@ def create_file_references(
     target_scope = (target_scope or "all").lower()
     if target_scope not in {"first", "all"}:
         raise ValueError("target_scope must be 'first' or 'all'")
+    if binary_policy not in {"error", "placeholder", "skip"}:
+        raise ValueError("binary_policy must be 'error', 'placeholder', or 'skip'")
 
     def is_ignored(path, gitignore_patterns):
         from pathspec import PathSpec
@@ -91,13 +94,35 @@ def create_file_references(
         return path_spec.match_file(path)
 
     def get_file_token_count(file_path):
-        """Get token count for a file if it's readable."""
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
             return count_tokens(content, target=token_target)["count"]
         except Exception:
             return 0
+
+    def append_binary_reference(file_path, symbols):
+        if symbols:
+            raise ValueError(
+                f"Symbol selection is only supported for text files: {file_path}"
+            )
+        if binary_policy == "placeholder":
+            file_references.append(
+                FileExistenceReference(
+                    file_path,
+                    format=format,
+                    label=label,
+                    label_suffix=label_suffix,
+                    include_token_count=include_token_count,
+                    token_target=token_target,
+                )
+            )
+            return
+        if binary_policy == "skip":
+            return
+        raise ValueError(
+            f"Unsupported binary file type (not convertible): {file_path}"
+        )
 
     file_references = []
     ignored_files = []
@@ -189,6 +214,7 @@ def create_file_references(
             soundcloud_overrides=soundcloud_overrides,
             target_depth=target_depth,
             target_scope=target_scope,
+            binary_policy=binary_policy,
             seen=_embedded_seen,
         )
         return {
@@ -331,9 +357,7 @@ def create_file_references(
                     )
                 )
             else:
-                raise ValueError(
-                    f"Unsupported binary file type (not convertible): {path}"
-                )
+                append_binary_reference(path, symbols)
         elif os.path.isdir(path):
             dir_ignored_files = {}
             for root, dirs, files in os.walk(path):
@@ -391,6 +415,8 @@ def create_file_references(
                                 plugin_overrides=effective_plugin_overrides or None,
                             )
                         )
+                    else:
+                        append_binary_reference(file_path, None)
 
             for dir_path, files_list in dir_ignored_files.items():
                 if dir_path not in dirs_with_non_ignored_files:
@@ -446,6 +472,7 @@ def create_file_references(
             soundcloud_overrides=soundcloud_overrides,
             target_depth=target_depth,
             target_scope=target_scope,
+            binary_policy=binary_policy,
             seen=_embedded_seen,
         )
         file_references = (
@@ -488,6 +515,7 @@ def _resolve_embedded_target_refs(
     soundcloud_overrides: dict[str, Any] | None,
     target_depth: int,
     target_scope: str,
+    binary_policy: str,
     seen: set[str] | None,
 ) -> list[Any]:
     if target_depth <= 0:
@@ -543,6 +571,7 @@ def _resolve_embedded_target_refs(
                         discord_overrides=discord_overrides,
                         atproto_overrides=atproto_overrides,
                         soundcloud_overrides=soundcloud_overrides,
+                        binary_policy=binary_policy,
                         seen=seen,
                     )
                 )
@@ -575,6 +604,7 @@ def _resolve_embedded_child_refs(
     discord_overrides: dict | None,
     atproto_overrides: dict | None,
     soundcloud_overrides: dict[str, Any] | None,
+    binary_policy: str,
     seen: set[str],
 ) -> list[Any]:
     try:
@@ -652,6 +682,7 @@ def _resolve_embedded_child_refs(
                         atproto_overrides=atproto_overrides,
                         soundcloud_overrides=soundcloud_overrides,
                         target_depth=0,
+                        binary_policy=binary_policy,
                         _embedded_seen=seen,
                     )
                     refs.extend(result["refs"])
@@ -687,6 +718,7 @@ def _resolve_embedded_child_refs(
             atproto_overrides=atproto_overrides,
             soundcloud_overrides=soundcloud_overrides,
             target_depth=0,
+            binary_policy=binary_policy,
             _embedded_seen=seen,
         )
     except Exception as exc:
