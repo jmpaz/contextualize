@@ -518,6 +518,8 @@ def _resolve_embedded_target_refs(
                 child = item.get("target")
                 if not isinstance(child, str) or not child or child in seen:
                     continue
+                if item.get("traverse") is False:
+                    continue
                 seen.add(child)
                 next_frontier.append(child)
                 refs.extend(

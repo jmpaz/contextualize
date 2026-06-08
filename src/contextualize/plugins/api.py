@@ -19,7 +19,19 @@ class PluginListItem(TypedDict, total=False):
     target: str
     label: str
     kind: str
+    traverse: bool
     metadata: dict[str, Any]
+
+
+class PluginListEnvelopeMetadata(TypedDict, total=False):
+    summary: dict[str, Any]
+    pagination: dict[str, Any] | None
+    metadata: dict[str, Any]
+    capabilities: dict[str, Any]
+
+
+class PluginListEnvelope(PluginListEnvelopeMetadata):
+    targets: list[PluginListItem]
 
 
 class PluginMaterializedFile(TypedDict, total=False):
@@ -44,6 +56,8 @@ class PluginContext(TypedDict, total=False):
     refresh_cache: bool
     cache_only: bool
     overrides: dict[str, Any]
+    list_limit: int
+    list_offset: int
 
 
 class PluginTargetDescriptor(TypedDict, total=False):
@@ -55,7 +69,7 @@ class PluginTargetDescriptor(TypedDict, total=False):
 
 CanResolveFn = Callable[[str, PluginContext], bool]
 ResolveFn = Callable[[str, PluginContext], list[PluginDocument]]
-ListTargetsFn = Callable[[str, PluginContext], list[PluginListItem]]
+ListTargetsFn = Callable[[str, PluginContext], PluginListEnvelope]
 MaterializeFn = Callable[[str, PluginContext], list[PluginMaterializedFile]]
 RegisterAuthCommandFn = Callable[[Any], None]
 ClassifyTargetFn = Callable[[str, PluginContext], PluginTargetDescriptor | None]

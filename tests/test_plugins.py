@@ -281,13 +281,15 @@ def test_embedded_target_materialization_uses_normal_file_resolver(
                 return []
 
             plugin.resolve = resolve
-            plugin.list_targets = lambda _target, _context: [
-                {
-                    "target": "asset://child",
-                    "label": "child.md",
-                    "kind": "attachment:text",
-                }
-            ]
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [
+                    {
+                        "target": "asset://child",
+                        "label": "child.md",
+                        "kind": "attachment:text",
+                    }
+                ]
+            }
             plugin.materialize = lambda _target, _context: [
                 {
                     "source": "asset://child",
@@ -344,9 +346,9 @@ def test_embedded_target_resolves_plugin_claimed_child_without_materialization(
                 ]
 
             plugin.resolve = resolve
-            plugin.list_targets = lambda _target, _context: [
-                {"target": "child://one", "label": "child.md"}
-            ]
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [{"target": "child://one", "label": "child.md"}]
+            }
             plugin.materialize = lambda _target, _context: pytest.fail(
                 "resolved plugin children should not be materialized"
             )
@@ -367,6 +369,75 @@ def test_embedded_target_resolves_plugin_claimed_child_without_materialization(
     assert result["concatenated"] == "child content"
 
 
+def test_embedded_target_depth_skips_non_traversable_items(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _EmbeddedEntrypoint:
+        name = "embedded"
+        value = "contextualize_plugins.embedded:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "block://", "channel://")
+            )
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target.startswith("root://") or target.startswith("channel://"):
+                    raise AssertionError(f"unexpected target resolution: {target}")
+                return [
+                    {
+                        "source": target,
+                        "label": target.removeprefix("block://") + ".md",
+                        "content": target.removeprefix("block://") + " content",
+                    }
+                ]
+
+            def list_targets(target: str, _context: dict[str, object]) -> dict:
+                if target == "root://thread":
+                    return {
+                        "targets": [
+                            {"target": "block://child", "label": "child.md"},
+                            {
+                                "target": "channel://nested",
+                                "label": "nested",
+                                "kind": "channel",
+                                "traverse": False,
+                            },
+                        ]
+                    }
+                if target == "block://child":
+                    return {
+                        "targets": [
+                            {"target": "block://grandchild", "label": "grandchild.md"}
+                        ]
+                    }
+                return {"targets": []}
+
+            plugin.resolve = resolve
+            plugin.list_targets = list_targets
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://thread"],
+        format="raw",
+        target_depth=2,
+        include_parent=False,
+    )
+
+    assert result["concatenated"] == "child content\n\ngrandchild content"
+
+
 def test_embedded_target_skips_unclaimed_plain_http_link(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -383,12 +454,14 @@ def test_embedded_target_skips_unclaimed_plain_http_link(
             plugin.PLUGIN_PRIORITY = 500
             plugin.can_resolve = lambda target, _context: target.startswith("root://")
             plugin.resolve = lambda _target, _context: []
-            plugin.list_targets = lambda _target, _context: [
-                {
-                    "target": "https://x.com/example/status/1?s=20",
-                    "label": "tweet",
-                }
-            ]
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [
+                    {
+                        "target": "https://x.com/example/status/1?s=20",
+                        "label": "tweet",
+                    }
+                ]
+            }
             return plugin
 
     def _url_reference(*_args, **_kwargs):
@@ -426,12 +499,14 @@ def test_embedded_target_allows_file_like_http_link(
             plugin.PLUGIN_PRIORITY = 500
             plugin.can_resolve = lambda target, _context: target.startswith("root://")
             plugin.resolve = lambda _target, _context: []
-            plugin.list_targets = lambda _target, _context: [
-                {
-                    "target": "https://files.example/paper.pdf?download=1",
-                    "label": "paper",
-                }
-            ]
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [
+                    {
+                        "target": "https://files.example/paper.pdf?download=1",
+                        "label": "paper",
+                    }
+                ]
+            }
             return plugin
 
     class _URLReference:

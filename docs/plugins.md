@@ -17,7 +17,7 @@ Each plugin module should export:
 - optional `PLUGIN_KIND = "source" | "processor"` (defaults to `"source"`)
 - `can_resolve(target: str, context: dict) -> bool`
 - `resolve(target: str, context: dict) -> list[dict]`
-- optional `list_targets(target: str, context: dict) -> list[dict]`
+- optional `list_targets(target: str, context: dict) -> dict`
 - optional `materialize(target: str, context: dict) -> list[dict]`
 - optional `register_auth_command(group) -> None`
 
@@ -37,16 +37,35 @@ matches and returns valid documents wins. If a plugin errors, contextualize
 warns and falls through to the next plugin or default resolver.
 
 `list_targets` powers `contextualize cat --list` for plugins that can enumerate
-available refs without reading all content. It should return items shaped like:
+available refs without reading all content. It should return an envelope with
+items shaped like:
 
 ```python
 {
-  "target": "scheme://target/item",
-  "label": "optional display label",
-  "kind": "optional item kind",
+  "targets": [
+    {
+      "target": "scheme://target/item",
+      "label": "optional display label",
+      "kind": "optional item kind",
+      "traverse": False,
+      "metadata": {},
+    }
+  ],
+  "summary": {},
+  "pagination": None,
   "metadata": {},
+  "capabilities": {},
 }
 ```
+
+Callers may pass `list_limit` and `list_offset` through plugin context. The
+core plugin resolver applies that page window to the normalized envelope and
+adds `offset`, `limit`, `returned`, `totalCount`, `hasMore`, and `nextOffset`
+pagination fields where applicable.
+
+Omit `traverse` or set it to `True` when generic embedded target traversal may
+follow the listed target. Set `traverse` to `False` when the item should be
+visible to listing and inspection, but should not be followed by `target-depth`.
 
 `materialize` lets a plugin expose a listed child target as one or more ordinary
 files so the normal resolver stack can claim them. This is for embedded targets

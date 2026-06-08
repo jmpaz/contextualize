@@ -8,6 +8,7 @@ from typing import Any
 from .api import (
     PluginContext,
     PluginDocument,
+    PluginListEnvelope,
     PluginListItem,
     PluginMaterializedFile,
     PluginTargetDescriptor,
@@ -26,6 +27,11 @@ class PluginListResult:
     matched: bool
     supported: bool
     plugin_name: str | None = None
+    error: str | None = None
+    summary: dict[str, Any] | None = None
+    pagination: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    capabilities: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -102,10 +108,144 @@ def _normalize_plugin_list_item(
     kind_raw = item.get("kind")
     if isinstance(kind_raw, str) and kind_raw:
         normalized["kind"] = kind_raw
+    traverse_raw = item.get("traverse")
+    if isinstance(traverse_raw, bool):
+        normalized["traverse"] = traverse_raw
     metadata_raw = item.get("metadata")
     if isinstance(metadata_raw, dict):
         normalized["metadata"] = dict(metadata_raw)
     return normalized
+
+
+def _normalize_plugin_list_envelope(
+    plugin_name: str,
+    target: str,
+    envelope: PluginListEnvelope,
+) -> PluginListResult:
+    if not isinstance(envelope, dict):
+        _warn(f"plugin '{plugin_name}' returned non-envelope listing for '{target}'")
+        return PluginListResult((), True, False, plugin_name)
+    raw_items = envelope.get("targets")
+    if not isinstance(raw_items, list):
+        _warn(
+            f"plugin '{plugin_name}' returned listing envelope without "
+            f"targets for '{target}'"
+        )
+        return PluginListResult((), True, False, plugin_name)
+
+    normalized_items: list[PluginListItem] = []
+    for index, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            _warn(
+                f"plugin '{plugin_name}' returned non-mapping listing item for "
+                f"'{target}' (item {index})"
+            )
+            return PluginListResult((), True, False, plugin_name)
+        normalized = _normalize_plugin_list_item(
+            plugin_name,
+            target,
+            item,
+            index=index,
+        )
+        if normalized is None:
+            return PluginListResult((), True, False, plugin_name)
+        normalized_items.append(normalized)
+
+    summary_raw = envelope.get("summary")
+    pagination_raw = envelope.get("pagination")
+    metadata_raw = envelope.get("metadata")
+    capabilities_raw = envelope.get("capabilities")
+    return PluginListResult(
+        tuple(normalized_items),
+        True,
+        True,
+        plugin_name,
+        summary=dict(summary_raw) if isinstance(summary_raw, dict) else None,
+        pagination=dict(pagination_raw) if isinstance(pagination_raw, dict) else None,
+        metadata=dict(metadata_raw) if isinstance(metadata_raw, dict) else None,
+        capabilities=dict(capabilities_raw)
+        if isinstance(capabilities_raw, dict)
+        else None,
+    )
+
+
+def _optional_positive_int(context: PluginContext, key: str) -> int | None:
+    raw = context.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"{key} must be an integer")
+    if raw <= 0:
+        raise ValueError(f"{key} must be greater than 0")
+    return raw
+
+
+def _optional_nonnegative_int(context: PluginContext, key: str) -> int:
+    raw = context.get(key)
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"{key} must be an integer")
+    if raw < 0:
+        raise ValueError(f"{key} must be zero or greater")
+    return raw
+
+
+def _page_plugin_list_result(
+    result: PluginListResult,
+    context: PluginContext,
+) -> PluginListResult:
+    limit = _optional_positive_int(context, "list_limit")
+    offset = _optional_nonnegative_int(context, "list_offset")
+    if limit is None and offset == 0:
+        return result
+    if not result.supported:
+        return result
+
+    raw_pagination = dict(result.pagination or {})
+    if raw_pagination.get("offset") == offset and raw_pagination.get("limit") == limit:
+        return result
+
+    items = result.items
+    end = None if limit is None else offset + limit
+    page_items = items[offset:end]
+    raw_total = raw_pagination.get("totalCount")
+    total_count = (
+        max(raw_total, len(items))
+        if isinstance(raw_total, int) and not isinstance(raw_total, bool)
+        else len(items)
+    )
+    next_offset = offset + len(page_items)
+    has_more = next_offset < total_count
+    pagination = {
+        **raw_pagination,
+        "offset": offset,
+        "returned": len(page_items),
+        "totalCount": total_count,
+        "hasMore": has_more,
+    }
+    if limit is not None:
+        pagination["limit"] = limit
+    if has_more:
+        pagination["nextOffset"] = next_offset
+    else:
+        pagination.pop("nextOffset", None)
+
+    summary = result.summary
+    if isinstance(summary, dict) and isinstance(summary.get("sampledItems"), list):
+        summary = {**summary, "sampledItems": list(page_items)}
+
+    return PluginListResult(
+        tuple(page_items),
+        result.matched,
+        result.supported,
+        result.plugin_name,
+        error=result.error,
+        summary=summary,
+        pagination=pagination,
+        metadata=result.metadata,
+        capabilities=result.capabilities,
+    )
 
 
 def _normalize_plugin_materialized_file(
@@ -287,6 +427,7 @@ def list_plugin_targets(
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
+    context_options: dict[str, Any] | None = None,
 ) -> PluginListResult:
     context = _build_inspection_context(
         overrides,
@@ -294,6 +435,8 @@ def list_plugin_targets(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
     )
+    if context_options:
+        context.update(context_options)
     for plugin in get_loaded_plugins():
         try:
             matched = bool(plugin.can_resolve(target, context))
@@ -306,32 +449,18 @@ def list_plugin_targets(
             return PluginListResult((), True, False, plugin.name)
 
         try:
-            items = plugin.list_targets(target, context)
+            envelope = plugin.list_targets(target, context)
         except Exception as exc:
             _warn(f"plugin '{plugin.name}' list_targets failed for '{target}': {exc}")
-            return PluginListResult((), True, False, plugin.name)
-        if not isinstance(items, list):
-            _warn(f"plugin '{plugin.name}' returned non-list listing for '{target}'")
-            return PluginListResult((), True, False, plugin.name)
-
-        normalized_items: list[PluginListItem] = []
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                _warn(
-                    f"plugin '{plugin.name}' returned non-mapping listing item for "
-                    f"'{target}' (item {index})"
-                )
-                return PluginListResult((), True, False, plugin.name)
-            normalized = _normalize_plugin_list_item(
+            return PluginListResult(
+                (),
+                True,
+                False,
                 plugin.name,
-                target,
-                item,
-                index=index,
+                error=f"{exc.__class__.__name__}: {exc}",
             )
-            if normalized is None:
-                return PluginListResult((), True, False, plugin.name)
-            normalized_items.append(normalized)
-        return PluginListResult(tuple(normalized_items), True, True, plugin.name)
+        result = _normalize_plugin_list_envelope(plugin.name, target, envelope)
+        return _page_plugin_list_result(result, context)
     return PluginListResult((), False, False, None)
 
 

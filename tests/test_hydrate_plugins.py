@@ -129,18 +129,32 @@ def test_hydrate_manifest_follows_component_embedded_targets(
                 ("root://", "asset://")
             )
             plugin.resolve = lambda _target, _context: []
-            plugin.list_targets = lambda _target, _context: [
-                {"target": "asset://child", "label": "child.txt"}
-            ]
-            plugin.materialize = lambda _target, _context: [
-                {
-                    "source": "asset://child",
-                    "label": "child.txt",
-                    "filename": "child.txt",
-                    "content": b"child content",
-                    "content_type": "text/plain",
-                }
-            ]
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [
+                    {"target": "asset://child", "label": "child.txt"},
+                    {
+                        "target": "asset://nested-channel",
+                        "label": "Nested channel",
+                        "kind": "channel",
+                        "traverse": False,
+                    },
+                ]
+            }
+
+            def materialize(target: str, _context: dict[str, object]) -> list[dict]:
+                if target != "asset://child":
+                    raise AssertionError(f"unexpected target materialization: {target}")
+                return [
+                    {
+                        "source": "asset://child",
+                        "label": "child.txt",
+                        "filename": "child.txt",
+                        "content": b"child content",
+                        "content_type": "text/plain",
+                    }
+                ]
+
+            plugin.materialize = materialize
             return plugin
 
     monkeypatch.setattr(
