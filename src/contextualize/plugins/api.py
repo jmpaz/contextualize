@@ -56,6 +56,7 @@ class PluginContext(TypedDict, total=False):
     refresh_cache: bool
     cache_only: bool
     overrides: dict[str, Any]
+    include_containing: bool
     list_limit: int
     list_offset: int
 
@@ -65,6 +66,10 @@ class PluginTargetDescriptor(TypedDict, total=False):
     kind: str
     is_external: bool
     group_key: str
+    metadata: dict[str, Any]
+    relations: list[PluginListItem]
+    capabilities: dict[str, Any]
+    error: str | None
 
 
 CanResolveFn = Callable[[str, PluginContext], bool]

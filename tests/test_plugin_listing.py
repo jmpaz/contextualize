@@ -8,7 +8,7 @@ from click.testing import CliRunner
 from contextualize import cli
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
-from contextualize.plugins.resolve import list_plugin_targets
+from contextualize.plugins.resolve import classify_plugin_target, list_plugin_targets
 
 
 def _entrypoint(*, include_list_targets: bool, plain_list: bool = False) -> object:
@@ -219,3 +219,64 @@ def test_plugin_list_targets_preserves_failure_reason(
     assert result.supported is False
     assert result.plugin_name == "demo-list"
     assert result.error == "RuntimeError: auth missing"
+
+
+def test_classify_plugin_target_passes_inspection_context(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    captured = {}
+
+    class _DemoEntrypoint:
+        name = "demo-list"
+        value = "contextualize_plugins.demo_list:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "demo-list"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith("demo://")
+            plugin.resolve = lambda _target, _context: []
+
+            def classify_target(_target, context):
+                captured.update(context)
+                return {
+                    "provider": "demo-list",
+                    "kind": "root",
+                    "relations": [
+                        {
+                            "target": "demo://parent",
+                            "label": "Parent",
+                            "kind": "container",
+                            "metadata": {"relation": "contained_by"},
+                        }
+                    ],
+                    "metadata": {"shape": "descriptor"},
+                    "capabilities": {"listTargets": True},
+                }
+
+            plugin.classify_target = classify_target
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [_DemoEntrypoint()],
+    )
+    clear_loaded_plugins_cache()
+
+    result = classify_plugin_target(
+        "demo://root",
+        overrides={"demo-list": {"mode": "inspect"}},
+        use_cache=False,
+        refresh_cache=True,
+    )
+
+    assert result is not None
+    assert result["relations"][0]["target"] == "demo://parent"
+    assert result["metadata"] == {"shape": "descriptor"}
+    assert result["capabilities"] == {"listTargets": True}
+    assert captured["use_cache"] is False
+    assert captured["refresh_cache"] is True
+    assert captured["overrides"] == {"demo-list": {"mode": "inspect"}}
