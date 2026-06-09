@@ -108,10 +108,12 @@ def test_url_reference_uses_video_context_for_video_content_type(
         filename: str,
         content_type: str | None = None,
         timeout: float | None = None,
+        refresh_cache: bool | None = None,
         source_url: str | None = None,
     ) -> str:
         assert data == b"video-bytes"
         assert timeout is None
+        assert refresh_cache is False
         captured["filename"] = filename
         captured["content_type"] = content_type or ""
         captured["source_url"] = source_url or ""
@@ -154,6 +156,7 @@ def test_url_reference_media_transcription_failure_is_error(
         filename: str,
         content_type: str | None = None,
         timeout: float | None = None,
+        refresh_cache: bool | None = None,
         source_url: str | None = None,
     ) -> str:
         raise RuntimeError("broken")
@@ -164,6 +167,56 @@ def test_url_reference_media_transcription_failure_is_error(
 
     with pytest.raises(ValueError, match="Media transcription failed for"):
         URLReference(url=url, format="raw", use_cache=False)
+
+
+def test_url_reference_passes_audio_refresh_to_transcription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://example.com/audio.mp3"
+    captured: dict[str, object] = {}
+
+    def _head_fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise requests.RequestException("head failed")
+
+    def _get_audio(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return _DummyResponse(
+            status_code=200,
+            headers={"Content-Type": "audio/mpeg"},
+            content=b"audio-bytes",
+            url=url,
+        )
+
+    def _transcribe(
+        data: bytes,
+        *,
+        filename: str,
+        content_type: str | None = None,
+        refresh_cache: bool | None = None,
+        plugin_overrides: dict[str, object] | None = None,
+    ) -> str:
+        captured["data"] = data
+        captured["filename"] = filename
+        captured["content_type"] = content_type
+        captured["refresh_cache"] = refresh_cache
+        captured["plugin_overrides"] = plugin_overrides
+        return "audio transcript"
+
+    monkeypatch.setattr(requests, "head", _head_fail)
+    monkeypatch.setattr(requests, "get", _get_audio)
+    monkeypatch.setattr(
+        "contextualize.references.url.transcribe_media_bytes", _transcribe
+    )
+
+    ref = URLReference(url=url, format="raw", use_cache=False, refresh_cache=True)
+
+    assert ref.read() == "audio transcript"
+    assert captured == {
+        "data": b"audio-bytes",
+        "filename": "audio.mp3",
+        "content_type": "audio/mpeg",
+        "refresh_cache": True,
+        "plugin_overrides": None,
+    }
 
 
 def test_url_reference_video_cache_varies_by_video_overrides(
@@ -193,6 +246,7 @@ def test_url_reference_video_cache_varies_by_video_overrides(
         filename: str,
         content_type: str | None = None,
         timeout: float | None = None,
+        refresh_cache: bool | None = None,
         source_url: str | None = None,
         plugin_overrides: dict[str, object] | None = None,
     ) -> str:

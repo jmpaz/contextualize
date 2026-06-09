@@ -8,6 +8,7 @@ import pytest
 from contextualize.cache import local_media as local_media_cache
 from contextualize.plugins.api import (
     TranscriptionProvider,
+    TranscriptionProviderError,
     TranscriptionRequest,
     TranscriptionResult,
 )
@@ -15,6 +16,7 @@ from contextualize.run_metadata import flush_run_metadata, reset_run_metadata
 from contextualize.runtime import reset_verbose_logging, set_verbose_logging
 from contextualize.transcription import (
     transcribe_audio_file,
+    transcribe_media_bytes,
     transcribe_media_file,
     transcription_routing_identity,
     transcription_routing_summary,
@@ -190,6 +192,68 @@ def test_transcribe_audio_file_refresh_cache_bypasses_cached_result(
     assert transcribe_audio_file(audio_path) == "audio transcript 1"
     assert transcribe_audio_file(audio_path, refresh_cache=True) == "audio transcript 2"
     assert calls == [1, 2]
+
+
+def test_transcribe_audio_file_refresh_cache_uses_stale_cache_on_transient_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    def _transcribe(_request: TranscriptionRequest) -> TranscriptionResult:
+        return TranscriptionResult(
+            text="audio transcript",
+            model="openai",
+            provider="openai",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+    assert transcribe_audio_file(audio_path) == "audio transcript"
+
+    calls: list[int] = []
+
+    def _rate_limited(_request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append(1)
+        raise TranscriptionProviderError(
+            'OpenAI-compatible transcription failed: 429 {"error":{"message":"transcription queue is full"}}'
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _rate_limited),),
+    )
+
+    assert transcribe_audio_file(audio_path, refresh_cache=True) == "audio transcript"
+    assert calls == [1]
+
+
+def test_transcribe_media_bytes_reuses_audio_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _configure_local_media_cache(tmp_path, monkeypatch)
+    calls: list[int] = []
+
+    def _transcribe(request: TranscriptionRequest) -> TranscriptionResult:
+        calls.append(1)
+        assert request.data == b"audio"
+        return TranscriptionResult(
+            text=f"audio transcript {len(calls)}",
+            model="openai",
+            provider="openai",
+        )
+
+    monkeypatch.setattr(
+        "contextualize.references.audio_transcription.loaded_transcription_providers",
+        lambda: (_provider("openai", _transcribe),),
+    )
+
+    assert transcribe_media_bytes(b"audio", filename="clip.mp3") == "audio transcript 1"
+    assert transcribe_media_bytes(b"audio", filename="renamed.mp3") == "audio transcript 1"
+    assert calls == [1]
 
 
 def test_transcribe_audio_file_passes_language_override(
