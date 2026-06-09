@@ -20,23 +20,41 @@ _SKIP_MEDIA: ContextVar[bool] = ContextVar("contextualize_skip_media", default=F
 _VERBOSE_LOGGING: ContextVar[bool] = ContextVar(
     "contextualize_verbose_logging", default=False
 )
+_PAYLOAD_SPEC_JOBS: ContextVar[int | None] = ContextVar(
+    "contextualize_payload_spec_jobs", default=None
+)
+_PAYLOAD_MEDIA_JOBS: ContextVar[int | None] = ContextVar(
+    "contextualize_payload_media_jobs", default=None
+)
 
-_DEFAULT_PAYLOAD_SPEC_JOBS = 4
-_DEFAULT_PAYLOAD_MEDIA_JOBS = 3
+_DEFAULT_PAYLOAD_SPEC_JOBS = 8
+_DEFAULT_PAYLOAD_MEDIA_JOBS = 4
 _MAX_PAYLOAD_JOBS = 64
+
+
+def normalize_payload_jobs(value: int | str | None, *, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, int):
+        parsed = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return default
+        try:
+            parsed = int(raw)
+        except ValueError:
+            return default
+    if parsed <= 0:
+        return default
+    return min(parsed, _MAX_PAYLOAD_JOBS)
 
 
 def _read_positive_int_env(name: str, default: int) -> int:
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    if value <= 0:
-        return default
-    return min(value, _MAX_PAYLOAD_JOBS)
+    return normalize_payload_jobs(raw, default=default)
 
 
 def get_refresh_images() -> bool:
@@ -128,12 +146,44 @@ def reset_verbose_logging(token: Token[bool]) -> None:
 
 
 def get_payload_spec_jobs() -> int:
+    override = _PAYLOAD_SPEC_JOBS.get()
+    if override is not None:
+        return normalize_payload_jobs(override, default=_DEFAULT_PAYLOAD_SPEC_JOBS)
     return _read_positive_int_env(
         "CONTEXTUALIZE_PAYLOAD_SPEC_JOBS", _DEFAULT_PAYLOAD_SPEC_JOBS
     )
 
 
+def set_payload_spec_jobs(value: int | None) -> Token[int | None]:
+    normalized = (
+        normalize_payload_jobs(value, default=_DEFAULT_PAYLOAD_SPEC_JOBS)
+        if value is not None
+        else None
+    )
+    return _PAYLOAD_SPEC_JOBS.set(normalized)
+
+
+def reset_payload_spec_jobs(token: Token[int | None]) -> None:
+    _PAYLOAD_SPEC_JOBS.reset(token)
+
+
 def get_payload_media_jobs() -> int:
+    override = _PAYLOAD_MEDIA_JOBS.get()
+    if override is not None:
+        return normalize_payload_jobs(override, default=_DEFAULT_PAYLOAD_MEDIA_JOBS)
     return _read_positive_int_env(
         "CONTEXTUALIZE_PAYLOAD_MEDIA_JOBS", _DEFAULT_PAYLOAD_MEDIA_JOBS
     )
+
+
+def set_payload_media_jobs(value: int | None) -> Token[int | None]:
+    normalized = (
+        normalize_payload_jobs(value, default=_DEFAULT_PAYLOAD_MEDIA_JOBS)
+        if value is not None
+        else None
+    )
+    return _PAYLOAD_MEDIA_JOBS.set(normalized)
+
+
+def reset_payload_media_jobs(token: Token[int | None]) -> None:
+    _PAYLOAD_MEDIA_JOBS.reset(token)
