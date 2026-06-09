@@ -25,6 +25,7 @@ from .helpers import (
     fetch_gist_files,
     is_http_url,
     is_utf8_file,
+    looks_like_text_content_type,
     looks_like_windows_drive,
     parse_gist_url,
     parse_target_spec,
@@ -33,6 +34,14 @@ from .helpers import (
 from .url import URLReference
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_CONVERTIBLE_CONTENT_TYPES = frozenset(
+    {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+)
 
 
 def _target_suffix(target: str) -> str:
@@ -48,6 +57,24 @@ def _allows_embedded_direct_resolution(target: str, *, plugin_matched: bool) -> 
         suffix = _target_suffix(target)
         return suffix in MARKITDOWN_PREFERRED_EXTENSIONS or is_media_suffix(suffix)
     return not _EXTERNAL_SCHEME_RE.match(target)
+
+
+def _text_only_materialized_mode(file_item: dict[str, Any]) -> str:
+    content_type = str(file_item.get("content_type") or "").split(";", 1)[0].lower()
+    filename = str(file_item.get("filename") or "")
+    suffix = Path(filename).suffix.lower()
+    if content_type and looks_like_text_content_type(content_type):
+        return "text"
+    if (
+        content_type.startswith(("audio/", "image/", "video/"))
+        or content_type in _CONVERTIBLE_CONTENT_TYPES
+        or suffix in MARKITDOWN_PREFERRED_EXTENSIONS
+        or is_media_suffix(suffix)
+    ):
+        return "convertible"
+    if content_type:
+        return "skip"
+    return "text"
 
 
 def create_file_references(
@@ -656,6 +683,11 @@ def _resolve_embedded_child_refs(
         refs: list[Any] = []
         with tempfile.TemporaryDirectory(prefix="contextualize-target-") as tmpdir:
             for file_item in materialized.files:
+                materialized_mode = (
+                    _text_only_materialized_mode(file_item) if text_only else "text"
+                )
+                if materialized_mode == "skip":
+                    continue
                 path = Path(tmpdir) / _safe_materialized_filename(
                     str(file_item.get("filename") or "attachment")
                 )
@@ -672,7 +704,7 @@ def _resolve_embedded_child_refs(
                         inject=inject,
                         depth=depth,
                         trace_collector=trace_collector,
-                        text_only=text_only,
+                        text_only=text_only and materialized_mode != "convertible",
                         use_cache=use_cache,
                         cache_ttl=cache_ttl,
                         refresh_cache=refresh_cache,
@@ -682,7 +714,7 @@ def _resolve_embedded_child_refs(
                         atproto_overrides=atproto_overrides,
                         soundcloud_overrides=soundcloud_overrides,
                         target_depth=0,
-                        binary_policy=binary_policy,
+                        binary_policy="skip" if text_only else binary_policy,
                         _embedded_seen=seen,
                     )
                     refs.extend(result["refs"])

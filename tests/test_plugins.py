@@ -316,6 +316,115 @@ def test_embedded_target_materialization_uses_normal_file_resolver(
     assert result["concatenated"] == "child content"
 
 
+def test_embedded_text_only_materialized_audio_is_transcribed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+    transcribed: list[str] = []
+
+    class _EmbeddedEntrypoint:
+        name = "embedded"
+        value = "contextualize_plugins.embedded:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "asset://")
+            )
+            plugin.resolve = lambda _target, _context: []
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [{"target": "asset://child", "label": "child.mp3"}]
+            }
+            plugin.materialize = lambda _target, _context: [
+                {
+                    "source": "asset://child",
+                    "label": "child.mp3",
+                    "filename": "child.mp3",
+                    "content": b"\xffaudio",
+                    "content_type": "audio/mpeg",
+                }
+            ]
+            return plugin
+
+    def _transcribe(path: str | Path, **_kwargs) -> str:
+        transcribed.append(Path(path).name)
+        return "audio transcript"
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+    )
+    monkeypatch.setattr(
+        "contextualize.references.file.transcribe_media_file", _transcribe
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://thread"],
+        format="raw",
+        target_depth=1,
+        include_parent=False,
+        text_only=True,
+    )
+
+    captured = capsys.readouterr()
+    assert result["concatenated"] == "audio transcript"
+    assert transcribed == ["child.mp3"]
+    assert captured.err == ""
+
+
+def test_embedded_text_only_materialized_unknown_binary_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _EmbeddedEntrypoint:
+        name = "embedded"
+        value = "contextualize_plugins.embedded:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "asset://")
+            )
+            plugin.resolve = lambda _target, _context: []
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [{"target": "asset://child", "label": "child.bin"}]
+            }
+            plugin.materialize = lambda _target, _context: [
+                {
+                    "source": "asset://child",
+                    "label": "child.bin",
+                    "filename": "child.bin",
+                    "content": b"\xff\x00binary",
+                    "content_type": "application/octet-stream",
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://thread"],
+        format="raw",
+        target_depth=1,
+        include_parent=False,
+        text_only=True,
+    )
+
+    captured = capsys.readouterr()
+    assert result["refs"] == []
+    assert captured.err == ""
+
+
 def test_embedded_target_resolves_plugin_claimed_child_without_materialization(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
