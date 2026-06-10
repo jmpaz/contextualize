@@ -11,6 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..progress import (
+    log_progress,
+    reset_progress_context,
+    set_progress_context,
+    write_progress_log,
+)
 from .hydrate import (
     HydrateOverrides,
     HydrateResult,
@@ -89,7 +95,9 @@ def hydrate_contexts(
     effective_overrides = overrides or HydrateOverrides()
     statuses: list[ContextHydrationStatus] = []
 
+    log_progress("hydrate", "context", "total", count=len(selected_names))
     for name in selected_names:
+        log_progress("hydrate", "context", "start", target=name)
         context = contexts.get(name)
         if context is None:
             statuses.append(
@@ -103,9 +111,28 @@ def hydrate_contexts(
                     replace="guarded",
                 )
             )
+            log_progress(
+                "hydrate",
+                "context",
+                "failed",
+                target=name,
+                detail="not registered",
+            )
             continue
         with redirect_stderr(_ContextStderrPrefixer(context.name, sys.stderr)):
-            statuses.append(_hydrate_one(context, effective_overrides))
+            token = set_progress_context(context.name)
+            try:
+                status = _hydrate_one(context, effective_overrides)
+            finally:
+                reset_progress_context(token)
+        statuses.append(status)
+        log_progress(
+            "hydrate",
+            "context",
+            "failed" if status.result == "failed" else "done",
+            target=name,
+            detail=status.result,
+        )
 
     write_context_status(statuses, status_path=status_path)
     return statuses
@@ -378,7 +405,11 @@ class _ContextStderrPrefixer:
         self.target.flush()
 
     def _write_line(self, line: str, *, newline: bool) -> None:
+        handled = False
         if line:
-            self.target.write(f"context {self.name}: {line}")
-        if newline:
+            prefixed = f"context {self.name}: {line}"
+            handled = write_progress_log(prefixed)
+            if not handled:
+                self.target.write(prefixed)
+        if newline and not handled:
             self.target.write("\n")
