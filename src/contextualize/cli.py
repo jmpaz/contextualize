@@ -35,6 +35,8 @@ GLOBAL_OPTION_LABELS = (
     ("md_model", "--md-model"),
     ("md_image_provider", "--md-image-provider"),
     ("codex_app_server_command", "--codex-app-server-command"),
+    ("spec_jobs", "--spec-jobs"),
+    ("media_jobs", "--media-jobs"),
     ("output_position", "--position"),
     ("append_flag", "--after"),
     ("prepend_flag", "--before"),
@@ -55,9 +57,24 @@ GLOBAL_OPTION_DEFAULTS = {
     "md_model": None,
     "md_image_provider": None,
     "codex_app_server_command": None,
+    "spec_jobs": None,
+    "media_jobs": None,
     "output_position": None,
     "append_flag": False,
     "prepend_flag": False,
+}
+HYDRATE_IGNORED_GLOBAL_OPTION_NAMES = {
+    "prompt",
+    "wrap_short",
+    "wrap_mode",
+    "copy",
+    "staged_copy",
+    "count_only",
+    "copy_segments",
+    "write_file",
+    "output_position",
+    "append_flag",
+    "prepend_flag",
 }
 
 _STDIN_URL_RE = re.compile(r"https?://[^\s<>'\"`]+")
@@ -162,7 +179,11 @@ def _write_bold_section(
     formatter.dedent()
 
 
-def _collect_used_global_option_labels(ctx: click.Context) -> list[str]:
+def _collect_used_global_option_labels(
+    ctx: click.Context,
+    *,
+    only_names: set[str] | None = None,
+) -> list[str]:
     parent = ctx.parent
     if parent is None:
         return []
@@ -172,12 +193,16 @@ def _collect_used_global_option_labels(ctx: click.Context) -> list[str]:
     used: list[str] = []
     if callable(get_source):
         for name, label in GLOBAL_OPTION_LABELS:
+            if only_names is not None and name not in only_names:
+                continue
             if name not in parent.params:
                 continue
             if get_source(name) == click.core.ParameterSource.COMMANDLINE:
                 used.append(label)
         return used
     for name, label in GLOBAL_OPTION_LABELS:
+        if only_names is not None and name not in only_names:
+            continue
         if name not in parent.params:
             continue
         if parent.params.get(name) != GLOBAL_OPTION_DEFAULTS.get(name):
@@ -436,6 +461,8 @@ def preprocess_args():
         "--md-model",
         "--md-image-provider",
         "--codex-app-server-command",
+        "--spec-jobs",
+        "--media-jobs",
         "--position",
         "--verbose",
         "--quiet",
@@ -450,6 +477,8 @@ def preprocess_args():
         "--md-model",
         "--md-image-provider",
         "--codex-app-server-command",
+        "--spec-jobs",
+        "--media-jobs",
         "--position",
     }
     short_forwardable = {"-p", "-w", "-c", "-s", "-a", "-b"}
@@ -639,6 +668,24 @@ preprocess_args()
     ),
 )
 @click.option(
+    "--spec-jobs",
+    type=click.IntRange(1, 64),
+    default=None,
+    help=(
+        "Parallel file-spec resolution jobs. Overrides "
+        "CONTEXTUALIZE_PAYLOAD_SPEC_JOBS (default: 8)."
+    ),
+)
+@click.option(
+    "--media-jobs",
+    type=click.IntRange(1, 64),
+    default=None,
+    help=(
+        "Parallel embedded/media processing jobs. Overrides "
+        "CONTEXTUALIZE_PAYLOAD_MEDIA_JOBS (default: 4)."
+    ),
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Enable provider progress logs on stderr.",
@@ -676,6 +723,8 @@ def cli(
     md_model,
     md_image_provider,
     codex_app_server_command,
+    spec_jobs,
+    media_jobs,
     verbose,
     quiet,
     output_position,
@@ -716,6 +765,8 @@ def cli(
             raise click.BadParameter("--codex-app-server-command cannot be empty")
         os.environ["CODEX_APP_SERVER_COMMAND"] = command
     ctx.obj["codex_app_server_command"] = codex_app_server_command
+    ctx.obj["spec_jobs"] = spec_jobs
+    ctx.obj["media_jobs"] = media_jobs
     if append_flag and prepend_flag:
         raise click.BadParameter("use -a or -b, not both")
     if copy and copy_segments:
@@ -731,11 +782,21 @@ def cli(
     if staged_copy and write_file:
         raise click.BadParameter("--staged-copy cannot be used with --write-file")
 
+    from .progress import reset_progress, set_live_progress
     from .run_metadata import reset_run_metadata
-    from .runtime import set_verbose_logging
+    from .runtime import (
+        set_payload_media_jobs,
+        set_payload_spec_jobs,
+        set_verbose_logging,
+    )
 
+    reset_progress()
     reset_run_metadata()
     set_verbose_logging(verbose_logging)
+    set_payload_spec_jobs(spec_jobs)
+    set_payload_media_jobs(media_jobs)
+    set_live_progress(verbose_logging)
+    ctx.call_on_close(lambda: _finish_run(verbose_logging=verbose_logging))
 
     if append_flag:
         output_pos = "append"
@@ -776,6 +837,19 @@ def cli(
         else:
             click.echo(ctx.get_help())
             ctx.exit()
+
+
+def _finish_run(*, verbose_logging: bool) -> None:
+    from .progress import flush_progress_summary, set_live_progress
+
+    set_live_progress(False)
+    flush_progress_summary(enabled=verbose_logging)
+    try:
+        from .render.codex import close_shared_codex_app_server_sessions
+
+        close_shared_codex_app_server_sessions()
+    except Exception:
+        pass
 
 
 @cli.result_callback()
@@ -1425,9 +1499,7 @@ def _context_hydrate_overrides(
     transcribe_refresh,
     refresh_all,
     cache_ttl,
-    target_depth,
-    target_scope,
-    include_parent,
+    embedded_resolution,
     extra_params,
 ):
     from .plugins import collect_plugin_cli_overrides
@@ -1482,9 +1554,7 @@ def _context_hydrate_overrides(
         cache_ttl=parsed_cache_ttl,
         refresh_cache=refresh_cache,
         plugin_overrides=plugin_overrides,
-        target_depth=target_depth,
-        target_scope=target_scope.lower() if target_scope else None,
-        include_parent=include_parent,
+        embedded_resolution=embedded_resolution,
     )
 
 
@@ -1662,21 +1732,9 @@ def contexts_status_cmd(status_path) -> None:
     help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
 )
 @click.option(
-    "--target-depth",
-    type=int,
+    "--embedded-resolution/--no-embedded-resolution",
     default=None,
-    help="Follow embedded plugin targets this many levels deep.",
-)
-@click.option(
-    "--target-scope",
-    type=click.Choice(["first", "all"], case_sensitive=False),
-    default=None,
-    help="Resolve embedded targets from only the first input or all inputs.",
-)
-@click.option(
-    "--include-parent/--children-only",
-    default=None,
-    help="Include original targets when embedded targets are followed.",
+    help="Resolve embedded plugin targets attached to collected items.",
 )
 @_video_frame_options
 @click.pass_context
@@ -1702,13 +1760,14 @@ def contexts_hydrate_cmd(
     transcribe_refresh,
     refresh_all,
     cache_ttl,
-    target_depth,
-    target_scope,
-    include_parent,
+    embedded_resolution,
     **extra_params,
 ):
     """Hydrate one or more registered contexts."""
-    used_options = _collect_used_global_option_labels(ctx)
+    used_options = _collect_used_global_option_labels(
+        ctx,
+        only_names=HYDRATE_IGNORED_GLOBAL_OPTION_NAMES,
+    )
     if used_options:
         click.echo(f"ignoring global options [{', '.join(used_options)}]", err=True)
 
@@ -1732,9 +1791,7 @@ def contexts_hydrate_cmd(
         transcribe_refresh=transcribe_refresh,
         refresh_all=refresh_all,
         cache_ttl=cache_ttl,
-        target_depth=target_depth,
-        target_scope=target_scope,
-        include_parent=include_parent,
+        embedded_resolution=embedded_resolution,
         extra_params=extra_params,
     )
     try:
@@ -1848,21 +1905,9 @@ def contexts_hydrate_cmd(
     help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
 )
 @click.option(
-    "--target-depth",
-    type=int,
+    "--embedded-resolution/--no-embedded-resolution",
     default=None,
-    help="Follow embedded plugin targets this many levels deep.",
-)
-@click.option(
-    "--target-scope",
-    type=click.Choice(["first", "all"], case_sensitive=False),
-    default=None,
-    help="Resolve embedded targets from only the first input ('first') or all inputs ('all').",
-)
-@click.option(
-    "--include-parent/--children-only",
-    default=None,
-    help="Include original targets when embedded targets are followed.",
+    help="Resolve embedded plugin targets attached to collected items.",
 )
 @click.option(
     "--trace",
@@ -1891,9 +1936,7 @@ def hydrate_cmd(
     transcribe_refresh,
     refresh_all,
     cache_ttl,
-    target_depth,
-    target_scope,
-    include_parent,
+    embedded_resolution,
     trace,
     **extra_params,
 ):
@@ -1904,7 +1947,10 @@ def hydrate_cmd(
     Are.na channels, Discord URLs, SoundCloud URLs/URNs, YouTube URLs, or a single
     YAML manifest file.
     """
-    used_options = _collect_used_global_option_labels(ctx)
+    used_options = _collect_used_global_option_labels(
+        ctx,
+        only_names=HYDRATE_IGNORED_GLOBAL_OPTION_NAMES,
+    )
     if used_options:
         click.echo(f"ignoring global options [{', '.join(used_options)}]", err=True)
 
@@ -1969,9 +2015,7 @@ def hydrate_cmd(
         cache_ttl=parsed_cache_ttl,
         refresh_cache=refresh_cache,
         plugin_overrides=plugin_overrides,
-        target_depth=target_depth,
-        target_scope=target_scope.lower() if target_scope else None,
-        include_parent=include_parent,
+        embedded_resolution=embedded_resolution,
     )
 
     manifest_path = None
@@ -2012,9 +2056,7 @@ def hydrate_cmd(
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
                 plugin_overrides=plugin_overrides,
-                target_depth=target_depth or 0,
-                target_scope=(target_scope or "all").lower(),
-                include_parent=True if include_parent is None else include_parent,
+                embedded_resolution=bool(embedded_resolution),
             )
         except (ValueError, FileNotFoundError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -2195,21 +2237,9 @@ def hydrate_cmd(
     help="Paths to skip when resolving Markdown links. Can be specified multiple times.",
 )
 @click.option(
-    "--target-depth",
-    type=int,
-    default=0,
-    help="Follow embedded plugin targets this many levels deep.",
-)
-@click.option(
-    "--target-scope",
-    type=click.Choice(["first", "all"], case_sensitive=False),
-    default="all",
-    help="Resolve embedded targets from only the first input ('first') or all inputs ('all').",
-)
-@click.option(
-    "--include-parent/--children-only",
-    default=True,
-    help="Include the original target when embedded targets are followed.",
+    "--embedded-resolution/--no-embedded-resolution",
+    default=False,
+    help="Resolve embedded plugin targets attached to collected items.",
 )
 @click.option(
     "--trace",
@@ -2307,9 +2337,7 @@ def cat_cmd(
     link_depth,
     link_scope,
     link_skip,
-    target_depth,
-    target_scope,
-    include_parent,
+    embedded_resolution,
     trace,
     list_mode,
     rev,
@@ -2429,9 +2457,7 @@ def cat_cmd(
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
                 plugin_overrides=plugin_overrides,
-                target_depth=target_depth,
-                target_scope=target_scope.lower(),
-                include_parent=include_parent,
+                embedded_resolution=embedded_resolution,
                 text_only=text_only,
                 binary_policy=binary_policy,
             )

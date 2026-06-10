@@ -5,13 +5,15 @@
 
 - `-p, --prompt` prepend and optionally append up to two strings
 - `-w, --wrap` wrap output as `md` or `xml`; `-w` alone is a shorthand for `--wrap xml`
-- `--verbose` enable provider progress logs on stderr
+- `--verbose` enable provider diagnostics, Rich live progress on interactive stderr, and an end-of-run progress summary
 - `--quiet` disable provider progress logs on stderr (default)
 - `-c, --copy` copy to clipboard instead of printing; displays the token count
 - `-s, --staged-copy` with `--prompt` and a copy mode, copy preprompt, content, and postprompt as distinct stages
 - `--count` dry run of `--copy`; prints a string containing the token count
 - `--write-file PATH` write final output to a file
 - `--token-target STR` choose the encoding/model for token counting (e.g. `cl100k_base`, `gpt-4o-mini`, `claude-3-5-sonnet-20241022`)
+- `--spec-jobs N` set parallel file-spec resolution jobs; defaults to `CONTEXTUALIZE_PAYLOAD_SPEC_JOBS` or `8`
+- `--media-jobs N` set parallel embedded/media processing jobs; defaults to `CONTEXTUALIZE_PAYLOAD_MEDIA_JOBS` or `4`
 - `-a, --after` / `-b, --before` control placement in pipelines (default: after)
 
 `--count` cannot be combined with `--copy` or `--copy-segments`.
