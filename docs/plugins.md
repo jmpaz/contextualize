@@ -63,13 +63,14 @@ core plugin resolver applies that page window to the normalized envelope and
 adds `offset`, `limit`, `returned`, `totalCount`, `hasMore`, and `nextOffset`
 pagination fields where applicable.
 
-Omit `traverse` or set it to `True` when generic embedded target traversal may
-follow the listed target. Set `traverse` to `False` when the item should be
-visible to listing and inspection, but should not be followed by `target-depth`.
+Omit `traverse` or set it to `True` when embedded resolution may follow the listed
+target from a collected item. Set `traverse` to `False` when the item should be
+visible to listing and inspection, but should not be resolved as attached
+context.
 
 `materialize` lets a plugin expose a listed child target as one or more ordinary
-files so the normal resolver stack can claim them. This is for embedded targets
-such as a Discord attachment that should be re-read as a zip, image, or audio
+files so the normal resolver stack can claim them. This is for embedded
+targets such as an attachment that should be re-read as a zip, image, or audio
 file instead of being rendered by the parent provider. It should return items
 shaped like:
 

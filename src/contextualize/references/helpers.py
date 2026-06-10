@@ -179,9 +179,9 @@ def _looks_like_bare_external_target(spec: str) -> bool:
 
 def split_spec_symbols(spec: str) -> tuple[str, list[str]]:
     try:
-        from ..plugins.resolve import classify_plugin_target
+        from ..plugins.resolve import plugin_target_provider
 
-        if classify_plugin_target(spec) is not None:
+        if plugin_target_provider(spec) is not None:
             return spec, []
     except Exception:
         pass

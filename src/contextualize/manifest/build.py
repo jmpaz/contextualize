@@ -80,6 +80,18 @@ def _combine_comment(comment: str | None, output: str) -> str:
     return output
 
 
+def _reject_removed_embedded_traversal_keys(mapping: dict[str, Any], label: str) -> None:
+    removed = [
+        key for key in ("target-depth", "target-scope", "include-parent") if key in mapping
+    ]
+    if not removed:
+        return
+    keys = ", ".join(removed)
+    raise ValueError(
+        f"{label} uses removed embedded traversal key(s): {keys}. Use embedded-resolution instead."
+    )
+
+
 def _resolve_spec_to_paths(
     raw_spec: str,
     base_dir: str,
@@ -186,9 +198,7 @@ def _resolve_spec_to_seed_refs(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     plugin_overrides: dict[str, Any] | None = None,
-    target_depth: int = 0,
-    target_scope: str = "all",
-    include_parent: bool = True,
+    embedded_resolution: bool = False,
 ) -> tuple[List[Any], List[Any], List[tuple[str, str, int]]]:
     spec = os.path.expanduser(raw_spec)
     opts = parse_target_spec(spec)
@@ -253,9 +263,7 @@ def _resolve_spec_to_seed_refs(
                     cache_ttl=cache_ttl,
                     refresh_cache=refresh_cache,
                     plugin_overrides=plugin_overrides,
-                    target_depth=target_depth,
-                    target_scope=target_scope,
-                    include_parent=include_parent,
+                    embedded_resolution=embedded_resolution,
                 )["refs"]
                 seed_refs.extend(refs)
                 trace_inputs.extend([ref for ref in refs if hasattr(ref, "path")])
@@ -272,9 +280,7 @@ def _resolve_spec_to_seed_refs(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
-            target_depth=target_depth,
-            target_scope=target_scope,
-            include_parent=include_parent,
+            embedded_resolution=embedded_resolution,
         )["refs"]
         for ref in refs:
             _append_wrapped_ref(ref, url)
@@ -292,9 +298,7 @@ def _resolve_spec_to_seed_refs(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
-            target_depth=target_depth,
-            target_scope=target_scope,
-            include_parent=include_parent,
+            embedded_resolution=embedded_resolution,
         )["refs"]
         for ref in refs:
             _append_wrapped_ref(ref, target)
@@ -338,9 +342,7 @@ def _resolve_spec_to_seed_refs(
                 label_suffix=label_suffix,
                 inject=inject,
                 depth=depth,
-                target_depth=target_depth,
-                target_scope=target_scope,
-                include_parent=include_parent,
+                embedded_resolution=embedded_resolution,
             )["refs"]
             seed_refs.extend(refs)
 
@@ -400,9 +402,7 @@ def _resolve_spec(
     per_file_link_depth: int | None,
     per_file_link_scope: str,
     resolved_link_skip: list[str],
-    target_depth: int,
-    target_scope: str,
-    include_parent: bool,
+    embedded_resolution: bool,
     use_cache: bool,
     cache_ttl: timedelta | None,
     refresh_cache: bool,
@@ -443,9 +443,7 @@ def _resolve_spec(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
-            target_depth=target_depth,
-            target_scope=target_scope,
-            include_parent=include_parent,
+            embedded_resolution=embedded_resolution,
         )
     )
 
@@ -513,9 +511,7 @@ def build_payload_impl(
     link_depth_default: int = 0,
     link_scope_default: str = "all",
     link_skip_default: List[str] = None,
-    target_depth_default: int = 0,
-    target_scope_default: str = "all",
-    include_parent_default: bool = True,
+    embedded_resolution_default: bool = False,
     exclude_keys: list[str] | None = None,
     map_mode: bool = False,
     map_keys: list[str] | None = None,
@@ -576,17 +572,10 @@ def build_payload_impl(
 
         comp_link_depth = int(comp.get("link-depth", link_depth_default) or 0)
         comp_link_scope = (comp.get("link-scope", link_scope_default) or "all").lower()
-        comp_target_depth = int(comp.get("target-depth", target_depth_default) or 0)
-        comp_target_scope = (
-            comp.get("target-scope", target_scope_default) or "all"
-        ).lower()
-        if comp_target_scope not in {"first", "all"}:
-            raise ValueError(
-                f"Component '{name}' target-scope must be 'first' or 'all'"
-            )
-        comp_include_parent = comp.get("include-parent", include_parent_default)
-        if not isinstance(comp_include_parent, bool):
-            raise ValueError(f"Component '{name}' include-parent must be a boolean")
+        _reject_removed_embedded_traversal_keys(comp, f"Component '{name}'")
+        comp_embedded_resolution = comp.get("embedded-resolution", embedded_resolution_default)
+        if not isinstance(comp_embedded_resolution, bool):
+            raise ValueError(f"Component '{name}' embedded-resolution must be a boolean")
 
         comp_link_skip = comp.get("link-skip", link_skip_default)
         if comp_link_skip is None:
@@ -617,29 +606,15 @@ def build_payload_impl(
                 else comp_link_scope
             )
             per_file_link_skip = file_opts.get("link-skip") if file_opts else None
-            per_file_target_depth_raw = file_opts.get("target-depth")
-            per_file_target_depth = (
-                int(per_file_target_depth_raw)
-                if per_file_target_depth_raw is not None
-                else comp_target_depth
+            _reject_removed_embedded_traversal_keys(
+                file_opts, f"Component '{name}' file[{spec_index}]"
             )
-            per_file_target_scope = (
-                (file_opts.get("target-scope") or comp_target_scope).lower()
-                if file_opts
-                else comp_target_scope
+            per_file_embedded_resolution = file_opts.get(
+                "embedded-resolution", comp_embedded_resolution
             )
-            if per_file_target_scope not in {"first", "all"}:
+            if not isinstance(per_file_embedded_resolution, bool):
                 raise ValueError(
-                    f"Component '{name}' file[{spec_index}] target-scope must be 'first' or 'all'"
-                )
-            per_file_include_parent = (
-                file_opts.get("include-parent")
-                if "include-parent" in file_opts
-                else comp_include_parent
-            )
-            if not isinstance(per_file_include_parent, bool):
-                raise ValueError(
-                    f"Component '{name}' file[{spec_index}] include-parent must be a boolean"
+                    f"Component '{name}' file[{spec_index}] embedded-resolution must be a boolean"
                 )
             resolved_link_skip = list(resolved_link_skip_default)
             if per_file_link_skip:
@@ -654,7 +629,7 @@ def build_payload_impl(
             spec_tasks.append(
                 (
                     spec_index,
-                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, td=per_file_target_depth, ts=per_file_target_scope, ip=per_file_include_parent: (
+                    lambda rs=raw_spec, fo=file_opts, ic=item_comment, pld=per_file_link_depth, pls=per_file_link_scope, rls=resolved_link_skip, er=per_file_embedded_resolution: (
                         _resolve_spec(
                             raw_spec=rs,
                             file_opts=fo,
@@ -669,9 +644,7 @@ def build_payload_impl(
                             per_file_link_depth=pld,
                             per_file_link_scope=pls,
                             resolved_link_skip=rls,
-                            target_depth=td,
-                            target_scope=ts,
-                            include_parent=ip,
+                            embedded_resolution=er,
                             use_cache=use_cache,
                             cache_ttl=cache_ttl,
                             refresh_cache=refresh_cache,

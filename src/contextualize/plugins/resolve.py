@@ -574,6 +574,31 @@ def normalize_manifest_plugin_config(
     return dict(normalized)
 
 
+def plugin_target_provider(
+    target: str,
+    *,
+    overrides: dict[str, Any] | None = None,
+    use_cache: bool = True,
+    cache_ttl: timedelta | None = None,
+    refresh_cache: bool = False,
+) -> str | None:
+    context = _build_inspection_context(
+        overrides,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        refresh_cache=refresh_cache,
+    )
+    for plugin in get_loaded_plugins():
+        try:
+            matched = bool(plugin.can_resolve(target, context))
+        except Exception as exc:
+            _warn(f"plugin '{plugin.name}' can_resolve failed for '{target}': {exc}")
+            continue
+        if matched:
+            return plugin.name
+    return None
+
+
 def classify_plugin_target(
     target: str,
     *,
