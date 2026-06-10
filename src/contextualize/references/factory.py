@@ -53,9 +53,10 @@ _CONVERTIBLE_CONTENT_TYPES = frozenset(
 class _EmbeddedTarget:
     target: str
     context_prefix: str | None = None
+    context_sidecar_stem: str | None = None
 
 
-_EmbeddedSeenKey = tuple[str, str | None]
+_EmbeddedSeenKey = tuple[str, str | None, str | None]
 
 
 def _target_suffix(target: str) -> str:
@@ -109,40 +110,66 @@ def _join_context_prefix(prefix: object, suffix: object) -> str | None:
     return clean_prefix or clean_suffix
 
 
-def _embedded_child_prefix(
-    item: dict[str, Any], parent_prefix: str | None
-) -> str | None:
+def _embedded_child_context(
+    item: dict[str, Any], parent: _EmbeddedTarget
+) -> tuple[str | None, str | None]:
     metadata = item.get("metadata")
     if not isinstance(metadata, dict):
-        return parent_prefix
+        return parent.context_prefix, parent.context_sidecar_stem
     channel_path = metadata.get("channel_path")
     block_id = metadata.get("block_id")
     if channel_path is not None and block_id is not None:
-        return _join_context_prefix(channel_path, block_id)
+        return (
+            _normalize_context_prefix(channel_path),
+            _join_context_prefix(channel_path, block_id),
+        )
     context_prefix = metadata.get("context_prefix")
     if context_prefix is not None:
-        return _join_context_prefix(parent_prefix, context_prefix)
-    return parent_prefix
+        return (
+            _join_context_prefix(parent.context_prefix, context_prefix),
+            parent.context_sidecar_stem,
+        )
+    return parent.context_prefix, parent.context_sidecar_stem
 
 
-def _apply_embedded_context_prefix(
-    refs: list[Any], context_prefix: str | None
+def _apply_embedded_context(
+    refs: list[Any],
+    *,
+    context_prefix: str | None,
+    context_sidecar_stem: str | None,
 ) -> list[Any]:
     clean_prefix = _normalize_context_prefix(context_prefix)
-    if clean_prefix is None:
+    clean_sidecar_stem = _normalize_context_prefix(context_sidecar_stem)
+    if clean_prefix is None and clean_sidecar_stem is None:
         return refs
     for ref in refs:
         if isinstance(ref, PluginReference):
-            ref.document.metadata["context_prefix"] = clean_prefix
+            if clean_prefix is not None:
+                ref.document.metadata["context_prefix"] = clean_prefix
+            if clean_sidecar_stem is not None:
+                ref.document.metadata["context_sidecar_stem"] = clean_sidecar_stem
         else:
-            setattr(ref, "_contextualize_context_prefix", clean_prefix)
+            if clean_prefix is not None:
+                setattr(ref, "_contextualize_context_prefix", clean_prefix)
+            if clean_sidecar_stem is not None:
+                setattr(
+                    ref,
+                    "_contextualize_context_sidecar_stem",
+                    clean_sidecar_stem,
+                )
     return refs
 
 
 def _embedded_seen_key(
-    target: str, context_prefix: str | None
+    target: str,
+    context_prefix: str | None,
+    context_sidecar_stem: str | None,
 ) -> _EmbeddedSeenKey:
-    return (target, _normalize_context_prefix(context_prefix))
+    return (
+        target,
+        _normalize_context_prefix(context_prefix),
+        _normalize_context_prefix(context_sidecar_stem),
+    )
 
 
 def create_file_references(
@@ -617,7 +644,11 @@ def _resolve_embedded_target_refs(
         return []
     if seen is None:
         seen = {
-            _embedded_seen_key(seed.target, seed.context_prefix)
+            _embedded_seen_key(
+                seed.target,
+                seed.context_prefix,
+                seed.context_sidecar_stem,
+            )
             for seed in seed_targets
         }
 
@@ -685,16 +716,19 @@ def _resolve_embedded_target_refs(
                     continue
                 if item.get("traverse") is False:
                     continue
-                child_prefix = _embedded_child_prefix(
-                    item, parent.context_prefix
+                child_prefix, child_sidecar_stem = _embedded_child_context(
+                    item, parent
                 )
-                seen_key = _embedded_seen_key(child, child_prefix)
+                seen_key = _embedded_seen_key(
+                    child, child_prefix, child_sidecar_stem
+                )
                 if seen_key in seen:
                     continue
                 seen.add(seen_key)
                 child_node = _EmbeddedTarget(
                     child,
                     context_prefix=child_prefix,
+                    context_sidecar_stem=child_sidecar_stem,
                 )
                 next_frontier.append(child_node)
                 child_jobs.append((encounter_index, child_node))
@@ -864,8 +898,10 @@ def _resolve_embedded_child_refs(
         plugin_refs = []
         plugin_claimed = False
     if plugin_refs:
-        return _apply_embedded_context_prefix(
-            plugin_refs, target_node.context_prefix
+        return _apply_embedded_context(
+            plugin_refs,
+            context_prefix=target_node.context_prefix,
+            context_sidecar_stem=target_node.context_sidecar_stem,
         )
 
     try:
@@ -926,8 +962,10 @@ def _resolve_embedded_child_refs(
                         _embedded_seen=seen,
                     )
                     refs.extend(
-                        _apply_embedded_context_prefix(
-                            list(result["refs"]), target_node.context_prefix
+                        _apply_embedded_context(
+                            list(result["refs"]),
+                            context_prefix=target_node.context_prefix,
+                            context_sidecar_stem=target_node.context_sidecar_stem,
                         )
                     )
                 except Exception as exc:
@@ -971,8 +1009,10 @@ def _resolve_embedded_child_refs(
             file=sys.stderr,
         )
         return []
-    return _apply_embedded_context_prefix(
-        list(result["refs"]), target_node.context_prefix
+    return _apply_embedded_context(
+        list(result["refs"]),
+        context_prefix=target_node.context_prefix,
+        context_sidecar_stem=target_node.context_sidecar_stem,
     )
 
 

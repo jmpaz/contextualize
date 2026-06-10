@@ -1493,11 +1493,25 @@ def _context_prefix_from_metadata(metadata: dict[str, Any]) -> str | None:
     return _normalize_context_prefix(raw_prefix)
 
 
+def _context_sidecar_stem_from_metadata(metadata: dict[str, Any]) -> str | None:
+    raw_stem = metadata.get("context_sidecar_stem")
+    if not isinstance(raw_stem, str):
+        return None
+    return _normalize_context_prefix(raw_stem)
+
+
 def _context_prefix_from_ref(ref: Any) -> str | None:
     raw_prefix = getattr(ref, "_contextualize_context_prefix", None)
     if not isinstance(raw_prefix, str):
         return None
     return _normalize_context_prefix(raw_prefix)
+
+
+def _context_sidecar_stem_from_ref(ref: Any) -> str | None:
+    raw_stem = getattr(ref, "_contextualize_context_sidecar_stem", None)
+    if not isinstance(raw_stem, str):
+        return None
+    return _normalize_context_prefix(raw_stem)
 
 
 def _normalize_context_prefix(value: str) -> str | None:
@@ -1514,6 +1528,41 @@ def _join_context_subpath(prefix: str | None, subpath: str) -> str:
     if clean_prefix:
         return f"{clean_prefix}/{clean_subpath}"
     return clean_subpath
+
+
+def _plugin_slug_from_source_type(source_type: str | None) -> str | None:
+    if not source_type or not source_type.startswith("plugin:"):
+        return None
+    return _sanitize_path_segment(
+        source_type.replace("plugin:", "", 1), fallback="plugin"
+    )
+
+
+def _sidecar_context_subpath(
+    stem: str | None,
+    subpath: str,
+    *,
+    source_type: str | None = None,
+) -> str:
+    clean_stem = _normalize_context_prefix(stem) if stem else None
+    if clean_stem is None:
+        return _join_context_subpath(None, subpath)
+    if clean_stem.endswith(".md"):
+        clean_stem = clean_stem[:-3]
+
+    clean_subpath = _normalize_context_prefix(subpath) or "item"
+    leaf = Path(clean_subpath).name or "item"
+    if leaf.endswith(".md"):
+        leaf = leaf[:-3]
+    sidecar = _sanitize_path_segment(leaf, fallback="item")
+    plugin_slug = _plugin_slug_from_source_type(source_type)
+    if (
+        plugin_slug is not None
+        and not sidecar.startswith(f"{plugin_slug}-")
+        and not (plugin_slug == "arena" and sidecar.startswith("attachment-"))
+    ):
+        sidecar = f"{plugin_slug}-{sidecar}"
+    return f"{clean_stem}.{sidecar}.md"
 
 
 def _plugin_context_subpath(
@@ -1549,6 +1598,11 @@ def _plugin_context_subpath(
             base = f"{alias_prefix}{suffix}"
         else:
             base = f"{alias_prefix}/{base}"
+    sidecar_stem = _context_sidecar_stem_from_metadata(metadata)
+    if sidecar_stem is not None:
+        return _sidecar_context_subpath(
+            sidecar_stem, base, source_type=source_type
+        )
     return _join_context_subpath(_context_prefix_from_metadata(metadata), base)
 
 
@@ -1665,11 +1719,19 @@ def _resolve_external_items_via_refs(
         ref_path_raw = getattr(ref, "path", None) or getattr(ref, "url", None)
         ref_content = getattr(ref, "file_content", None)
         ref_context_prefix = _context_prefix_from_ref(ref)
+        ref_sidecar_stem = _context_sidecar_stem_from_ref(ref)
         http_target = ref_path_raw if isinstance(ref_path_raw, str) else target
         if is_http_url(http_target):
             origin, url_path = _split_url_path(http_target)
             context_path = _apply_filename_hint(url_path, alias)
-            context_path = _join_context_subpath(ref_context_prefix, context_path)
+            if ref_sidecar_stem is not None:
+                context_path = _sidecar_context_subpath(
+                    ref_sidecar_stem, context_path
+                )
+            else:
+                context_path = _join_context_subpath(
+                    ref_context_prefix, context_path
+                )
             items.append(
                 ResolvedItem(
                     source_type="http",
@@ -1686,7 +1748,16 @@ def _resolve_external_items_via_refs(
         if isinstance(ref_path_raw, str) and isinstance(ref_content, str):
             source_path = Path(ref_path_raw).name or "item"
             context_path = _apply_filename_hint(source_path, alias)
-            context_path = _join_context_subpath(ref_context_prefix, context_path)
+            if ref_sidecar_stem is not None:
+                context_path = _sidecar_context_subpath(
+                    ref_sidecar_stem,
+                    context_path,
+                    source_type="plugin:materialized",
+                )
+            else:
+                context_path = _join_context_subpath(
+                    ref_context_prefix, context_path
+                )
             items.append(
                 ResolvedItem(
                     source_type="plugin:materialized",
