@@ -13,8 +13,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlparse
+
+from ..progress import record_progress
 
 
 class MarkItDownConversionError(RuntimeError):
@@ -205,6 +208,13 @@ class _ImageProviderSelection:
     effective_provider: str
     app_server_live: bool
     app_server_error: str | None
+
+
+_IMAGE_PROVIDER_SELECTION_CACHE: dict[
+    tuple[str, str],
+    _ImageProviderSelection,
+] = {}
+_IMAGE_PROVIDER_SELECTION_LOCK = threading.Lock()
 
 
 def _postprocess_image_markdown(markdown: str) -> str:
@@ -899,44 +909,59 @@ def _resolve_image_provider(
         if requested_mode in _IMAGE_PROVIDER_MODES
         else _DEFAULT_IMAGE_PROVIDER_MODE
     )
+    cache_key = (normalized_mode, app_server_command)
+    with _IMAGE_PROVIDER_SELECTION_LOCK:
+        cached_selection = _IMAGE_PROVIDER_SELECTION_CACHE.get(cache_key)
+    if cached_selection is not None:
+        return cached_selection
+
     if normalized_mode == "openrouter":
         _verbose_log(
             "  image provider selection: mode=openrouter -> provider=openrouter"
         )
-        return _ImageProviderSelection(
+        selection = _ImageProviderSelection(
             requested_mode=normalized_mode,
             effective_provider="openrouter",
             app_server_live=False,
             app_server_error=None,
         )
+        with _IMAGE_PROVIDER_SELECTION_LOCK:
+            _IMAGE_PROVIDER_SELECTION_CACHE[cache_key] = selection
+        return selection
 
-    from .codex import is_codex_app_server_live
+    from .codex import is_shared_codex_app_server_live
 
     _verbose_log(
         "  probing codex app-server for image descriptions: "
         f"mode={normalized_mode} command={app_server_command!r}"
     )
-    is_live, error = is_codex_app_server_live(app_server_command)
+    is_live, error = is_shared_codex_app_server_live(app_server_command)
     if is_live:
         _verbose_log(
             f"  image provider selection: mode={normalized_mode} -> provider=app-server"
         )
-        return _ImageProviderSelection(
+        selection = _ImageProviderSelection(
             requested_mode=normalized_mode,
             effective_provider="app-server",
             app_server_live=True,
             app_server_error=None,
         )
+        with _IMAGE_PROVIDER_SELECTION_LOCK:
+            _IMAGE_PROVIDER_SELECTION_CACHE[cache_key] = selection
+        return selection
     _verbose_log(
         "  image provider selection: "
         f"mode={normalized_mode} -> provider=openrouter (app-server unavailable: {error})"
     )
-    return _ImageProviderSelection(
+    selection = _ImageProviderSelection(
         requested_mode=normalized_mode,
         effective_provider="openrouter",
         app_server_live=False,
         app_server_error=error,
     )
+    with _IMAGE_PROVIDER_SELECTION_LOCK:
+        _IMAGE_PROVIDER_SELECTION_CACHE[cache_key] = selection
+    return selection
 
 
 def _app_server_image_text_from_path(
@@ -949,7 +974,7 @@ def _app_server_image_text_from_path(
 ) -> str:
     from .codex import (
         CodexAppServerError,
-        describe_image_with_codex_app_server,
+        describe_image_with_shared_codex_app_server,
     )
 
     requested_model = _resolve_app_server_request_model(model)
@@ -960,7 +985,7 @@ def _app_server_image_text_from_path(
         f"model={requested_model} effort={effort} endpoint=turn/start"
     )
     try:
-        description_result = describe_image_with_codex_app_server(
+        description_result = describe_image_with_shared_codex_app_server(
             image_path,
             prompt=prompt,
             command=app_server_command,
@@ -977,7 +1002,7 @@ def _app_server_image_text_from_path(
                 "  codex app-server rejected requested model; retrying with default: "
                 f"model={_DEFAULT_CODEX_APP_SERVER_MODEL} effort={effort}"
             )
-            description_result = describe_image_with_codex_app_server(
+            description_result = describe_image_with_shared_codex_app_server(
                 image_path,
                 prompt=prompt,
                 command=app_server_command,
@@ -987,6 +1012,12 @@ def _app_server_image_text_from_path(
             )
         else:
             raise
+    record_progress(
+        "codex-app-server",
+        "image-description",
+        "processed",
+        target=image_path.name,
+    )
     if description_result.rerouted_to_model:
         from_model = description_result.rerouted_from_model or requested_model
         reason = description_result.reroute_reason or "unspecified"
@@ -1295,8 +1326,10 @@ def _image_cache_lookup(
             if requires_llm_description and not _HAS_LLM_DESCRIPTION_RE.search(
                 cached_markdown
             ):
+                record_progress("markitdown", "image-cache", "cache_miss")
                 return key, None
             title = cached_title if isinstance(cached_title, str) else None
+            record_progress("markitdown", "image-cache", "cache_hit")
             return (
                 key,
                 MarkItDownResult(
@@ -1304,6 +1337,7 @@ def _image_cache_lookup(
                     title=title,
                 ),
             )
+    record_progress("markitdown", "image-cache", "cache_miss")
     return key, None
 
 
@@ -1464,7 +1498,7 @@ def _app_server_pdf_batch_texts_from_pages(
 ) -> list[str]:
     from .codex import (
         CodexAppServerError,
-        transcribe_image_batches_with_codex_app_server,
+        transcribe_image_batches_with_shared_codex_app_server,
     )
 
     batches = _chunks(page_paths, batch_size)
@@ -1481,7 +1515,7 @@ def _app_server_pdf_batch_texts_from_pages(
         f"batches={len(batches)} batch_size={batch_size}"
     )
     try:
-        results = transcribe_image_batches_with_codex_app_server(
+        results = transcribe_image_batches_with_shared_codex_app_server(
             batches,
             prompts=prompts,
             command=app_server_command,
@@ -1499,7 +1533,7 @@ def _app_server_pdf_batch_texts_from_pages(
                 f"model={_DEFAULT_CODEX_APP_SERVER_MODEL} effort={effort}"
             )
             try:
-                results = transcribe_image_batches_with_codex_app_server(
+                results = transcribe_image_batches_with_shared_codex_app_server(
                     batches,
                     prompts=prompts,
                     command=app_server_command,
@@ -1518,6 +1552,7 @@ def _app_server_pdf_batch_texts_from_pages(
                 f"{_page_range_label(batches[0])}: {exc}"
             ) from exc
 
+    record_progress("codex-app-server", "pdf-ocr", "processed", count=len(batches))
     for result in results:
         if result.rerouted_to_model:
             from_model = result.rerouted_from_model or requested_model
