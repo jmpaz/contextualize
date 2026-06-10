@@ -10,6 +10,7 @@ from .resolve import (
     list_plugin_targets,
     loaded_plugin_names,
     normalize_manifest_plugin_config,
+    plugin_target_provider,
     resolve_plugin_references,
 )
 
@@ -20,6 +21,7 @@ __all__ = [
     "classify_plugin_target",
     "list_plugin_targets",
     "normalize_manifest_plugin_config",
+    "plugin_target_provider",
     "loaded_plugin_names",
     "sync_plugin_cli_commands",
     "collect_plugin_cli_overrides",

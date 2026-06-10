@@ -257,39 +257,58 @@ def test_injected_http_target_uses_plugin_and_inherits_cache_flags(
     )
 
 
-def test_embedded_target_materialization_uses_normal_file_resolver(
+
+def test_embedded_resolution_materialization_uses_normal_file_resolver(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _reset_plugin_env(monkeypatch, tmp_path)
 
-    class _EmbeddedEntrypoint:
-        name = "embedded"
-        value = "contextualize_plugins.embedded:plugin"
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
 
         def load(self):
             plugin = types.SimpleNamespace()
             plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_NAME = "arena"
             plugin.PLUGIN_PRIORITY = 500
             plugin.can_resolve = lambda target, _context: target.startswith(
-                ("root://", "asset://")
+                ("root://", "asset://", "https://www.are.na/block/")
             )
 
             def resolve(target: str, _context: dict[str, object]) -> list[dict]:
-                if target.startswith("root://"):
-                    raise AssertionError("parent should not be resolved")
+                if target == "root://channel":
+                    return [
+                        {
+                            "source": target,
+                            "label": "entry.md",
+                            "content": "entry content",
+                            "metadata": {
+                                "provider": "arena",
+                                "block_id": 42,
+                                "block_type": "Link",
+                                "channel_path": "channels/root",
+                                "context_subpath": "channels/root/42.md",
+                            },
+                        }
+                    ]
                 return []
 
+            def list_targets(target: str, _context: dict[str, object]) -> dict:
+                if target != "https://www.are.na/block/42":
+                    return {"targets": []}
+                return {
+                    "targets": [
+                        {
+                            "target": "asset://child",
+                            "label": "child.md",
+                            "kind": "attachment:text",
+                        }
+                    ]
+                }
+
             plugin.resolve = resolve
-            plugin.list_targets = lambda _target, _context: {
-                "targets": [
-                    {
-                        "target": "asset://child",
-                        "label": "child.md",
-                        "kind": "attachment:text",
-                    }
-                ]
-            }
+            plugin.list_targets = list_targets
             plugin.materialize = lambda _target, _context: [
                 {
                     "source": "asset://child",
@@ -302,46 +321,270 @@ def test_embedded_target_materialization_uses_normal_file_resolver(
             return plugin
 
     monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_ArenaEntrypoint()]
     )
     clear_loaded_plugins_cache()
 
     result = create_file_references(
-        ["root://thread"],
+        ["root://channel"],
         format="raw",
-        target_depth=1,
-        include_parent=False,
+        embedded_resolution=True,
     )
 
-    assert result["concatenated"] == "child content"
+    assert result["concatenated"] == "entry content\n\nchild content"
 
 
-def test_embedded_target_resolves_plugin_claimed_child_without_materialization(
+def test_embedded_resolution_lists_direct_plugin_parent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _reset_plugin_env(monkeypatch, tmp_path)
+    listed: list[str] = []
 
-    class _EmbeddedEntrypoint:
-        name = "embedded"
-        value = "contextualize_plugins.embedded:plugin"
+    class _DirectEntrypoint:
+        name = "direct"
+        value = "contextualize_plugins.direct:plugin"
 
         def load(self):
             plugin = types.SimpleNamespace()
             plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_NAME = "direct"
             plugin.PLUGIN_PRIORITY = 500
             plugin.can_resolve = lambda target, _context: target.startswith(
-                ("root://", "child://")
+                ("direct://", "asset://")
             )
 
             def resolve(target: str, _context: dict[str, object]) -> list[dict]:
-                if target.startswith("root://"):
-                    raise AssertionError("parent should not be resolved")
+                if target != "direct://message":
+                    return []
                 return [
                     {
                         "source": target,
-                        "label": "child.md",
-                        "content": "child content",
+                        "label": "message.md",
+                        "content": "message content",
+                        "metadata": {
+                            "provider": "direct",
+                            "context_subpath": "messages/message.md",
+                        },
+                    }
+                ]
+
+            def list_targets(target: str, _context: dict[str, object]) -> dict:
+                listed.append(target)
+                return {
+                    "targets": [
+                        {
+                            "target": "asset://attachment",
+                            "label": "attachment.md",
+                        }
+                    ]
+                }
+
+            plugin.resolve = resolve
+            plugin.list_targets = list_targets
+            plugin.materialize = lambda _target, _context: [
+                {
+                    "source": "asset://attachment",
+                    "label": "attachment.md",
+                    "filename": "attachment.md",
+                    "content": b"attachment content",
+                    "content_type": "text/markdown",
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_DirectEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["direct://message"],
+        format="raw",
+        embedded_resolution=True,
+    )
+
+    assert listed == ["direct://message"]
+    assert result["concatenated"] == "message content\n\nattachment content"
+
+
+def test_embedded_resolution_text_only_materialized_audio_is_transcribed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+    transcribed: list[str] = []
+
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "arena"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "asset://", "https://www.are.na/block/")
+            )
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target != "root://channel":
+                    return []
+                return [
+                    {
+                        "source": target,
+                        "label": "entry.md",
+                        "content": "entry content",
+                        "metadata": {
+                            "provider": "arena",
+                            "block_id": 42,
+                            "block_type": "Attachment",
+                            "channel_path": "channels/root",
+                            "context_subpath": "channels/root/42.md",
+                        },
+                    }
+                ]
+
+            plugin.resolve = resolve
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [{"target": "asset://child", "label": "child.mp3"}]
+            }
+            plugin.materialize = lambda _target, _context: [
+                {
+                    "source": "asset://child",
+                    "label": "child.mp3",
+                    "filename": "child.mp3",
+                    "content": b"\xffaudio",
+                    "content_type": "audio/mpeg",
+                }
+            ]
+            return plugin
+
+    def _transcribe(path: str | Path, **_kwargs) -> str:
+        transcribed.append(Path(path).name)
+        return "audio transcript"
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_ArenaEntrypoint()]
+    )
+    monkeypatch.setattr(
+        "contextualize.references.file.transcribe_media_file", _transcribe
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://channel"],
+        format="raw",
+        embedded_resolution=True,
+        text_only=True,
+    )
+
+    captured = capsys.readouterr()
+    assert result["concatenated"] == "entry content\n\naudio transcript"
+    assert transcribed == ["child.mp3"]
+    assert captured.err == ""
+
+
+def test_embedded_resolution_materialized_unknown_binary_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "arena"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "asset://", "https://www.are.na/block/")
+            )
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target != "root://channel":
+                    return []
+                return [
+                    {
+                        "source": target,
+                        "label": "entry.md",
+                        "content": "entry content",
+                        "metadata": {
+                            "provider": "arena",
+                            "block_id": 42,
+                            "block_type": "Attachment",
+                            "channel_path": "channels/root",
+                            "context_subpath": "channels/root/42.md",
+                        },
+                    }
+                ]
+
+            plugin.resolve = resolve
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [{"target": "asset://child", "label": "child.bin"}]
+            }
+            plugin.materialize = lambda _target, _context: [
+                {
+                    "source": "asset://child",
+                    "label": "child.bin",
+                    "filename": "child.bin",
+                    "content": b"\xff\x00binary",
+                    "content_type": "application/octet-stream",
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_ArenaEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://channel"],
+        format="raw",
+        embedded_resolution=True,
+        text_only=True,
+    )
+
+    captured = capsys.readouterr()
+    assert result["concatenated"] == "entry content"
+    assert captured.err == ""
+
+
+def test_embedded_resolution_resolves_plugin_claimed_child_without_materialization(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "arena"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "https://www.are.na/block/")
+            )
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target != "root://channel":
+                    return []
+                return [
+                    {
+                        "source": target,
+                        "label": "entry.md",
+                        "content": "entry content",
+                        "metadata": {
+                            "provider": "arena",
+                            "block_id": 42,
+                            "block_type": "Link",
+                            "channel_path": "channels/root",
+                            "context_subpath": "channels/root/42.md",
+                        },
                     }
                 ]
 
@@ -349,156 +592,184 @@ def test_embedded_target_resolves_plugin_claimed_child_without_materialization(
             plugin.list_targets = lambda _target, _context: {
                 "targets": [{"target": "child://one", "label": "child.md"}]
             }
+            return plugin
+
+    class _ChildEntrypoint:
+        name = "child"
+        value = "contextualize_plugins.child:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "child"
+            plugin.PLUGIN_PRIORITY = 600
+            plugin.can_resolve = lambda target, _context: target.startswith("child://")
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "child.md",
+                    "content": "child content",
+                }
+            ]
             plugin.materialize = lambda _target, _context: pytest.fail(
                 "resolved plugin children should not be materialized"
             )
             return plugin
 
     monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [_ArenaEntrypoint(), _ChildEntrypoint()],
     )
     clear_loaded_plugins_cache()
 
     result = create_file_references(
-        ["root://thread"],
+        ["root://channel"],
         format="raw",
-        target_depth=1,
-        include_parent=False,
+        embedded_resolution=True,
     )
 
-    assert result["concatenated"] == "child content"
+    assert result["concatenated"] == "entry content\n\nchild content"
 
 
-def test_embedded_target_depth_skips_non_traversable_items(
+def test_embedded_resolution_does_not_recurse_child_targets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _reset_plugin_env(monkeypatch, tmp_path)
 
-    class _EmbeddedEntrypoint:
-        name = "embedded"
-        value = "contextualize_plugins.embedded:plugin"
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
 
         def load(self):
             plugin = types.SimpleNamespace()
             plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_NAME = "arena"
             plugin.PLUGIN_PRIORITY = 500
             plugin.can_resolve = lambda target, _context: target.startswith(
-                ("root://", "block://", "channel://")
+                ("root://", "https://www.are.na/block/")
             )
 
             def resolve(target: str, _context: dict[str, object]) -> list[dict]:
-                if target.startswith("root://") or target.startswith("channel://"):
-                    raise AssertionError(f"unexpected target resolution: {target}")
+                if target != "root://channel":
+                    return []
                 return [
                     {
                         "source": target,
-                        "label": target.removeprefix("block://") + ".md",
-                        "content": target.removeprefix("block://") + " content",
+                        "label": "entry.md",
+                        "content": "entry content",
+                        "metadata": {
+                            "provider": "arena",
+                            "block_id": 42,
+                            "block_type": "Link",
+                            "channel_path": "channels/root",
+                            "context_subpath": "channels/root/42.md",
+                        },
                     }
                 ]
-
-            def list_targets(target: str, _context: dict[str, object]) -> dict:
-                if target == "root://thread":
-                    return {
-                        "targets": [
-                            {"target": "block://child", "label": "child.md"},
-                            {
-                                "target": "channel://nested",
-                                "label": "nested",
-                                "kind": "channel",
-                                "traverse": False,
-                            },
-                        ]
-                    }
-                if target == "block://child":
-                    return {
-                        "targets": [
-                            {"target": "block://grandchild", "label": "grandchild.md"}
-                        ]
-                    }
-                return {"targets": []}
 
             plugin.resolve = resolve
-            plugin.list_targets = list_targets
-            return plugin
-
-    monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
-    )
-    clear_loaded_plugins_cache()
-
-    result = create_file_references(
-        ["root://thread"],
-        format="raw",
-        target_depth=2,
-        include_parent=False,
-    )
-
-    assert result["concatenated"] == "child content\n\ngrandchild content"
-
-
-def test_embedded_target_skips_unclaimed_plain_http_link(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _reset_plugin_env(monkeypatch, tmp_path)
-
-    class _EmbeddedEntrypoint:
-        name = "embedded"
-        value = "contextualize_plugins.embedded:plugin"
-
-        def load(self):
-            plugin = types.SimpleNamespace()
-            plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "embedded"
-            plugin.PLUGIN_PRIORITY = 500
-            plugin.can_resolve = lambda target, _context: target.startswith("root://")
-            plugin.resolve = lambda _target, _context: []
             plugin.list_targets = lambda _target, _context: {
-                "targets": [
-                    {
-                        "target": "https://x.com/example/status/1?s=20",
-                        "label": "tweet",
-                    }
-                ]
+                "targets": [{"target": "child://one", "label": "child.md"}]
             }
             return plugin
 
-    def _url_reference(*_args, **_kwargs):
-        raise AssertionError("plain embedded links should not be fetched directly")
-
-    monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
-    )
-    monkeypatch.setattr(reference_factory, "URLReference", _url_reference)
-    clear_loaded_plugins_cache()
-
-    result = create_file_references(
-        ["root://thread"],
-        format="raw",
-        target_depth=1,
-        include_parent=False,
-    )
-
-    assert result["concatenated"] == ""
-
-
-def test_embedded_target_allows_file_like_http_link(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _reset_plugin_env(monkeypatch, tmp_path)
-
-    class _EmbeddedEntrypoint:
-        name = "embedded"
-        value = "contextualize_plugins.embedded:plugin"
+    class _ChildEntrypoint:
+        name = "child"
+        value = "contextualize_plugins.child:plugin"
 
         def load(self):
             plugin = types.SimpleNamespace()
             plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_NAME = "child"
+            plugin.PLUGIN_PRIORITY = 600
+            plugin.can_resolve = lambda target, _context: target.startswith("child://")
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "child.md",
+                    "content": "child content",
+                }
+            ]
+            plugin.list_targets = lambda _target, _context: {
+                "targets": [{"target": "grandchild://one", "label": "grandchild.md"}]
+            }
+            return plugin
+
+    class _GrandchildEntrypoint:
+        name = "grandchild"
+        value = "contextualize_plugins.grandchild:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "grandchild"
+            plugin.PLUGIN_PRIORITY = 700
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                "grandchild://"
+            )
+            plugin.resolve = lambda _target, _context: [
+                {
+                    "source": "grandchild://one",
+                    "label": "grandchild.md",
+                    "content": "grandchild content",
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [_ArenaEntrypoint(), _ChildEntrypoint(), _GrandchildEntrypoint()],
+    )
+    clear_loaded_plugins_cache()
+
+    result = create_file_references(
+        ["root://channel"],
+        format="raw",
+        embedded_resolution=True,
+    )
+
+    assert result["concatenated"] == "entry content\n\nchild content"
+
+
+def test_embedded_resolution_skips_unclaimed_http_link(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset_plugin_env(monkeypatch, tmp_path)
+
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "arena"
             plugin.PLUGIN_PRIORITY = 500
-            plugin.can_resolve = lambda target, _context: target.startswith("root://")
-            plugin.resolve = lambda _target, _context: []
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "https://www.are.na/block/")
+            )
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target != "root://channel":
+                    return []
+                return [
+                    {
+                        "source": target,
+                        "label": "entry.md",
+                        "content": "entry content",
+                        "metadata": {
+                            "provider": "arena",
+                            "block_id": 42,
+                            "block_type": "Link",
+                            "channel_path": "channels/root",
+                            "context_subpath": "channels/root/42.md",
+                        },
+                    }
+                ]
+
+            plugin.resolve = resolve
             plugin.list_targets = lambda _target, _context: {
                 "targets": [
                     {
@@ -509,22 +780,19 @@ def test_embedded_target_allows_file_like_http_link(
             }
             return plugin
 
-    class _URLReference:
-        def __init__(self, url: str, **_kwargs) -> None:
-            assert url == "https://files.example/paper.pdf?download=1"
-            self.output = "pdf content"
+    def _url_reference(*_args, **_kwargs):
+        raise AssertionError("embedded resolution should not fetch unclaimed links")
 
     monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_ArenaEntrypoint()]
     )
-    monkeypatch.setattr(reference_factory, "URLReference", _URLReference)
+    monkeypatch.setattr(reference_factory, "URLReference", _url_reference)
     clear_loaded_plugins_cache()
 
     result = create_file_references(
-        ["root://thread"],
+        ["root://channel"],
         format="raw",
-        target_depth=1,
-        include_parent=False,
+        embedded_resolution=True,
     )
 
-    assert result["concatenated"] == "pdf content"
+    assert result["concatenated"] == "entry content"
