@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 from collections import deque
 from pathlib import Path
 from queue import Empty, Queue
@@ -247,6 +248,121 @@ class _CodexAppServerClient:
             return
 
 
+class _SharedCodexAppServerSession:
+    def __init__(self, command: str) -> None:
+        self._command = command
+        self._lock = threading.Lock()
+        self._client: _CodexAppServerClient | None = None
+
+    def close(self) -> None:
+        with self._lock:
+            client = self._client
+            self._client = None
+            if client is not None:
+                client.close()
+
+    def probe(self, *, timeout_seconds: float) -> None:
+        with self._lock:
+            client = self._ensure_client(
+                startup_timeout_seconds=timeout_seconds,
+                request_timeout_seconds=timeout_seconds,
+            )
+            client.request("model/list", params={"includeHidden": False})
+
+    def describe_image(
+        self,
+        image_path: Path,
+        *,
+        prompt: str,
+        model: str | None,
+        effort: str | None,
+        timeout_seconds: float,
+    ) -> CodexImageDescriptionResult:
+        with self._lock:
+            client = self._ensure_client(
+                startup_timeout_seconds=min(10.0, timeout_seconds),
+                request_timeout_seconds=timeout_seconds,
+            )
+            return _describe_image_with_client(
+                client,
+                image_path,
+                prompt=prompt,
+                model=model,
+                effort=effort,
+                timeout_seconds=timeout_seconds,
+            )
+
+    def transcribe_image_batches(
+        self,
+        image_batches: list[list[Path]],
+        *,
+        prompts: list[str],
+        model: str | None,
+        effort: str | None,
+        timeout_seconds: float,
+    ) -> list[CodexImageDescriptionResult]:
+        with self._lock:
+            client = self._ensure_client(
+                startup_timeout_seconds=min(10.0, timeout_seconds),
+                request_timeout_seconds=timeout_seconds,
+            )
+            return _transcribe_image_batches_with_client(
+                client,
+                image_batches,
+                prompts=prompts,
+                model=model,
+                effort=effort,
+                timeout_seconds=timeout_seconds,
+            )
+
+    def _ensure_client(
+        self,
+        *,
+        startup_timeout_seconds: float,
+        request_timeout_seconds: float,
+    ) -> _CodexAppServerClient:
+        if self._client is not None:
+            return self._client
+        client = _CodexAppServerClient(
+            command=self._command,
+            startup_timeout_seconds=startup_timeout_seconds,
+            request_timeout_seconds=request_timeout_seconds,
+        )
+        try:
+            client.start()
+            client.initialize()
+        except Exception:
+            client.close()
+            raise
+        self._client = client
+        return client
+
+
+_SHARED_SESSIONS: dict[str, _SharedCodexAppServerSession] = {}
+_SHARED_SESSIONS_LOCK = threading.Lock()
+
+
+def close_shared_codex_app_server_sessions() -> None:
+    with _SHARED_SESSIONS_LOCK:
+        sessions = list(_SHARED_SESSIONS.values())
+        _SHARED_SESSIONS.clear()
+    for session in sessions:
+        session.close()
+
+
+atexit.register(close_shared_codex_app_server_sessions)
+
+
+def _shared_session(command: str) -> _SharedCodexAppServerSession:
+    key = " ".join(_split_command(command))
+    with _SHARED_SESSIONS_LOCK:
+        session = _SHARED_SESSIONS.get(key)
+        if session is None:
+            session = _SharedCodexAppServerSession(command)
+            _SHARED_SESSIONS[key] = session
+        return session
+
+
 def _split_command(command: str) -> tuple[str, ...]:
     raw = command.strip()
     if not raw:
@@ -314,6 +430,22 @@ def is_codex_app_server_live(
     return True, None
 
 
+def is_shared_codex_app_server_live(
+    command: str,
+    *,
+    timeout_seconds: float = 8.0,
+) -> tuple[bool, str | None]:
+    session: _SharedCodexAppServerSession | None = None
+    try:
+        session = _shared_session(command)
+        session.probe(timeout_seconds=timeout_seconds)
+    except CodexAppServerError as exc:
+        if session is not None:
+            session.close()
+        return False, str(exc)
+    return True, None
+
+
 def describe_image_with_codex_app_server(
     image_path: Path,
     *,
@@ -331,26 +463,38 @@ def describe_image_with_codex_app_server(
         request_timeout_seconds=timeout_seconds,
     ) as client:
         client.initialize()
-        start_params: dict[str, Any] = {"cwd": str(Path.cwd()), "ephemeral": True}
-        thread_id = _thread_id(client.request("thread/start", params=start_params))
-        input_items: list[dict[str, Any]] = [
-            {"type": "text", "text": prompt},
-            {"type": "localImage", "path": str(image_path)},
-        ]
-        turn_params: dict[str, Any] = {"threadId": thread_id, "input": input_items}
-        model_name = (model or "").strip()
-        effort_name = (effort or "").strip()
-        if model_name:
-            turn_params["model"] = model_name
-        if effort_name:
-            turn_params["effort"] = effort_name
-        turn_id = _turn_id(client.request("turn/start", params=turn_params))
-        return _collect_turn_text(
+        return _describe_image_with_client(
             client,
-            turn_id=turn_id,
+            image_path,
+            prompt=prompt,
+            model=model,
+            effort=effort,
             timeout_seconds=timeout_seconds,
-            requested_model=model_name or None,
         )
+
+
+def describe_image_with_shared_codex_app_server(
+    image_path: Path,
+    *,
+    prompt: str,
+    command: str,
+    model: str | None = None,
+    effort: str | None = None,
+    timeout_seconds: float = 30.0,
+) -> CodexImageDescriptionResult:
+    if not image_path.exists():
+        raise CodexAppServerError(f"Image path does not exist: {image_path}")
+    try:
+        return _shared_session(command).describe_image(
+            image_path,
+            prompt=prompt,
+            model=model,
+            effort=effort,
+            timeout_seconds=timeout_seconds,
+        )
+    except CodexAppServerError:
+        _shared_session(command).close()
+        raise
 
 
 def transcribe_image_batches_with_codex_app_server(
@@ -362,52 +506,127 @@ def transcribe_image_batches_with_codex_app_server(
     effort: str | None = None,
     timeout_seconds: float = 30.0,
 ) -> list[CodexImageDescriptionResult]:
-    if len(image_batches) != len(prompts):
-        raise CodexAppServerError("Image batch and prompt counts do not match")
-    if not image_batches:
-        return []
-    for batch in image_batches:
-        if not batch:
-            raise CodexAppServerError("Image batch cannot be empty")
-        for image_path in batch:
-            if not image_path.exists():
-                raise CodexAppServerError(f"Image path does not exist: {image_path}")
-
-    results: list[CodexImageDescriptionResult] = []
+    _validate_image_batches(image_batches, prompts)
     with _CodexAppServerClient(
         command=command,
         startup_timeout_seconds=min(10.0, timeout_seconds),
         request_timeout_seconds=timeout_seconds,
     ) as client:
         client.initialize()
-        start_params: dict[str, Any] = {"cwd": str(Path.cwd()), "ephemeral": True}
-        thread_id = _thread_id(client.request("thread/start", params=start_params))
-        model_name = (model or "").strip()
-        effort_name = (effort or "").strip()
-        for batch, prompt in zip(image_batches, prompts, strict=True):
-            input_items: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-            input_items.extend(
-                {"type": "localImage", "path": str(image_path)}
-                for image_path in batch
+        return _transcribe_image_batches_with_client(
+            client,
+            image_batches,
+            prompts=prompts,
+            model=model,
+            effort=effort,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+def transcribe_image_batches_with_shared_codex_app_server(
+    image_batches: list[list[Path]],
+    *,
+    prompts: list[str],
+    command: str,
+    model: str | None = None,
+    effort: str | None = None,
+    timeout_seconds: float = 30.0,
+) -> list[CodexImageDescriptionResult]:
+    _validate_image_batches(image_batches, prompts)
+    try:
+        return _shared_session(command).transcribe_image_batches(
+            image_batches,
+            prompts=prompts,
+            model=model,
+            effort=effort,
+            timeout_seconds=timeout_seconds,
+        )
+    except CodexAppServerError:
+        _shared_session(command).close()
+        raise
+
+
+def _describe_image_with_client(
+    client: _CodexAppServerClient,
+    image_path: Path,
+    *,
+    prompt: str,
+    model: str | None,
+    effort: str | None,
+    timeout_seconds: float,
+) -> CodexImageDescriptionResult:
+    start_params: dict[str, Any] = {"cwd": str(Path.cwd()), "ephemeral": True}
+    thread_id = _thread_id(client.request("thread/start", params=start_params))
+    input_items: list[dict[str, Any]] = [
+        {"type": "text", "text": prompt},
+        {"type": "localImage", "path": str(image_path)},
+    ]
+    turn_params: dict[str, Any] = {"threadId": thread_id, "input": input_items}
+    model_name = (model or "").strip()
+    effort_name = (effort or "").strip()
+    if model_name:
+        turn_params["model"] = model_name
+    if effort_name:
+        turn_params["effort"] = effort_name
+    turn_id = _turn_id(client.request("turn/start", params=turn_params))
+    return _collect_turn_text(
+        client,
+        turn_id=turn_id,
+        timeout_seconds=timeout_seconds,
+        requested_model=model_name or None,
+    )
+
+
+def _transcribe_image_batches_with_client(
+    client: _CodexAppServerClient,
+    image_batches: list[list[Path]],
+    *,
+    prompts: list[str],
+    model: str | None,
+    effort: str | None,
+    timeout_seconds: float,
+) -> list[CodexImageDescriptionResult]:
+    if not image_batches:
+        return []
+    results: list[CodexImageDescriptionResult] = []
+    start_params: dict[str, Any] = {"cwd": str(Path.cwd()), "ephemeral": True}
+    thread_id = _thread_id(client.request("thread/start", params=start_params))
+    model_name = (model or "").strip()
+    effort_name = (effort or "").strip()
+    for batch, prompt in zip(image_batches, prompts, strict=True):
+        input_items: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        input_items.extend(
+            {"type": "localImage", "path": str(image_path)} for image_path in batch
+        )
+        turn_params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": input_items,
+        }
+        if model_name:
+            turn_params["model"] = model_name
+        if effort_name:
+            turn_params["effort"] = effort_name
+        turn_id = _turn_id(client.request("turn/start", params=turn_params))
+        results.append(
+            _collect_turn_text(
+                client,
+                turn_id=turn_id,
+                timeout_seconds=timeout_seconds,
+                requested_model=model_name or None,
             )
-            turn_params: dict[str, Any] = {
-                "threadId": thread_id,
-                "input": input_items,
-            }
-            if model_name:
-                turn_params["model"] = model_name
-            if effort_name:
-                turn_params["effort"] = effort_name
-            turn_id = _turn_id(client.request("turn/start", params=turn_params))
-            results.append(
-                _collect_turn_text(
-                    client,
-                    turn_id=turn_id,
-                    timeout_seconds=timeout_seconds,
-                    requested_model=model_name or None,
-                )
-            )
+        )
     return results
+
+
+def _validate_image_batches(image_batches: list[list[Path]], prompts: list[str]) -> None:
+    if len(image_batches) != len(prompts):
+        raise CodexAppServerError("Image batch and prompt counts do not match")
+    for batch in image_batches:
+        if not batch:
+            raise CodexAppServerError("Image batch cannot be empty")
+        for image_path in batch:
+            if not image_path.exists():
+                raise CodexAppServerError(f"Image path does not exist: {image_path}")
 
 
 def _collect_turn_text(
