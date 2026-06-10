@@ -32,6 +32,7 @@ from contextualize.plugins.api import (
     TranscriptionRequest,
     TranscriptionResult,
 )
+from contextualize.progress import record_progress
 
 _AUDIO_SUFFIX_TO_MIME: dict[str, str] = {
     ".wav": "audio/wav",
@@ -177,12 +178,18 @@ def transcribe_media_bytes_result(
 ) -> TranscriptionResult:
     kind = _infer_media_kind(filename=filename, content_type=content_type)
     if kind == "audio":
+        suffix = Path(filename).suffix.lower() or ".audio"
         return _transcribe_audio_bytes(
             data,
             filename=filename,
             content_type=content_type or _guess_audio_content_type(filename),
             timeout=timeout,
             plugin_overrides=plugin_overrides,
+            use_cache=True,
+            refresh_cache=refresh_cache,
+            cache_source_sha256=_sha256_bytes(data),
+            cache_source_suffix=suffix,
+            cache_operation="audio-transcription",
         )
     if kind == "video":
         suffix = Path(filename).suffix.lower()
@@ -286,6 +293,7 @@ def _transcribe_video_file_result(
         cached_result = get_cached_local_media_transcript_result(cache_identity)
         if cached_result is not None:
             _log(f"video transcript cache hit for {media_path.name}")
+            record_progress("audio-transcription", "video-transcript", "cache_hit")
             return _result_from_cached_payload(
                 cached_result,
                 fallback_model="cached",
@@ -294,12 +302,14 @@ def _transcribe_video_file_result(
         cached = get_cached_local_media_transcript(cache_identity)
         if cached is not None:
             _log(f"video transcript cache hit for {media_path.name}")
+            record_progress("audio-transcription", "video-transcript", "cache_hit")
             return TranscriptionResult(
                 text=cached,
                 model="cached",
                 provider="cache",
             )
         _log(f"video transcript cache miss for {media_path.name}")
+        record_progress("audio-transcription", "video-transcript", "cache_miss")
 
     from contextualize.runtime import get_cache_only
 
@@ -322,6 +332,7 @@ def _transcribe_video_file_result(
             source_suffix=suffix,
         )
         _log(f"stored video transcript cache for {media_path.name}")
+        record_progress("audio-transcription", "video-transcript", "processed")
     return result
 
 
@@ -452,43 +463,37 @@ def _transcribe_audio_bytes(
                 },
             )
             if use_cache and not should_refresh:
-                cached_result = get_cached_local_media_transcript_result(cache_identity)
+                cached_result = _read_cached_transcription_result(
+                    cache_identity,
+                    provider=provider,
+                    request=request,
+                    filename=filename,
+                )
                 if cached_result is not None:
-                    _log(f"transcript cache hit for {filename} via {provider.name}")
-                    result = _result_from_cached_payload(
-                        cached_result,
-                        fallback_model=provider.name,
-                        fallback_provider=provider.name,
-                    )
-                    _record_transcription_result_metadata(
-                        request, result, filename=filename, source="transcript-cache"
-                    )
-                    return result
-                cached = get_cached_local_media_transcript(cache_identity)
-                if cached is not None:
-                    _log(f"transcript cache hit for {filename} via {provider.name}")
-                    _record_transcription_routing_metadata(
-                        request,
-                        provider=provider.name,
-                        model=_effective_provider_model(provider, request)
-                        or provider.name,
-                        filename=filename,
-                        source="transcript-cache",
-                    )
-                    return TranscriptionResult(
-                        text=cached,
-                        model=provider.name,
-                        provider=provider.name,
-                    )
+                    return cached_result
                 _log(f"transcript cache miss for {filename} via {provider.name}")
+                record_progress(provider.name, "transcript-cache", "cache_miss")
         if cache_only:
             continue
         try:
             _log(f"transcription request start for {filename} via {provider.name}")
+            record_progress(
+                provider.name,
+                "transcription",
+                "start",
+                target=filename,
+            )
             result = provider.transcribe(request)
             _log(
                 "transcription request finished "
                 f"for {filename} via {provider.name} model={result.model}"
+            )
+            record_progress(
+                provider.name,
+                "transcription",
+                "processed",
+                target=filename,
+                detail=f"model={result.model}",
             )
         except (
             TranscriptionProviderUnavailableError,
@@ -500,6 +505,16 @@ def _transcribe_audio_bytes(
             errors.append(str(exc))
             continue
         except TranscriptionProviderError as exc:
+            if cache_identity and use_cache and should_refresh:
+                cached_result = _read_stale_transcription_result_after_error(
+                    cache_identity,
+                    provider=provider,
+                    request=request,
+                    filename=filename,
+                    error=exc,
+                )
+                if cached_result is not None:
+                    return cached_result
             raise RuntimeError(str(exc)) from exc
 
         if cache_identity and use_cache and result.text.strip():
@@ -511,6 +526,7 @@ def _transcribe_audio_bytes(
                 source_suffix=cache_source_suffix,
             )
             _log(f"stored transcript cache for {filename} via {provider.name}")
+            record_progress(provider.name, "transcript-cache", "processed")
         _record_transcription_result_metadata(
             request, result, filename=filename, source="request"
         )
@@ -869,6 +885,93 @@ def _record_transcription_routing_metadata(
         language=request.language,
         filename=filename,
         source=source,
+    )
+
+
+def _read_cached_transcription_result(
+    cache_identity: str,
+    *,
+    provider: TranscriptionProvider,
+    request: TranscriptionRequest,
+    filename: str,
+) -> TranscriptionResult | None:
+    cached_result = get_cached_local_media_transcript_result(cache_identity)
+    if cached_result is not None:
+        _log(f"transcript cache hit for {filename} via {provider.name}")
+        record_progress(provider.name, "transcript-cache", "cache_hit")
+        result = _result_from_cached_payload(
+            cached_result,
+            fallback_model=provider.name,
+            fallback_provider=provider.name,
+        )
+        _record_transcription_result_metadata(
+            request, result, filename=filename, source="transcript-cache"
+        )
+        return result
+
+    cached = get_cached_local_media_transcript(cache_identity)
+    if cached is None:
+        return None
+
+    _log(f"transcript cache hit for {filename} via {provider.name}")
+    record_progress(provider.name, "transcript-cache", "cache_hit")
+    _record_transcription_routing_metadata(
+        request,
+        provider=provider.name,
+        model=_effective_provider_model(provider, request) or provider.name,
+        filename=filename,
+        source="transcript-cache",
+    )
+    return TranscriptionResult(
+        text=cached,
+        model=provider.name,
+        provider=provider.name,
+    )
+
+
+def _read_stale_transcription_result_after_error(
+    cache_identity: str,
+    *,
+    provider: TranscriptionProvider,
+    request: TranscriptionRequest,
+    filename: str,
+    error: TranscriptionProviderError,
+) -> TranscriptionResult | None:
+    if not _is_transient_transcription_error(error):
+        return None
+    cached_result = _read_cached_transcription_result(
+        cache_identity,
+        provider=provider,
+        request=request,
+        filename=filename,
+    )
+    if cached_result is None:
+        return None
+    _log(
+        "using stale transcript cache after refresh error "
+        f"for {filename} via {provider.name}: {error}"
+    )
+    return cached_result
+
+
+def _is_transient_transcription_error(error: TranscriptionProviderError) -> bool:
+    msg = str(error).lower()
+    return any(
+        token in msg
+        for token in (
+            "429",
+            "rate limit",
+            "queue is full",
+            "temporarily",
+            "timeout",
+            "timed out",
+            "connection",
+            "internal server",
+            "500",
+            "502",
+            "503",
+            "504",
+        )
     )
 
 

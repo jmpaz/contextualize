@@ -752,6 +752,7 @@ class URLReference:
                 media_kwargs = {
                     "filename": media_name,
                     "content_type": content_type or None,
+                    "refresh_cache": self.refresh_cache,
                 }
                 if self.plugin_overrides is not None:
                     media_kwargs["plugin_overrides"] = self.plugin_overrides
