@@ -303,6 +303,10 @@ class _RichProgressReporter:
             if target_total is not None:
                 state.total = target_total
                 state.completed = 0
+                state.counts = Counter()
+                state.item_count = 0
+                state.byte_count = 0
+                state.latest = ""
         elif event.outcome == "done":
             if event.operation in {"embedded-list", "embedded-resolve"}:
                 state.completed = state.total or state.completed
@@ -455,7 +459,6 @@ def _outcome_label(outcome: str) -> str:
     return {
         "cache_hit": "hit",
         "cache_miss": "miss",
-        "processed": "new",
         "failed": "fail",
     }.get(outcome, outcome)
 

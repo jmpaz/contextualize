@@ -100,3 +100,33 @@ def test_live_progress_uses_rich_task_rows(capsys) -> None:
     assert "  hydrate component: total=2 done=1" in progress_summary_lines()
     assert "  arena channel: cache_hit=1" in progress_summary_lines()
     reset_progress()
+
+
+def test_live_progress_resets_embedded_depth_counts(capsys) -> None:
+    reset_progress()
+    token = set_verbose_logging(True)
+    try:
+        set_live_progress(True, force_terminal=True, transient=False)
+        log_progress(
+            "plugins",
+            "embedded-resolve",
+            "start",
+            detail="depth=1/2 targets=1 jobs=2",
+        )
+        log_progress("plugins", "embedded-resolve", "processed", target="demo://a")
+        log_progress("plugins", "embedded-resolve", "done", detail="depth=1/2")
+        log_progress(
+            "plugins",
+            "embedded-resolve",
+            "start",
+            detail="depth=2/2 targets=3 jobs=2",
+        )
+        log_progress("plugins", "embedded-resolve", "processed", target="demo://b")
+    finally:
+        set_live_progress(False)
+        reset_verbose_logging(token)
+
+    captured = _strip_ansi(capsys.readouterr().err)
+    assert "1/3" in captured
+    assert "0/3 done=1" not in captured
+    reset_progress()

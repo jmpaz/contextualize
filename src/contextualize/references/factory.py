@@ -583,6 +583,7 @@ def _resolve_embedded_target_refs(
             list_tasks,
             max_workers=media_jobs,
             semaphore=media_task_semaphore(),
+            on_complete=_record_embedded_list_completion,
         )
         child_jobs: list[tuple[int, str]] = []
         encounter_index = 0
@@ -658,11 +659,23 @@ def _resolve_embedded_target_refs(
                 )
                 for index, child in child_jobs
             ]
+            child_targets = {index: child for index, child in child_jobs}
+
+            def _record_child_resolved(index, child_refs):
+                record_progress(
+                    "plugins",
+                    "embedded-resolve",
+                    "processed",
+                    target=child_targets.get(index),
+                    count=len(child_refs),
+                )
+
             resolved_total = 0
             for _, child_refs in run_indexed_tasks_fail_fast(
                 resolve_tasks,
                 max_workers=media_jobs,
                 semaphore=media_task_semaphore(),
+                on_complete=_record_child_resolved,
             ):
                 resolved_total += len(child_refs)
                 refs.extend(child_refs)
@@ -694,6 +707,12 @@ def _resolve_embedded_target_refs(
         if not frontier:
             break
     return refs
+
+
+def _record_embedded_list_completion(_index: int, result: Any) -> None:
+    target, _listed, error = result
+    if error is None:
+        record_progress("plugins", "embedded-list", "processed", target=target)
 
 
 def _list_embedded_targets_safely(
