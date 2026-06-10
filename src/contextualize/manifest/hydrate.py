@@ -17,9 +17,9 @@ from ..git.cache import ensure_repo, expand_git_paths
 from ..git.target import parse_git_target
 from ..git.rev import get_repo_root, read_gitignore_patterns
 from ..plugins import (
-    classify_plugin_target,
     loaded_plugin_names,
     normalize_manifest_plugin_config,
+    plugin_target_provider,
 )
 from ..plugins.reference import PluginReference
 from ..progress import log_progress
@@ -1197,10 +1197,7 @@ def _manifest_plugin_providers(components: list[dict[str, Any]]) -> set[str]:
             continue
         for file_spec in files:
             raw_spec, _ = coerce_file_spec(file_spec)
-            descriptor = classify_plugin_target(_plugin_target_from_spec(raw_spec))
-            if not isinstance(descriptor, dict):
-                continue
-            provider = descriptor.get("provider")
+            provider = plugin_target_provider(_plugin_target_from_spec(raw_spec))
             if isinstance(provider, str) and provider:
                 providers.add(provider)
     return providers
@@ -1383,7 +1380,7 @@ def _is_external_spec(raw_spec: str) -> bool:
     target = parse_target_spec(spec).get("target", spec)
     if not isinstance(target, str):
         target = spec
-    if classify_plugin_target(target) is not None:
+    if plugin_target_provider(target) is not None:
         return True
     if is_http_url(target):
         return True
@@ -2291,12 +2288,11 @@ def _build_manifest_file_entry(
     comment: str | None,
     extras: dict[str, Any],
 ) -> dict[str, Any] | str:
-    plugin_target = classify_plugin_target(item.manifest_spec)
     is_url = (
         item.source_type == "http"
         or item.source_type.startswith("plugin:")
         or is_http_url(item.manifest_spec)
-        or plugin_target is not None
+        or plugin_target_provider(item.manifest_spec) is not None
     )
     key = "url" if is_url else "path"
     entry = {key: item.manifest_spec}

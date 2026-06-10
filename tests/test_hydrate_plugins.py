@@ -41,6 +41,13 @@ def test_hydrate_manifest_uses_custom_plugin_scheme(
                     },
                 }
             ]
+
+            def classify_target(_target, _context):
+                raise AssertionError(
+                    "hydrate should not classify targets during planning"
+                )
+
+            plugin.classify_target = classify_target
             return plugin
 
     monkeypatch.setattr(
