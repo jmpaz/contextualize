@@ -1486,6 +1486,36 @@ def _ensure_markdown_suffix(path: str) -> str:
     return f"{path}.md"
 
 
+def _context_prefix_from_metadata(metadata: dict[str, Any]) -> str | None:
+    raw_prefix = metadata.get("context_prefix")
+    if not isinstance(raw_prefix, str):
+        return None
+    return _normalize_context_prefix(raw_prefix)
+
+
+def _context_prefix_from_ref(ref: Any) -> str | None:
+    raw_prefix = getattr(ref, "_contextualize_context_prefix", None)
+    if not isinstance(raw_prefix, str):
+        return None
+    return _normalize_context_prefix(raw_prefix)
+
+
+def _normalize_context_prefix(value: str) -> str | None:
+    raw = value.strip().strip("/")
+    if not raw:
+        return None
+    parts = [part for part in raw.split("/") if part and part not in {".", ".."}]
+    return "/".join(parts) or None
+
+
+def _join_context_subpath(prefix: str | None, subpath: str) -> str:
+    clean_prefix = _normalize_context_prefix(prefix) if prefix else None
+    clean_subpath = _normalize_context_prefix(subpath) or "index"
+    if clean_prefix:
+        return f"{clean_prefix}/{clean_subpath}"
+    return clean_subpath
+
+
 def _plugin_context_subpath(
     *,
     metadata: dict[str, Any],
@@ -1513,13 +1543,13 @@ def _plugin_context_subpath(
             base = f"{plugin_slug}/{fallback_name}.md"
     base = _ensure_markdown_suffix(base)
     alias_prefix = _plugin_alias_prefix(alias, fallback="plugin")
-    if alias_prefix is None:
-        return base
-
-    if total_refs == 1:
-        suffix = Path(base).suffix or ".md"
-        return f"{alias_prefix}{suffix}"
-    return f"{alias_prefix}/{base}"
+    if alias_prefix is not None:
+        if total_refs == 1:
+            suffix = Path(base).suffix or ".md"
+            base = f"{alias_prefix}{suffix}"
+        else:
+            base = f"{alias_prefix}/{base}"
+    return _join_context_subpath(_context_prefix_from_metadata(metadata), base)
 
 
 def _plugin_dedupe_fields(
@@ -1632,9 +1662,14 @@ def _resolve_external_items_via_refs(
             )
             continue
 
-        if is_http_url(target):
-            origin, url_path = _split_url_path(target)
+        ref_path_raw = getattr(ref, "path", None) or getattr(ref, "url", None)
+        ref_content = getattr(ref, "file_content", None)
+        ref_context_prefix = _context_prefix_from_ref(ref)
+        http_target = ref_path_raw if isinstance(ref_path_raw, str) else target
+        if is_http_url(http_target):
+            origin, url_path = _split_url_path(http_target)
             context_path = _apply_filename_hint(url_path, alias)
+            context_path = _join_context_subpath(ref_context_prefix, context_path)
             items.append(
                 ResolvedItem(
                     source_type="http",
@@ -1643,25 +1678,24 @@ def _resolve_external_items_via_refs(
                     source_path=url_path,
                     context_subpath=context_path,
                     content=ref.file_content,
-                    manifest_spec=target,
+                    manifest_spec=http_target,
                     alias=alias if isinstance(alias, str) else None,
                 )
             )
             continue
-        ref_path_raw = getattr(ref, "path", None) or getattr(ref, "url", None)
-        ref_content = getattr(ref, "file_content", None)
         if isinstance(ref_path_raw, str) and isinstance(ref_content, str):
             source_path = Path(ref_path_raw).name or "item"
             context_path = _apply_filename_hint(source_path, alias)
+            context_path = _join_context_subpath(ref_context_prefix, context_path)
             items.append(
                 ResolvedItem(
                     source_type="plugin:materialized",
-                    source_ref=target,
+                    source_ref=ref_path_raw,
                     source_rev=None,
                     source_path=source_path,
                     context_subpath=context_path,
                     content=ref_content,
-                    manifest_spec=target,
+                    manifest_spec=ref_path_raw,
                     alias=alias if isinstance(alias, str) else None,
                     plugin_name="materialized",
                 )

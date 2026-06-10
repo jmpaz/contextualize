@@ -10,6 +10,7 @@ from contextualize.manifest.hydrate import (
     HydrateOverrides,
     apply_hydration_plan,
     build_hydration_plan_data,
+    _resolve_external_items_via_refs,
 )
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
@@ -226,6 +227,128 @@ def test_hydrate_plugin_dedupe_can_skip_noncanonical_paths(
     assert "flat.md" not in written_paths
     assert "flat.md" not in symlink_paths
     assert "flat.md" not in index_paths
+
+
+def test_hydrate_embedded_plugin_targets_inherit_parent_context_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class _EmbeddedPathEntrypoint:
+        name = "embedded-path"
+        value = "contextualize_plugins.embedded_path:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "embedded-path"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "asset://")
+            )
+
+            def list_targets(target: str, _context: dict[str, object]) -> dict:
+                if target != "root://channel":
+                    return {"targets": []}
+                return {
+                    "targets": [
+                        {
+                            "target": "asset://child",
+                            "label": "Child",
+                            "metadata": {
+                                "channel_path": "channels/root",
+                                "block_id": 42,
+                            },
+                        },
+                        {
+                            "target": "asset://child",
+                            "label": "Child again",
+                            "metadata": {
+                                "channel_path": "channels/root",
+                                "block_id": 43,
+                            },
+                        },
+                    ]
+                }
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target != "asset://child":
+                    return []
+                return [
+                    {
+                        "source": target,
+                        "label": "asset.md",
+                        "content": "child content",
+                        "metadata": {
+                            "context_subpath": "asset.md",
+                            "source_ref": "asset",
+                            "source_path": "child",
+                        },
+                    }
+                ]
+
+            plugin.list_targets = list_targets
+            plugin.resolve = resolve
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedPathEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "components": [
+                {
+                    "name": "main",
+                    "target-depth": 1,
+                    "include-parent": False,
+                    "files": ["root://channel"],
+                }
+            ],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    assert [
+        (path.relative_to(context_dir).as_posix(), content)
+        for path, content in plan.files_to_write
+    ] == [
+        ("channels/root/42/asset.md", "child content"),
+        ("channels/root/43/asset.md", "child content"),
+    ]
+
+
+def test_hydrate_embedded_http_refs_use_ref_path_and_parent_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Ref:
+        path = "https://example.com/assets/doc.txt"
+        file_content = "doc content"
+        _contextualize_context_prefix = "channels/root/42"
+
+    monkeypatch.setattr(
+        "contextualize.manifest.hydrate.create_file_references",
+        lambda *_args, **_kwargs: {"refs": [_Ref()]},
+    )
+
+    items = _resolve_external_items_via_refs(
+        "root://channel",
+        alias=None,
+        include_parent=False,
+        target_depth=1,
+    )
+
+    assert len(items) == 1
+    assert items[0].source_type == "http"
+    assert items[0].source_ref == "https://example.com"
+    assert items[0].source_path == "assets/doc.txt"
+    assert items[0].context_subpath == "channels/root/42/assets/doc.txt"
+    assert items[0].manifest_spec == "https://example.com/assets/doc.txt"
 
 
 def test_hydrate_manifest_follows_component_embedded_targets(

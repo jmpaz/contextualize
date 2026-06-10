@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from ..plugins.resolve import (
     materialize_plugin_target,
     resolve_plugin_references,
 )
+from ..plugins.reference import PluginReference
 from ..progress import log_progress, record_progress
 from ..runtime import get_payload_media_jobs
 from ..git.target import parse_git_target
@@ -45,6 +47,15 @@ _CONVERTIBLE_CONTENT_TYPES = frozenset(
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }
 )
+
+
+@dataclass(frozen=True)
+class _EmbeddedTarget:
+    target: str
+    context_prefix: str | None = None
+
+
+_EmbeddedSeenKey = tuple[str, str | None]
 
 
 def _target_suffix(target: str) -> str:
@@ -80,6 +91,60 @@ def _text_only_materialized_mode(file_item: dict[str, Any]) -> str:
     return "text"
 
 
+def _normalize_context_prefix(value: object) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip().strip("/")
+    if not raw:
+        return None
+    parts = [part for part in raw.split("/") if part and part not in {".", ".."}]
+    return "/".join(parts) or None
+
+
+def _join_context_prefix(prefix: object, suffix: object) -> str | None:
+    clean_prefix = _normalize_context_prefix(prefix)
+    clean_suffix = _normalize_context_prefix(suffix)
+    if clean_prefix and clean_suffix:
+        return f"{clean_prefix}/{clean_suffix}"
+    return clean_prefix or clean_suffix
+
+
+def _embedded_child_prefix(
+    item: dict[str, Any], parent_prefix: str | None
+) -> str | None:
+    metadata = item.get("metadata")
+    if not isinstance(metadata, dict):
+        return parent_prefix
+    channel_path = metadata.get("channel_path")
+    block_id = metadata.get("block_id")
+    if channel_path is not None and block_id is not None:
+        return _join_context_prefix(channel_path, block_id)
+    context_prefix = metadata.get("context_prefix")
+    if context_prefix is not None:
+        return _join_context_prefix(parent_prefix, context_prefix)
+    return parent_prefix
+
+
+def _apply_embedded_context_prefix(
+    refs: list[Any], context_prefix: str | None
+) -> list[Any]:
+    clean_prefix = _normalize_context_prefix(context_prefix)
+    if clean_prefix is None:
+        return refs
+    for ref in refs:
+        if isinstance(ref, PluginReference):
+            ref.document.metadata["context_prefix"] = clean_prefix
+        else:
+            setattr(ref, "_contextualize_context_prefix", clean_prefix)
+    return refs
+
+
+def _embedded_seen_key(
+    target: str, context_prefix: str | None
+) -> _EmbeddedSeenKey:
+    return (target, _normalize_context_prefix(context_prefix))
+
+
 def create_file_references(
     paths,
     ignore_patterns=None,
@@ -104,7 +169,7 @@ def create_file_references(
     target_scope: str = "all",
     include_parent: bool = True,
     binary_policy: str = "error",
-    _embedded_seen: set[str] | None = None,
+    _embedded_seen: set[_EmbeddedSeenKey] | None = None,
 ):
     """
     Build a list of file references from the specified paths.
@@ -215,7 +280,7 @@ def create_file_references(
             effective_plugin_overrides.setdefault(provider_name, provider_overrides)
 
     embedded_seed_targets = [
-        str(parse_target_spec(raw_path).get("target", raw_path))
+        _EmbeddedTarget(str(parse_target_spec(raw_path).get("target", raw_path)))
         for raw_path in expanded_all_paths
     ]
     if target_depth > 0 and not include_parent:
@@ -523,7 +588,7 @@ def concat_refs(file_references):
 
 
 def _resolve_embedded_target_refs(
-    seed_targets: list[str],
+    seed_targets: list[_EmbeddedTarget],
     *,
     ignore_patterns,
     format: str,
@@ -546,17 +611,20 @@ def _resolve_embedded_target_refs(
     target_depth: int,
     target_scope: str,
     binary_policy: str,
-    seen: set[str] | None,
+    seen: set[_EmbeddedSeenKey] | None,
 ) -> list[Any]:
     if target_depth <= 0:
         return []
     if seen is None:
-        seen = set(seed_targets)
+        seen = {
+            _embedded_seen_key(seed.target, seed.context_prefix)
+            for seed in seed_targets
+        }
 
     refs: list[Any] = []
     frontier = list(seed_targets)
     for depth_index in range(target_depth):
-        next_frontier: list[str] = []
+        next_frontier: list[_EmbeddedTarget] = []
         media_jobs = get_payload_media_jobs()
         log_progress(
             "plugins",
@@ -568,7 +636,7 @@ def _resolve_embedded_target_refs(
             (
                 index,
                 (
-                    lambda current=target: _list_embedded_targets_safely(
+                    lambda current=node.target: _list_embedded_targets_safely(
                         current,
                         plugin_overrides=plugin_overrides,
                         use_cache=use_cache,
@@ -577,7 +645,7 @@ def _resolve_embedded_target_refs(
                     )
                 ),
             )
-            for index, target in enumerate(frontier)
+            for index, node in enumerate(frontier)
         ]
         listed_results = run_indexed_tasks_fail_fast(
             list_tasks,
@@ -585,9 +653,10 @@ def _resolve_embedded_target_refs(
             semaphore=media_task_semaphore(),
             on_complete=_record_embedded_list_completion,
         )
-        child_jobs: list[tuple[int, str]] = []
+        child_jobs: list[tuple[int, _EmbeddedTarget]] = []
         encounter_index = 0
-        for _, (target, listed, error) in listed_results:
+        for list_index, (target, listed, error) in listed_results:
+            parent = frontier[list_index]
             if error is not None:
                 print(
                     f"Warning: embedded target listing failed for {target}: {error}",
@@ -612,13 +681,23 @@ def _resolve_embedded_target_refs(
             )
             for item in listed.items:
                 child = item.get("target")
-                if not isinstance(child, str) or not child or child in seen:
+                if not isinstance(child, str) or not child:
                     continue
                 if item.get("traverse") is False:
                     continue
-                seen.add(child)
-                next_frontier.append(child)
-                child_jobs.append((encounter_index, child))
+                child_prefix = _embedded_child_prefix(
+                    item, parent.context_prefix
+                )
+                seen_key = _embedded_seen_key(child, child_prefix)
+                if seen_key in seen:
+                    continue
+                seen.add(seen_key)
+                child_node = _EmbeddedTarget(
+                    child,
+                    context_prefix=child_prefix,
+                )
+                next_frontier.append(child_node)
+                child_jobs.append((encounter_index, child_node))
                 encounter_index += 1
 
         if child_jobs:
@@ -659,7 +738,7 @@ def _resolve_embedded_target_refs(
                 )
                 for index, child in child_jobs
             ]
-            child_targets = {index: child for index, child in child_jobs}
+            child_targets = {index: child.target for index, child in child_jobs}
 
             def _record_child_resolved(index, child_refs):
                 record_progress(
@@ -737,7 +816,7 @@ def _list_embedded_targets_safely(
 
 
 def _resolve_embedded_child_refs(
-    target: str,
+    target_node: _EmbeddedTarget,
     *,
     ignore_patterns,
     format: str,
@@ -758,8 +837,9 @@ def _resolve_embedded_child_refs(
     atproto_overrides: dict | None,
     soundcloud_overrides: dict[str, Any] | None,
     binary_policy: str,
-    seen: set[str],
+    seen: set[_EmbeddedSeenKey],
 ) -> list[Any]:
+    target = target_node.target
     try:
         plugin_refs, plugin_claimed = resolve_plugin_references(
             target,
@@ -784,7 +864,9 @@ def _resolve_embedded_child_refs(
         plugin_refs = []
         plugin_claimed = False
     if plugin_refs:
-        return plugin_refs
+        return _apply_embedded_context_prefix(
+            plugin_refs, target_node.context_prefix
+        )
 
     try:
         materialized = materialize_plugin_target(
@@ -843,7 +925,11 @@ def _resolve_embedded_child_refs(
                         binary_policy="skip" if text_only else binary_policy,
                         _embedded_seen=seen,
                     )
-                    refs.extend(result["refs"])
+                    refs.extend(
+                        _apply_embedded_context_prefix(
+                            list(result["refs"]), target_node.context_prefix
+                        )
+                    )
                 except Exception as exc:
                     print(
                         f"Warning: embedded materialized target failed for {target}: {exc}",
@@ -885,7 +971,9 @@ def _resolve_embedded_child_refs(
             file=sys.stderr,
         )
         return []
-    return list(result["refs"])
+    return _apply_embedded_context_prefix(
+        list(result["refs"]), target_node.context_prefix
+    )
 
 
 def _safe_materialized_filename(filename: str) -> str:
