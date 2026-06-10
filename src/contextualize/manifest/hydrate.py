@@ -112,6 +112,7 @@ class ResolvedItem:
     plugin_dedupe_mode: str | None = None
     plugin_dedupe_key: str | None = None
     plugin_dedupe_rank: int | None = None
+    plugin_dedupe_link: bool = True
     arena_kind: str | None = None
     arena_channel_id: str | None = None
     arena_depth: int | None = None
@@ -866,6 +867,24 @@ def build_hydration_plan_data(
             count=len(normalized_files),
         )
 
+    skipped_plugin_paths = _materialize_plugin_pending(
+        plugin_pending,
+        context_dir,
+        files_to_write,
+        files_to_copy,
+        files_to_symlink,
+        file_timestamps,
+    )
+    if skipped_plugin_paths:
+        index_components = {
+            component: [
+                entry
+                for entry in entries
+                if entry.get("context_path") not in skipped_plugin_paths
+            ]
+            for component, entries in index_components.items()
+        }
+
     if context_cfg["include_meta"]:
         normalized_manifest = {
             "config": _build_normalized_config(
@@ -888,15 +907,6 @@ def build_hydration_plan_data(
         index_data = {"version": 1, "components": index_components}
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
-
-    _materialize_plugin_pending(
-        plugin_pending,
-        context_dir,
-        files_to_write,
-        files_to_copy,
-        files_to_symlink,
-        file_timestamps,
-    )
 
     return HydratePlan(
         context_dir=context_dir,
@@ -1514,13 +1524,14 @@ def _plugin_context_subpath(
 
 def _plugin_dedupe_fields(
     metadata: dict[str, Any],
-) -> tuple[str | None, str | None, int | None]:
+) -> tuple[str | None, str | None, int | None, bool]:
     dedupe = metadata.get("hydrate_dedupe")
     if not isinstance(dedupe, dict):
-        return None, None, None
+        return None, None, None, True
     mode_raw = dedupe.get("mode")
     key_raw = dedupe.get("key")
     rank_raw = dedupe.get("rank")
+    link_raw = dedupe.get("link")
     mode = mode_raw.strip() if isinstance(mode_raw, str) else None
     key = key_raw.strip() if isinstance(key_raw, str) else None
     rank: int | None = None
@@ -1531,7 +1542,8 @@ def _plugin_dedupe_fields(
             rank = int(rank_raw.strip())
         except ValueError:
             rank = None
-    return mode, key, rank
+    link = link_raw if isinstance(link_raw, bool) else True
+    return mode, key, rank, link
 
 
 def _resolve_external_items_via_refs(
@@ -1585,7 +1597,9 @@ def _resolve_external_items_via_refs(
                 alias=alias,
                 total_refs=plugin_count if plugin_count > 0 else len(refs),
             )
-            dedupe_mode, dedupe_key, dedupe_rank = _plugin_dedupe_fields(metadata)
+            dedupe_mode, dedupe_key, dedupe_rank, dedupe_link = (
+                _plugin_dedupe_fields(metadata)
+            )
             items.append(
                 ResolvedItem(
                     source_type=source_type,
@@ -1613,6 +1627,7 @@ def _resolve_external_items_via_refs(
                     plugin_dedupe_mode=dedupe_mode,
                     plugin_dedupe_key=dedupe_key,
                     plugin_dedupe_rank=dedupe_rank,
+                    plugin_dedupe_link=dedupe_link,
                 )
             )
             continue
@@ -2366,7 +2381,8 @@ def _materialize_plugin_pending(
     files_to_copy: list[tuple[Path, Path]],
     files_to_symlink: list[tuple[Path, Path]],
     file_timestamps: dict[Path, tuple[float, float]],
-) -> None:
+) -> set[str]:
+    skipped_paths: set[str] = set()
     for occurrences in plugin_pending.values():
         canonical = min(
             occurrences,
@@ -2397,7 +2413,11 @@ def _materialize_plugin_pending(
         for occ in occurrences:
             if occ.rel_path == canonical.rel_path:
                 continue
-            files_to_symlink.append((context_dir / occ.rel_path, canonical_path))
+            if occ.item.plugin_dedupe_link:
+                files_to_symlink.append((context_dir / occ.rel_path, canonical_path))
+            else:
+                skipped_paths.add(occ.rel_path.as_posix())
+    return skipped_paths
 
 
 def _dedupe_manifest_entries(files: list[Any]) -> list[Any]:

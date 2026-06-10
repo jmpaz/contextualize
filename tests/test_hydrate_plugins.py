@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import types
 from pathlib import Path
 
@@ -120,6 +121,111 @@ def test_hydrate_manifest_preserves_colon_plugin_target(
         path.relative_to(context_dir).as_posix() for path, _ in plan.files_to_write
     }
     assert "note/doc.md" in rel_paths
+
+
+def test_hydrate_plugin_dedupe_can_skip_noncanonical_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class _DedupeEntrypoint:
+        name = "dedupe"
+        value = "contextualize_plugins.dedupe:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "dedupe"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target == "dedupe://root"
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "channel/a.md",
+                    "content": "canonical",
+                    "metadata": {
+                        "context_subpath": "channel/a.md",
+                        "source_ref": "dedupe",
+                        "source_path": "channel/a",
+                        "hydrate_dedupe": {
+                            "mode": "canonical_symlink",
+                            "key": "block:1",
+                            "rank": 0,
+                        },
+                    },
+                },
+                {
+                    "source": target,
+                    "label": "channel/b.md",
+                    "content": "canonical",
+                    "metadata": {
+                        "context_subpath": "channel/b.md",
+                        "source_ref": "dedupe",
+                        "source_path": "channel/b",
+                        "hydrate_dedupe": {
+                            "mode": "canonical_symlink",
+                            "key": "block:1",
+                            "rank": 1,
+                        },
+                    },
+                },
+                {
+                    "source": target,
+                    "label": "flat.md",
+                    "content": "canonical",
+                    "metadata": {
+                        "context_subpath": "flat.md",
+                        "source_ref": "dedupe",
+                        "source_path": "flat",
+                        "hydrate_dedupe": {
+                            "mode": "canonical_symlink",
+                            "key": "block:1",
+                            "rank": 10_000,
+                            "link": False,
+                        },
+                    },
+                },
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_DedupeEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {"context": {"dir": str(context_dir), "include-meta": True}},
+            "components": [{"name": "main", "files": ["dedupe://root"]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    written_paths = {
+        path.relative_to(context_dir).as_posix() for path, _ in plan.files_to_write
+    }
+    symlink_paths = {
+        path.relative_to(context_dir).as_posix()
+        for path, _ in plan.files_to_symlink
+    }
+    index_text = next(
+        content
+        for path, content in plan.files_to_write
+        if path.relative_to(context_dir).as_posix() == "index.json"
+    )
+    index_paths = {
+        entry["context_path"]
+        for entry in json.loads(index_text)["components"]["main"]
+    }
+
+    assert "channel/a.md" in written_paths
+    assert "channel/b.md" in symlink_paths
+    assert "flat.md" not in written_paths
+    assert "flat.md" not in symlink_paths
+    assert "flat.md" not in index_paths
 
 
 def test_hydrate_manifest_follows_component_embedded_targets(
