@@ -229,70 +229,98 @@ def test_hydrate_plugin_dedupe_can_skip_noncanonical_paths(
     assert "flat.md" not in index_paths
 
 
-def test_hydrate_embedded_plugin_targets_inherit_parent_context_path(
+
+def test_hydrate_embedded_resolution_targets_inherit_parent_context_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    class _EmbeddedPathEntrypoint:
-        name = "embedded-path"
-        value = "contextualize_plugins.embedded_path:plugin"
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
 
         def load(self):
             plugin = types.SimpleNamespace()
             plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "embedded-path"
+            plugin.PLUGIN_NAME = "arena"
             plugin.PLUGIN_PRIORITY = 500
             plugin.can_resolve = lambda target, _context: target.startswith(
-                ("root://", "asset://")
+                ("root://", "https://www.are.na/block/")
             )
 
-            def list_targets(target: str, _context: dict[str, object]) -> dict:
-                if target != "root://channel":
-                    return {"targets": []}
-                return {
-                    "targets": [
-                        {
-                            "target": "asset://child",
-                            "label": "Child",
-                            "metadata": {
-                                "channel_path": "channels/root",
-                                "block_id": 42,
-                            },
-                        },
-                        {
-                            "target": "asset://child",
-                            "label": "Child again",
-                            "metadata": {
-                                "channel_path": "channels/root",
-                                "block_id": 43,
-                            },
-                        },
-                    ]
-                }
-
             def resolve(target: str, _context: dict[str, object]) -> list[dict]:
-                if target != "asset://child":
+                if target != "root://channel":
                     return []
                 return [
                     {
                         "source": target,
-                        "label": "asset.md",
-                        "content": "child content",
+                        "label": "entry-42.md",
+                        "content": "entry 42",
                         "metadata": {
-                            "context_subpath": "asset.md",
-                            "source_ref": "asset",
-                            "source_path": "child",
+                            "provider": "arena",
+                            "block_id": 42,
+                            "block_type": "Link",
+                            "channel_path": "channels/root",
+                            "context_subpath": "channels/root/42.md",
+                            "source_ref": "are.na",
+                            "source_path": "channels/root/42",
                         },
-                    }
+                    },
+                    {
+                        "source": target,
+                        "label": "entry-43.md",
+                        "content": "entry 43",
+                        "metadata": {
+                            "provider": "arena",
+                            "block_id": 43,
+                            "block_type": "Link",
+                            "channel_path": "channels/root",
+                            "context_subpath": "channels/root/43.md",
+                            "source_ref": "are.na",
+                            "source_path": "channels/root/43",
+                        },
+                    },
                 ]
 
-            plugin.list_targets = list_targets
+            def list_targets(target: str, _context: dict[str, object]) -> dict:
+                if target == "https://www.are.na/block/42":
+                    return {"targets": [{"target": "asset://child", "label": "Child"}]}
+                if target == "https://www.are.na/block/43":
+                    return {"targets": [{"target": "asset://child", "label": "Child again"}]}
+                return {"targets": []}
+
             plugin.resolve = resolve
+            plugin.list_targets = list_targets
+            return plugin
+
+    class _AssetEntrypoint:
+        name = "asset"
+        value = "contextualize_plugins.asset:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "asset"
+            plugin.PLUGIN_PRIORITY = 600
+            plugin.can_resolve = lambda target, _context: target == "asset://child"
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "asset.md",
+                    "content": "child content",
+                    "metadata": {
+                        "context_subpath": "child.md",
+                        "source_ref": "asset",
+                        "source_path": "child",
+                    },
+                }
+            ]
             return plugin
 
     monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedPathEntrypoint()]
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [_ArenaEntrypoint(), _AssetEntrypoint()],
     )
     clear_loaded_plugins_cache()
 
@@ -303,8 +331,7 @@ def test_hydrate_embedded_plugin_targets_inherit_parent_context_path(
             "components": [
                 {
                     "name": "main",
-                    "target-depth": 1,
-                    "include-parent": False,
+                    "embedded-resolution": True,
                     "files": ["root://channel"],
                 }
             ],
@@ -318,110 +345,19 @@ def test_hydrate_embedded_plugin_targets_inherit_parent_context_path(
         (path.relative_to(context_dir).as_posix(), content)
         for path, content in plan.files_to_write
     ] == [
-        ("channels/root/42.embedded-path-asset.md", "child content"),
-        ("channels/root/43.embedded-path-asset.md", "child content"),
+        ("channels/root/42.md", "entry 42"),
+        ("channels/root/43.md", "entry 43"),
+        ("channels/root/42.asset-child.md", "child content"),
+        ("channels/root/43.asset-child.md", "child content"),
     ]
 
 
-def test_hydrate_embedded_media_targets_inherit_block_sidecar(
+def test_hydrate_embedded_resolution_media_targets_use_parent_sidecar(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    class _NestedMediaEntrypoint:
-        name = "ytdlp"
-        value = "contextualize_plugins.ytdlp:plugin"
-
-        def load(self):
-            plugin = types.SimpleNamespace()
-            plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "ytdlp"
-            plugin.PLUGIN_PRIORITY = 500
-            plugin.can_resolve = lambda target, _context: target.startswith(
-                ("root://", "block://", "media://")
-            )
-
-            def list_targets(target: str, _context: dict[str, object]) -> dict:
-                if target == "root://channel":
-                    return {
-                        "targets": [
-                            {
-                                "target": "block://42",
-                                "label": "Block 42",
-                                "metadata": {
-                                    "channel_path": "channels/root",
-                                    "block_id": 42,
-                                },
-                            }
-                        ]
-                    }
-                if target == "block://42":
-                    return {
-                        "targets": [
-                            {
-                                "target": "media://child",
-                                "label": "Media child",
-                                "metadata": {"block_id": 42},
-                            }
-                        ]
-                    }
-                return {"targets": []}
-
-            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
-                if target != "media://child":
-                    return []
-                return [
-                    {
-                        "source": target,
-                        "label": "Video",
-                        "content": "media transcript",
-                        "metadata": {
-                            "context_subpath": "ytdlp-youtube-abc123.md",
-                            "source_ref": "www.youtube.com",
-                            "source_path": "youtube:abc123",
-                        },
-                    }
-                ]
-
-            plugin.list_targets = list_targets
-            plugin.resolve = resolve
-            return plugin
-
-    monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_NestedMediaEntrypoint()]
-    )
-    clear_loaded_plugins_cache()
-
-    context_dir = tmp_path / "ctx"
-    plan = build_hydration_plan_data(
-        {
-            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
-            "components": [
-                {
-                    "name": "main",
-                    "target-depth": 2,
-                    "include-parent": False,
-                    "files": ["root://channel"],
-                }
-            ],
-        },
-        manifest_cwd=str(tmp_path),
-        overrides=HydrateOverrides(),
-        cwd=str(tmp_path),
-    )
-
-    assert [
-        (path.relative_to(context_dir).as_posix(), content)
-        for path, content in plan.files_to_write
-    ] == [("channels/root/42.ytdlp-youtube-abc123.md", "media transcript")]
-
-
-def test_hydrate_embedded_arena_attachment_uses_dot_sidecar(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-
-    class _EmbeddedArenaEntrypoint:
+    class _ArenaEntrypoint:
         name = "arena"
         value = "contextualize_plugins.arena:plugin"
 
@@ -431,49 +367,57 @@ def test_hydrate_embedded_arena_attachment_uses_dot_sidecar(
             plugin.PLUGIN_NAME = "arena"
             plugin.PLUGIN_PRIORITY = 500
             plugin.can_resolve = lambda target, _context: target.startswith(
-                ("root://", "attachment://")
+                ("root://", "https://www.are.na/block/")
             )
-
-            def list_targets(target: str, _context: dict[str, object]) -> dict:
-                if target != "root://channel":
-                    return {"targets": []}
-                return {
-                    "targets": [
-                        {
-                            "target": "attachment://child",
-                            "label": "Attachment",
-                            "metadata": {
-                                "channel_path": "channels/root",
-                                "block_id": 42,
-                            },
-                        }
-                    ]
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "entry.md",
+                    "content": "entry content",
+                    "metadata": {
+                        "provider": "arena",
+                        "block_id": 42,
+                        "block_type": "Embed",
+                        "channel_path": "channels/root",
+                        "context_subpath": "channels/root/42.md",
+                        "source_ref": "are.na",
+                        "source_path": "channels/root/42",
+                    },
                 }
+            ] if target == "root://channel" else []
+            plugin.list_targets = lambda target, _context: {
+                "targets": [{"target": "media://child", "label": "Media child"}]
+            } if target == "https://www.are.na/block/42" else {"targets": []}
+            return plugin
 
-            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
-                if target != "attachment://child":
-                    return []
-                return [
-                    {
-                        "source": target,
-                        "label": "attachment-video.mp4.md",
-                        "content": "attachment content",
-                        "metadata": {
-                            "context_subpath": (
-                                "arena-block-42/attachment-video.mp4.mp4.md"
-                            ),
-                            "source_ref": "are.na",
-                            "source_path": "42/attachment/video.mp4",
-                        },
-                    }
-                ]
+    class _YtdlpEntrypoint:
+        name = "ytdlp"
+        value = "contextualize_plugins.ytdlp:plugin"
 
-            plugin.list_targets = list_targets
-            plugin.resolve = resolve
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "ytdlp"
+            plugin.PLUGIN_PRIORITY = 600
+            plugin.can_resolve = lambda target, _context: target == "media://child"
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "Video",
+                    "content": "media transcript",
+                    "metadata": {
+                        "context_subpath": "ytdlp-youtube-abc123.md",
+                        "source_ref": "www.youtube.com",
+                        "source_path": "youtube:abc123",
+                    },
+                }
+            ]
             return plugin
 
     monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedArenaEntrypoint()]
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [_ArenaEntrypoint(), _YtdlpEntrypoint()],
     )
     clear_loaded_plugins_cache()
 
@@ -484,8 +428,7 @@ def test_hydrate_embedded_arena_attachment_uses_dot_sidecar(
             "components": [
                 {
                     "name": "main",
-                    "target-depth": 1,
-                    "include-parent": False,
+                    "embedded-resolution": True,
                     "files": ["root://channel"],
                 }
             ],
@@ -498,10 +441,103 @@ def test_hydrate_embedded_arena_attachment_uses_dot_sidecar(
     assert [
         (path.relative_to(context_dir).as_posix(), content)
         for path, content in plan.files_to_write
-    ] == [("channels/root/42.attachment-video.mp4.mp4.md", "attachment content")]
+    ] == [
+        ("channels/root/42.md", "entry content"),
+        ("channels/root/42.ytdlp-youtube-abc123.md", "media transcript"),
+    ]
 
 
-def test_hydrate_embedded_http_refs_use_ref_path_and_dot_sidecar(
+def test_hydrate_embedded_resolution_arena_attachment_uses_dot_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "arena"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target.startswith(
+                ("root://", "attachment://", "https://www.are.na/block/")
+            )
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target == "root://channel":
+                    return [
+                        {
+                            "source": target,
+                            "label": "entry.md",
+                            "content": "entry content",
+                            "metadata": {
+                                "provider": "arena",
+                                "block_id": 42,
+                                "block_type": "Attachment",
+                                "channel_path": "channels/root",
+                                "context_subpath": "channels/root/42.md",
+                                "source_ref": "are.na",
+                                "source_path": "channels/root/42",
+                            },
+                        }
+                    ]
+                if target == "attachment://child":
+                    return [
+                        {
+                            "source": target,
+                            "label": "attachment-video.mp4.md",
+                            "content": "attachment content",
+                            "metadata": {
+                                "context_subpath": (
+                                    "arena-block-42/attachment-video.mp4.mp4.md"
+                                ),
+                                "source_ref": "are.na",
+                                "source_path": "42/attachment/video.mp4",
+                            },
+                        }
+                    ]
+                return []
+
+            plugin.resolve = resolve
+            plugin.list_targets = lambda target, _context: {
+                "targets": [{"target": "attachment://child", "label": "Attachment"}]
+            } if target == "https://www.are.na/block/42" else {"targets": []}
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_ArenaEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "components": [
+                {
+                    "name": "main",
+                    "embedded-resolution": True,
+                    "files": ["root://channel"],
+                }
+            ],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    assert [
+        (path.relative_to(context_dir).as_posix(), content)
+        for path, content in plan.files_to_write
+    ] == [
+        ("channels/root/42.md", "entry content"),
+        ("channels/root/42.attachment-video.mp4.mp4.md", "attachment content"),
+    ]
+
+
+def test_hydrate_embedded_resolution_http_refs_use_ref_path_and_dot_sidecar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Ref:
@@ -518,8 +554,7 @@ def test_hydrate_embedded_http_refs_use_ref_path_and_dot_sidecar(
     items = _resolve_external_items_via_refs(
         "root://channel",
         alias=None,
-        include_parent=False,
-        target_depth=1,
+        embedded_resolution=True,
     )
 
     assert len(items) == 1
@@ -530,25 +565,46 @@ def test_hydrate_embedded_http_refs_use_ref_path_and_dot_sidecar(
     assert items[0].manifest_spec == "https://example.com/assets/doc.txt"
 
 
-def test_hydrate_manifest_follows_component_embedded_targets(
+def test_hydrate_manifest_embedded_resolution_materializes_embedded_targets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    class _EmbeddedEntrypoint:
-        name = "embedded"
-        value = "contextualize_plugins.embedded:plugin"
+    class _ArenaEntrypoint:
+        name = "arena"
+        value = "contextualize_plugins.arena:plugin"
 
         def load(self):
             plugin = types.SimpleNamespace()
             plugin.PLUGIN_API_VERSION = "1"
-            plugin.PLUGIN_NAME = "embedded"
+            plugin.PLUGIN_NAME = "arena"
             plugin.PLUGIN_PRIORITY = 500
             plugin.can_resolve = lambda target, _context: target.startswith(
-                ("root://", "asset://")
+                ("root://", "asset://", "https://www.are.na/block/")
             )
-            plugin.resolve = lambda _target, _context: []
-            plugin.list_targets = lambda _target, _context: {
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                if target == "root://thread":
+                    return [
+                        {
+                            "source": target,
+                            "label": "entry.md",
+                            "content": "entry content",
+                            "metadata": {
+                                "provider": "arena",
+                                "block_id": 42,
+                                "block_type": "Link",
+                                "channel_path": "thread",
+                                "context_subpath": "thread/42.md",
+                                "source_ref": "are.na",
+                                "source_path": "thread/42",
+                            },
+                        }
+                    ]
+                return []
+
+            plugin.resolve = resolve
+            plugin.list_targets = lambda target, _context: {
                 "targets": [
                     {"target": "asset://child", "label": "child.txt"},
                     {
@@ -558,7 +614,7 @@ def test_hydrate_manifest_follows_component_embedded_targets(
                         "traverse": False,
                     },
                 ]
-            }
+            } if target == "https://www.are.na/block/42" else {"targets": []}
 
             def materialize(target: str, _context: dict[str, object]) -> list[dict]:
                 if target != "asset://child":
@@ -577,7 +633,7 @@ def test_hydrate_manifest_follows_component_embedded_targets(
             return plugin
 
     monkeypatch.setattr(
-        plugin_loader, "_iter_plugin_entrypoints", lambda: [_EmbeddedEntrypoint()]
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_ArenaEntrypoint()]
     )
     clear_loaded_plugins_cache()
 
@@ -594,8 +650,7 @@ def test_hydrate_manifest_follows_component_embedded_targets(
             "components": [
                 {
                     "name": "main",
-                    "target-depth": 1,
-                    "include-parent": False,
+                    "embedded-resolution": True,
                     "files": ["root://thread"],
                 }
             ],
@@ -608,8 +663,10 @@ def test_hydrate_manifest_follows_component_embedded_targets(
     assert [
         (path.relative_to(context_dir).as_posix(), content)
         for path, content in plan.files_to_write
-    ] == [("main/child.txt", "child content")]
-
+    ] == [
+        ("main/thread/42.md", "entry content"),
+        ("main/thread/42.materialized-child.txt.md", "child content"),
+    ]
 
 def test_hydrate_git_target_copies_binary_files_without_resolving_references(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

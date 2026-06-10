@@ -78,9 +78,9 @@ def test_live_progress_uses_rich_task_rows(capsys) -> None:
             "plugins",
             "embedded-list",
             "start",
-            detail="depth=1/2 targets=3 jobs=2",
+            detail="targets=3 jobs=2",
         )
-        log_progress("plugins", "embedded-list", "done", detail="depth=1/2")
+        log_progress("plugins", "embedded-list", "done", detail="targets")
         write_progress_log("[audio-transcription] request start")
         log_progress("hydrate", "component", "done", target="arena")
     finally:
@@ -95,14 +95,13 @@ def test_live_progress_uses_rich_task_rows(capsys) -> None:
     assert "plugins embedded list" in captured
     assert "3/3" in captured
     assert "[audio-transcription] request start" in captured
-    assert "1/2" in captured
     assert "hit=1" in captured
     assert "  hydrate component: total=2 done=1" in progress_summary_lines()
     assert "  arena channel: cache_hit=1" in progress_summary_lines()
     reset_progress()
 
 
-def test_live_progress_resets_embedded_depth_counts(capsys) -> None:
+def test_live_progress_resets_embedded_target_counts(capsys) -> None:
     reset_progress()
     token = set_verbose_logging(True)
     try:
@@ -111,15 +110,15 @@ def test_live_progress_resets_embedded_depth_counts(capsys) -> None:
             "plugins",
             "embedded-resolve",
             "start",
-            detail="depth=1/2 targets=1 jobs=2",
+            detail="targets=1 jobs=2",
         )
         log_progress("plugins", "embedded-resolve", "processed", target="demo://a")
-        log_progress("plugins", "embedded-resolve", "done", detail="depth=1/2")
+        log_progress("plugins", "embedded-resolve", "done", detail="targets")
         log_progress(
             "plugins",
             "embedded-resolve",
             "start",
-            detail="depth=2/2 targets=3 jobs=2",
+            detail="targets=3 jobs=2",
         )
         log_progress("plugins", "embedded-resolve", "processed", target="demo://b")
     finally:

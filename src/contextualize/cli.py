@@ -1499,9 +1499,7 @@ def _context_hydrate_overrides(
     transcribe_refresh,
     refresh_all,
     cache_ttl,
-    target_depth,
-    target_scope,
-    include_parent,
+    embedded_resolution,
     extra_params,
 ):
     from .plugins import collect_plugin_cli_overrides
@@ -1556,9 +1554,7 @@ def _context_hydrate_overrides(
         cache_ttl=parsed_cache_ttl,
         refresh_cache=refresh_cache,
         plugin_overrides=plugin_overrides,
-        target_depth=target_depth,
-        target_scope=target_scope.lower() if target_scope else None,
-        include_parent=include_parent,
+        embedded_resolution=embedded_resolution,
     )
 
 
@@ -1736,21 +1732,9 @@ def contexts_status_cmd(status_path) -> None:
     help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
 )
 @click.option(
-    "--target-depth",
-    type=int,
+    "--embedded-resolution/--no-embedded-resolution",
     default=None,
-    help="Follow embedded plugin targets this many levels deep.",
-)
-@click.option(
-    "--target-scope",
-    type=click.Choice(["first", "all"], case_sensitive=False),
-    default=None,
-    help="Resolve embedded targets from only the first input or all inputs.",
-)
-@click.option(
-    "--include-parent/--children-only",
-    default=None,
-    help="Include original targets when embedded targets are followed.",
+    help="Resolve embedded plugin targets attached to collected items.",
 )
 @_video_frame_options
 @click.pass_context
@@ -1776,9 +1760,7 @@ def contexts_hydrate_cmd(
     transcribe_refresh,
     refresh_all,
     cache_ttl,
-    target_depth,
-    target_scope,
-    include_parent,
+    embedded_resolution,
     **extra_params,
 ):
     """Hydrate one or more registered contexts."""
@@ -1809,9 +1791,7 @@ def contexts_hydrate_cmd(
         transcribe_refresh=transcribe_refresh,
         refresh_all=refresh_all,
         cache_ttl=cache_ttl,
-        target_depth=target_depth,
-        target_scope=target_scope,
-        include_parent=include_parent,
+        embedded_resolution=embedded_resolution,
         extra_params=extra_params,
     )
     try:
@@ -1925,21 +1905,9 @@ def contexts_hydrate_cmd(
     help="Cache TTL (e.g., 7d, 24h, 1w). Overrides manifest config.",
 )
 @click.option(
-    "--target-depth",
-    type=int,
+    "--embedded-resolution/--no-embedded-resolution",
     default=None,
-    help="Follow embedded plugin targets this many levels deep.",
-)
-@click.option(
-    "--target-scope",
-    type=click.Choice(["first", "all"], case_sensitive=False),
-    default=None,
-    help="Resolve embedded targets from only the first input ('first') or all inputs ('all').",
-)
-@click.option(
-    "--include-parent/--children-only",
-    default=None,
-    help="Include original targets when embedded targets are followed.",
+    help="Resolve embedded plugin targets attached to collected items.",
 )
 @click.option(
     "--trace",
@@ -1968,9 +1936,7 @@ def hydrate_cmd(
     transcribe_refresh,
     refresh_all,
     cache_ttl,
-    target_depth,
-    target_scope,
-    include_parent,
+    embedded_resolution,
     trace,
     **extra_params,
 ):
@@ -2049,9 +2015,7 @@ def hydrate_cmd(
         cache_ttl=parsed_cache_ttl,
         refresh_cache=refresh_cache,
         plugin_overrides=plugin_overrides,
-        target_depth=target_depth,
-        target_scope=target_scope.lower() if target_scope else None,
-        include_parent=include_parent,
+        embedded_resolution=embedded_resolution,
     )
 
     manifest_path = None
@@ -2092,9 +2056,7 @@ def hydrate_cmd(
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
                 plugin_overrides=plugin_overrides,
-                target_depth=target_depth or 0,
-                target_scope=(target_scope or "all").lower(),
-                include_parent=True if include_parent is None else include_parent,
+                embedded_resolution=bool(embedded_resolution),
             )
         except (ValueError, FileNotFoundError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -2275,21 +2237,9 @@ def hydrate_cmd(
     help="Paths to skip when resolving Markdown links. Can be specified multiple times.",
 )
 @click.option(
-    "--target-depth",
-    type=int,
-    default=0,
-    help="Follow embedded plugin targets this many levels deep.",
-)
-@click.option(
-    "--target-scope",
-    type=click.Choice(["first", "all"], case_sensitive=False),
-    default="all",
-    help="Resolve embedded targets from only the first input ('first') or all inputs ('all').",
-)
-@click.option(
-    "--include-parent/--children-only",
-    default=True,
-    help="Include the original target when embedded targets are followed.",
+    "--embedded-resolution/--no-embedded-resolution",
+    default=False,
+    help="Resolve embedded plugin targets attached to collected items.",
 )
 @click.option(
     "--trace",
@@ -2387,9 +2337,7 @@ def cat_cmd(
     link_depth,
     link_scope,
     link_skip,
-    target_depth,
-    target_scope,
-    include_parent,
+    embedded_resolution,
     trace,
     list_mode,
     rev,
@@ -2509,9 +2457,7 @@ def cat_cmd(
                 cache_ttl=parsed_cache_ttl,
                 refresh_cache=refresh_cache,
                 plugin_overrides=plugin_overrides,
-                target_depth=target_depth,
-                target_scope=target_scope.lower(),
-                include_parent=include_parent,
+                embedded_resolution=embedded_resolution,
                 text_only=text_only,
                 binary_policy=binary_policy,
             )

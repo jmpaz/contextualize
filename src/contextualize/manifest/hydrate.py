@@ -78,9 +78,7 @@ class HydrateOverrides:
     cache_ttl: timedelta | None = None
     refresh_cache: bool = False
     plugin_overrides: dict[str, Any] | None = None
-    target_depth: int | None = None
-    target_scope: str | None = None
-    include_parent: bool | None = None
+    embedded_resolution: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -182,9 +180,7 @@ def build_inline_hydration_plan(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     plugin_overrides: dict[str, Any] | None = None,
-    target_depth: int = 0,
-    target_scope: str = "all",
-    include_parent: bool = True,
+    embedded_resolution: bool = False,
 ) -> HydratePlan:
     from ..utils import brace_expand
 
@@ -230,9 +226,7 @@ def build_inline_hydration_plan(
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
             local_base=local_base,
-            target_depth=target_depth,
-            target_scope=target_scope,
-            include_parent=include_parent,
+            embedded_resolution=embedded_resolution,
         )
         for item in items:
             subpath = _split_subpath(item.context_subpath)
@@ -434,20 +428,12 @@ def build_hydration_plan_data(
 
     base_dir = _resolve_base_dir(cfg, manifest_cwd, manifest_path)
     context_cfg = _resolve_context_config(cfg, overrides, cwd)
-    target_depth_default = int(
-        overrides.target_depth
-        if overrides.target_depth is not None
-        else cfg.get("target-depth", 0) or 0
-    )
-    target_scope_default = _normalize_target_scope(
-        overrides.target_scope or cfg.get("target-scope", "all") or "all",
-        label="target-scope",
-    )
-    include_parent_default = _normalize_bool(
-        overrides.include_parent
-        if overrides.include_parent is not None
-        else cfg.get("include-parent", True),
-        label="include-parent",
+    _reject_removed_embedded_traversal_keys(cfg, "config")
+    embedded_resolution_default = _normalize_bool(
+        overrides.embedded_resolution
+        if overrides.embedded_resolution is not None
+        else cfg.get("embedded-resolution", False),
+        label="embedded-resolution",
     )
     context_dir = context_cfg["dir"]
     has_local_sources = _manifest_has_local_sources(components)
@@ -504,14 +490,10 @@ def build_hydration_plan_data(
             comp,
             prefix=f"component '{comp_name}'",
         )
-        comp_target_depth = int(comp.get("target-depth", target_depth_default) or 0)
-        comp_target_scope = _normalize_target_scope(
-            comp.get("target-scope", target_scope_default) or "all",
-            label=f"Component '{comp_name}' target-scope",
-        )
-        comp_include_parent = _normalize_bool(
-            comp.get("include-parent", include_parent_default),
-            label=f"Component '{comp_name}' include-parent",
+        _reject_removed_embedded_traversal_keys(comp, f"component '{comp_name}'")
+        comp_embedded_resolution = _normalize_bool(
+            comp.get("embedded-resolution", embedded_resolution_default),
+            label=f"Component '{comp_name}' embedded-resolution",
         )
 
         if (
@@ -574,8 +556,6 @@ def build_hydration_plan_data(
                     Any | None,
                     bool,
                     dict[str, Any] | None,
-                    int,
-                    str,
                     bool,
                 ],
             ] = {}
@@ -604,16 +584,12 @@ def build_hydration_plan_data(
                 plugin_overrides_key = _plugin_overrides_cache_key(
                     effective_plugin_overrides
                 )
-                file_target_depth = int(
-                    file_opts.get("target-depth", comp_target_depth) or 0
+                _reject_removed_embedded_traversal_keys(
+                    file_opts, f"Component '{comp_name}' file[{spec_index}]"
                 )
-                file_target_scope = _normalize_target_scope(
-                    file_opts.get("target-scope", comp_target_scope) or "all",
-                    label=f"Component '{comp_name}' file[{spec_index}] target-scope",
-                )
-                file_include_parent = _normalize_bool(
-                    file_opts.get("include-parent", comp_include_parent),
-                    label=f"Component '{comp_name}' file[{spec_index}] include-parent",
+                file_embedded_resolution = _normalize_bool(
+                    file_opts.get("embedded-resolution", comp_embedded_resolution),
+                    label=f"Component '{comp_name}' file[{spec_index}] embedded-resolution",
                 )
 
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
@@ -624,9 +600,7 @@ def build_hydration_plan_data(
                     comp_gitignore,
                     cache_alias,
                     plugin_overrides_key,
-                    file_target_depth,
-                    file_target_scope,
-                    file_include_parent,
+                    file_embedded_resolution,
                 )
                 if (
                     spec_cache_key not in resolved_spec_cache
@@ -637,9 +611,7 @@ def build_hydration_plan_data(
                         alias_hint,
                         force_git,
                         effective_plugin_overrides,
-                        file_target_depth,
-                        file_target_scope,
-                        file_include_parent,
+                        file_embedded_resolution,
                     )
 
                 prepared_specs.append(
@@ -657,7 +629,7 @@ def build_hydration_plan_data(
                 (
                     index,
                     (
-                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, epo=effective_plugin_overrides, td=target_depth, ts=target_scope, ip=include_parent: (
+                        lambda rs=raw_spec, ah=alias_hint, fg=force_git, epo=effective_plugin_overrides, er=embedded_resolution: (
                             _resolve_spec_items(
                                 rs,
                                 base_dir,
@@ -669,9 +641,7 @@ def build_hydration_plan_data(
                                 refresh_cache=context_cfg["refresh_cache"],
                                 force_git=fg,
                                 plugin_overrides=epo,
-                                target_depth=td,
-                                target_scope=ts,
-                                include_parent=ip,
+                                embedded_resolution=er,
                             )
                         )
                     ),
@@ -683,9 +653,7 @@ def build_hydration_plan_data(
                         alias_hint,
                         force_git,
                         effective_plugin_overrides,
-                        target_depth,
-                        target_scope,
-                        include_parent,
+                        embedded_resolution,
                     ),
                 ) in enumerate(pending_by_key.items())
             ]
@@ -1018,13 +986,16 @@ def _resolve_context_config(
     }
 
 
-def _normalize_target_scope(value: Any, *, label: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{label} must be a string")
-    normalized = value.lower()
-    if normalized not in {"first", "all"}:
-        raise ValueError(f"{label} must be 'first' or 'all'")
-    return normalized
+def _reject_removed_embedded_traversal_keys(mapping: dict[str, Any], label: str) -> None:
+    removed = [
+        key for key in ("target-depth", "target-scope", "include-parent") if key in mapping
+    ]
+    if not removed:
+        return
+    keys = ", ".join(removed)
+    raise ValueError(
+        f"{label} uses removed embedded traversal key(s): {keys}. Use embedded-resolution instead."
+    )
 
 
 def _normalize_bool(value: Any, *, label: str) -> bool:
@@ -1638,9 +1609,7 @@ def _resolve_external_items_via_refs(
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
     plugin_overrides: dict[str, Any] | None = None,
-    target_depth: int = 0,
-    target_scope: str = "all",
-    include_parent: bool = True,
+    embedded_resolution: bool = False,
 ) -> list[ResolvedItem]:
     refs = create_file_references(
         [target],
@@ -1651,9 +1620,7 @@ def _resolve_external_items_via_refs(
         cache_ttl=cache_ttl,
         refresh_cache=refresh_cache,
         plugin_overrides=plugin_overrides,
-        target_depth=target_depth,
-        target_scope=target_scope,
-        include_parent=include_parent,
+        embedded_resolution=embedded_resolution,
     )["refs"]
 
     plugin_refs = [ref for ref in refs if isinstance(ref, PluginReference)]
@@ -1832,9 +1799,7 @@ def _resolve_spec_items(
     force_git: bool = False,
     plugin_overrides: dict[str, Any] | None = None,
     local_base: str | None = None,
-    target_depth: int = 0,
-    target_scope: str = "all",
-    include_parent: bool = True,
+    embedded_resolution: bool = False,
 ) -> list[ResolvedItem]:
     spec = os.path.expanduser(raw_spec)
     spec_opts = parse_target_spec(spec)
@@ -1898,9 +1863,7 @@ def _resolve_spec_items(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
-            target_depth=target_depth,
-            target_scope=target_scope,
-            include_parent=include_parent,
+            embedded_resolution=embedded_resolution,
         )
 
     tgt = parse_git_target(target)
@@ -1915,9 +1878,7 @@ def _resolve_spec_items(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             plugin_overrides=plugin_overrides,
-            target_depth=target_depth,
-            target_scope=target_scope,
-            include_parent=include_parent,
+            embedded_resolution=embedded_resolution,
         )
 
     base = "" if os.path.isabs(target) else base_dir
