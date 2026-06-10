@@ -22,6 +22,7 @@ from ..plugins import (
     normalize_manifest_plugin_config,
 )
 from ..plugins.reference import PluginReference
+from ..progress import log_progress
 from ..references import URLReference, create_file_references
 from ..runtime import get_payload_spec_jobs
 from ..references.helpers import (
@@ -151,6 +152,8 @@ class _PluginPendingWrite:
 
 
 def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
+    file_count = _hydration_file_count(plan)
+    log_progress("hydrate", "file", "total", count=file_count)
     _write_files(plan.files_to_write)
     _copy_files(plan.files_to_copy)
     _create_symlinks(plan.files_to_symlink)
@@ -159,10 +162,7 @@ def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
     if plan.access == "read-only":
         _apply_read_only(plan.context_dir)
 
-    written_paths = {path.as_posix() for path, _ in plan.files_to_write}
-    copied_paths = {path.as_posix() for path, _ in plan.files_to_copy}
-    symlinked_paths = {path.as_posix() for path, _ in plan.files_to_symlink}
-    file_count = len(written_paths | copied_paths | symlinked_paths)
+    log_progress("hydrate", "file", "done", count=file_count)
     return HydrateResult(
         context_dir=str(plan.context_dir),
         component_count=plan.component_count,
@@ -477,8 +477,10 @@ def build_hydration_plan_data(
             context_cfg["agents_text"],
         )
 
+    log_progress("hydrate", "component", "total", count=len(components))
     for comp in components:
         comp_name = comp["name"]
+        log_progress("hydrate", "component", "start", target=comp_name)
         comp_files = comp.get("files")
         comp_repos = comp.get("repos")
         comp_text = comp.get("text")
@@ -856,6 +858,13 @@ def build_hydration_plan_data(
         if normalized_files:
             normalized_comp["files"] = _dedupe_manifest_entries(normalized_files)
         normalized_components.append(normalized_comp)
+        log_progress(
+            "hydrate",
+            "component",
+            "done",
+            target=comp_name,
+            count=len(normalized_files),
+        )
 
     if context_cfg["include_meta"]:
         normalized_manifest = {
@@ -2562,22 +2571,32 @@ def _apply_timestamps(timestamps: dict[Path, tuple[float, float]]) -> None:
             pass
 
 
+def _hydration_file_count(plan: HydratePlan) -> int:
+    written_paths = {path.as_posix() for path, _ in plan.files_to_write}
+    copied_paths = {path.as_posix() for path, _ in plan.files_to_copy}
+    symlinked_paths = {path.as_posix() for path, _ in plan.files_to_symlink}
+    return len(written_paths | copied_paths | symlinked_paths)
+
+
 def _write_files(files: list[tuple[Path, str]]) -> None:
     for path, content in files:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        log_progress("hydrate", "file", "processed", target=str(path))
 
 
 def _copy_files(files: list[tuple[Path, Path]]) -> None:
     for dest, source in files:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
+        log_progress("hydrate", "file", "processed", target=str(dest))
 
 
 def _create_symlinks(links: list[tuple[Path, Path]]) -> None:
     for dest, source in links:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.symlink_to(source.resolve())
+        log_progress("hydrate", "file", "processed", target=str(dest))
 
 
 def _apply_read_only(root: Path) -> None:

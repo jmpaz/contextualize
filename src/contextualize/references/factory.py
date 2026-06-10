@@ -11,11 +11,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from ..concurrency import media_task_semaphore, run_indexed_tasks_fail_fast
 from ..plugins.resolve import (
     list_plugin_targets,
     materialize_plugin_target,
     resolve_plugin_references,
 )
+from ..progress import log_progress, record_progress
+from ..runtime import get_payload_media_jobs
 from ..git.target import parse_git_target
 from ..utils import brace_expand, count_tokens
 from .file import FileExistenceReference, FileReference
@@ -552,23 +555,60 @@ def _resolve_embedded_target_refs(
 
     refs: list[Any] = []
     frontier = list(seed_targets)
-    for _ in range(target_depth):
+    for depth_index in range(target_depth):
         next_frontier: list[str] = []
-        for target in frontier:
-            try:
-                listed = list_plugin_targets(
-                    target,
-                    overrides=plugin_overrides,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                )
-            except Exception as exc:
+        media_jobs = get_payload_media_jobs()
+        log_progress(
+            "plugins",
+            "embedded-list",
+            "start",
+            detail=f"depth={depth_index + 1}/{target_depth} targets={len(frontier)} jobs={media_jobs}",
+        )
+        list_tasks = [
+            (
+                index,
+                (
+                    lambda current=target: _list_embedded_targets_safely(
+                        current,
+                        plugin_overrides=plugin_overrides,
+                        use_cache=use_cache,
+                        cache_ttl=cache_ttl,
+                        refresh_cache=refresh_cache,
+                    )
+                ),
+            )
+            for index, target in enumerate(frontier)
+        ]
+        listed_results = run_indexed_tasks_fail_fast(
+            list_tasks,
+            max_workers=media_jobs,
+            semaphore=media_task_semaphore(),
+        )
+        child_jobs: list[tuple[int, str]] = []
+        encounter_index = 0
+        for _, (target, listed, error) in listed_results:
+            if error is not None:
                 print(
-                    f"Warning: embedded target listing failed for {target}: {exc}",
+                    f"Warning: embedded target listing failed for {target}: {error}",
                     file=sys.stderr,
                 )
+                record_progress(
+                    "plugins",
+                    "embedded-list",
+                    "failed",
+                    target=target,
+                    detail=str(error),
+                )
                 continue
+            provider_name = getattr(listed, "plugin_name", None) or "plugins"
+            item_count = len(getattr(listed, "items", ()) or ())
+            record_progress(
+                str(provider_name),
+                "list-targets",
+                "processed",
+                target=target,
+                count=item_count,
+            )
             for item in listed.items:
                 child = item.get("target")
                 if not isinstance(child, str) or not child or child in seen:
@@ -577,37 +617,104 @@ def _resolve_embedded_target_refs(
                     continue
                 seen.add(child)
                 next_frontier.append(child)
-                refs.extend(
-                    _resolve_embedded_child_refs(
-                        child,
-                        ignore_patterns=ignore_patterns,
-                        format=format,
-                        label=label,
-                        label_suffix=label_suffix,
-                        include_token_count=include_token_count,
-                        token_target=token_target,
-                        inject=inject,
-                        depth=depth,
-                        trace_collector=trace_collector,
-                        text_only=text_only,
-                        use_cache=use_cache,
-                        cache_ttl=cache_ttl,
-                        refresh_cache=refresh_cache,
-                        plugin_overrides=plugin_overrides,
-                        arena_overrides=arena_overrides,
-                        discord_overrides=discord_overrides,
-                        atproto_overrides=atproto_overrides,
-                        soundcloud_overrides=soundcloud_overrides,
-                        binary_policy=binary_policy,
-                        seen=seen,
-                    )
+                child_jobs.append((encounter_index, child))
+                encounter_index += 1
+
+        if child_jobs:
+            log_progress(
+                "plugins",
+                "embedded-resolve",
+                "start",
+                detail=f"depth={depth_index + 1}/{target_depth} targets={len(child_jobs)} jobs={media_jobs}",
+            )
+            resolve_tasks = [
+                (
+                    index,
+                    (
+                        lambda current=child: _resolve_embedded_child_refs(
+                            current,
+                            ignore_patterns=ignore_patterns,
+                            format=format,
+                            label=label,
+                            label_suffix=label_suffix,
+                            include_token_count=include_token_count,
+                            token_target=token_target,
+                            inject=inject,
+                            depth=depth,
+                            trace_collector=trace_collector,
+                            text_only=text_only,
+                            use_cache=use_cache,
+                            cache_ttl=cache_ttl,
+                            refresh_cache=refresh_cache,
+                            plugin_overrides=plugin_overrides,
+                            arena_overrides=arena_overrides,
+                            discord_overrides=discord_overrides,
+                            atproto_overrides=atproto_overrides,
+                            soundcloud_overrides=soundcloud_overrides,
+                            binary_policy=binary_policy,
+                            seen=seen,
+                        )
+                    ),
                 )
+                for index, child in child_jobs
+            ]
+            resolved_total = 0
+            for _, child_refs in run_indexed_tasks_fail_fast(
+                resolve_tasks,
+                max_workers=media_jobs,
+                semaphore=media_task_semaphore(),
+            ):
+                resolved_total += len(child_refs)
+                refs.extend(child_refs)
+            log_progress(
+                "plugins",
+                "embedded-resolve",
+                "done",
+                detail=f"depth={depth_index + 1}/{target_depth}",
+                count=resolved_total,
+            )
+        else:
+            log_progress(
+                "plugins",
+                "embedded-resolve",
+                "done",
+                detail=f"depth={depth_index + 1}/{target_depth}",
+                count=0,
+            )
+        log_progress(
+            "plugins",
+            "embedded-list",
+            "done",
+            detail=f"depth={depth_index + 1}/{target_depth}",
+            count=len(next_frontier),
+        )
         if target_scope == "first" and next_frontier:
             next_frontier = next_frontier[:1]
         frontier = next_frontier
         if not frontier:
             break
     return refs
+
+
+def _list_embedded_targets_safely(
+    target: str,
+    *,
+    plugin_overrides: dict[str, Any],
+    use_cache: bool,
+    cache_ttl: timedelta | None,
+    refresh_cache: bool,
+) -> tuple[str, Any | None, Exception | None]:
+    try:
+        listed = list_plugin_targets(
+            target,
+            overrides=plugin_overrides,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        )
+    except Exception as exc:
+        return target, None, exc
+    return target, listed, None
 
 
 def _resolve_embedded_child_refs(

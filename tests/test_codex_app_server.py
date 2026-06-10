@@ -91,6 +91,98 @@ def test_describe_image_starts_ephemeral_app_server_thread(
     )
 
 
+def test_shared_app_server_reuses_one_process_for_multiple_images(
+    tmp_path: Path, monkeypatch
+) -> None:
+    codex.close_shared_codex_app_server_sessions()
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"png")
+    instances: list[object] = []
+    requests: list[tuple[str, dict[str, Any] | None]] = []
+
+    class _FakeClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            instances.append(self)
+            self._turn_count = 0
+            self._events: list[dict[str, Any]] = []
+
+        def start(self) -> None:
+            return None
+
+        def initialize(self) -> None:
+            requests.append(("initialize", None))
+
+        def close(self) -> None:
+            return None
+
+        def request(
+            self,
+            method: str,
+            *,
+            params: dict[str, Any] | None = None,
+            timeout_seconds: float | None = None,
+        ) -> dict[str, Any]:
+            requests.append((method, params))
+            if method == "model/list":
+                return {}
+            if method == "thread/start":
+                return {"thread": {"id": "thread-1"}}
+            if method == "turn/start":
+                self._turn_count += 1
+                turn_id = f"turn-{self._turn_count}"
+                self._events.extend(
+                    [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "text": f"Image {self._turn_count}",
+                                }
+                            },
+                        },
+                        {
+                            "method": "turn/completed",
+                            "params": {
+                                "turn": {"id": turn_id, "status": "completed"}
+                            },
+                        },
+                    ]
+                )
+                return {"turn": {"id": turn_id}}
+            return {}
+
+        def next_event(self, *, timeout_seconds: float | None = None) -> dict[str, Any]:
+            return self._events.pop(0)
+
+    monkeypatch.setattr(codex, "_CodexAppServerClient", _FakeClient)
+
+    try:
+        assert codex.is_shared_codex_app_server_live(
+            "codex app-server --listen stdio://"
+        ) == (
+            True,
+            None,
+        )
+        first = codex.describe_image_with_shared_codex_app_server(
+            image_path,
+            prompt="describe",
+            command="codex app-server --listen stdio://",
+        )
+        second = codex.describe_image_with_shared_codex_app_server(
+            image_path,
+            prompt="describe",
+            command="codex app-server --listen stdio://",
+        )
+    finally:
+        codex.close_shared_codex_app_server_sessions()
+
+    assert [first.text, second.text] == ["Image 1", "Image 2"]
+    assert len(instances) == 1
+    assert [method for method, _params in requests].count("initialize") == 1
+    assert [method for method, _params in requests].count("thread/start") == 2
+
+
 def test_transcribe_image_batches_reuses_one_app_server_thread(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -370,7 +462,7 @@ def test_scanned_pdf_wraps_app_server_batch_timeout(
 
     monkeypatch.setattr(
         codex,
-        "transcribe_image_batches_with_codex_app_server",
+        "transcribe_image_batches_with_shared_codex_app_server",
         fail_batches,
     )
 

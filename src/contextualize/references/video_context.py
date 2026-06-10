@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 from typing import Any
 
+from contextualize.concurrency import media_task_semaphore, run_indexed_tasks_fail_fast
 from contextualize.cache.local_media import (
     get_cached_transcript as get_cached_local_media_text,
 )
@@ -19,6 +20,8 @@ from contextualize.cache.local_media import (
     store_transcript as store_local_media_text,
 )
 from contextualize.plugins.api import TranscriptionResult
+from contextualize.progress import record_progress
+from contextualize.runtime import get_payload_media_jobs
 
 from .audio_transcription import CacheMissError
 from .audio_transcription import _video_suffix_from_content_type
@@ -165,7 +168,9 @@ def render_video_frame_section(
     if use_cache and not _should_refresh_video(refresh_cache):
         cached = get_cached_local_media_text(cache_identity)
         if cached:
+            record_progress("video", "frame-section", "cache_hit")
             return cached
+    record_progress("video", "frame-section", "cache_miss", count=len(timestamps))
 
     from contextualize.runtime import get_cache_only
 
@@ -174,32 +179,30 @@ def render_video_frame_section(
 
     frames = []
     with tempfile.TemporaryDirectory() as tmpdir:
-        for index, timestamp in enumerate(timestamps, start=1):
-            image_path = extract_video_frame(
-                video_path,
-                timestamp_seconds=timestamp,
-                output_dir=Path(tmpdir),
-                index=index,
-            )
-            speech = speech_anchor_for_timestamp(timestamp, segments)
-            if speech_units:
-                speech = speech_anchor_for_timestamp(timestamp, speech_units)
-            description = None
-            if settings.frame_descriptions and image_path is not None:
-                description = describe_video_frame(
-                    image_path,
-                    timestamp_seconds=timestamp,
-                    speech=speech,
-                    source_url=source_url,
-                )
-            frames.append(
-                VideoFrame(
-                    index=index,
-                    timestamp=timestamp,
-                    speech=speech,
-                    description=description,
+        frame_tasks = [
+            (
+                index,
+                (
+                    lambda idx=index, ts=timestamp: _build_video_frame(
+                        video_path,
+                        timestamp=ts,
+                        index=idx,
+                        output_dir=Path(tmpdir),
+                        segments=segments,
+                        speech_units=speech_units,
+                        settings=settings,
+                        source_url=source_url,
+                    )
                 )
             )
+            for index, timestamp in enumerate(timestamps, start=1)
+        ]
+        for _, frame in run_indexed_tasks_fail_fast(
+            frame_tasks,
+            max_workers=get_payload_media_jobs(),
+            semaphore=media_task_semaphore(),
+        ):
+            frames.append(frame)
     section = format_video_frame_section(frames)
     if use_cache and section.strip():
         store_local_media_text(
@@ -209,7 +212,44 @@ def render_video_frame_section(
             source_sha256=source_sha256,
             source_suffix=source_suffix,
         )
+        record_progress("video", "frame-section", "processed", count=len(frames))
     return section
+
+
+def _build_video_frame(
+    video_path: Path,
+    *,
+    timestamp: float,
+    index: int,
+    output_dir: Path,
+    segments: list[VideoSegment],
+    speech_units: list[VideoSegment],
+    settings: VideoFrameSettings,
+    source_url: str | None,
+) -> VideoFrame:
+    image_path = extract_video_frame(
+        video_path,
+        timestamp_seconds=timestamp,
+        output_dir=output_dir,
+        index=index,
+    )
+    speech = speech_anchor_for_timestamp(timestamp, segments)
+    if speech_units:
+        speech = speech_anchor_for_timestamp(timestamp, speech_units)
+    description = None
+    if settings.frame_descriptions and image_path is not None:
+        description = describe_video_frame(
+            image_path,
+            timestamp_seconds=timestamp,
+            speech=speech,
+            source_url=source_url,
+        )
+    return VideoFrame(
+        index=index,
+        timestamp=timestamp,
+        speech=speech,
+        description=description,
+    )
 
 
 def resolve_video_frame_settings(

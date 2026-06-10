@@ -11,6 +11,8 @@ from contextualize import cli
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
 from contextualize.runtime import (
+    get_payload_media_jobs,
+    get_payload_spec_jobs,
     get_refresh_audio,
     reset_refresh_audio,
     set_refresh_audio,
@@ -85,6 +87,41 @@ def test_cat_passes_plugin_cli_overrides_into_file_reference_creation(
 
     assert result.exit_code == 0
     assert captured["plugin_overrides"] == {"demo-cli": {"value": "hello"}}
+
+
+def test_cat_accepts_forwarded_parallel_job_options(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(plugin_loader, "_iter_plugin_entrypoints", lambda: [])
+    clear_loaded_plugins_cache()
+
+    note_path = tmp_path / "note.txt"
+    note_path.write_text("hello", encoding="utf-8")
+    captured: dict[str, int] = {}
+
+    def _create_file_references(*args, **kwargs):
+        captured["spec_jobs"] = get_payload_spec_jobs()
+        captured["media_jobs"] = get_payload_media_jobs()
+        return {
+            "refs": [],
+            "concatenated": "",
+            "ignored_files": [],
+            "ignored_folders": {},
+        }
+
+    monkeypatch.setattr(
+        "contextualize.references.create_file_references", _create_file_references
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["--spec-jobs", "7", "--media-jobs", "5", "cat", str(note_path)],
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"spec_jobs": 7, "media_jobs": 5}
 
 
 def test_cat_merges_video_cli_overrides_into_file_reference_creation(
