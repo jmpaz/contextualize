@@ -115,9 +115,9 @@ in
 
       activation = {
         mode = mkOption {
-          type = types.enum [ "service" "inline" ];
+          type = types.enum [ "service" "inline" "manual" ];
           default = if pkgs.stdenv.isLinux then "service" else "inline";
-          description = "Run context hydration through a non-blocking user service or inline during activation.";
+          description = "Run context hydration through a non-blocking user service, inline during activation, or manually through the generated service.";
         };
 
         after = mkOption {
@@ -147,7 +147,7 @@ in
     systemd.user.services.contextualize-contexts-hydrate = lib.mkIf (
       pkgs.stdenv.isLinux
       && cfg.contexts.enable
-      && cfg.contexts.activation.mode == "service"
+      && (cfg.contexts.activation.mode == "service" || cfg.contexts.activation.mode == "manual")
     ) {
       Unit = {
         Description = "Hydrate contextualize context registry";
@@ -170,7 +170,10 @@ in
       ''
     );
 
-    home.activation.contextualizeContextsHydrate = lib.mkIf cfg.contexts.enable (
+    home.activation.contextualizeContextsHydrate = lib.mkIf (
+      cfg.contexts.enable
+      && cfg.contexts.activation.mode != "manual"
+    ) (
       lib.hm.dag.entryAfter (
         cfg.contexts.activation.after
         ++ lib.optional (cfg.contexts.activation.mode == "service") "reloadSystemd"
