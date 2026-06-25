@@ -117,6 +117,22 @@ def _extract_stdin_urls(text: str) -> tuple[str, ...]:
     return tuple(urls)
 
 
+def _stdin_is_capturable() -> bool:
+    """True only when stdin carries real piped/redirected data — a pipe (FIFO)
+    or a regular file. A tty has no piped data; a socket or other stream may
+    never send EOF, so reading it would block indefinitely (e.g. under
+    ``direnv exec`` or some non-interactive launchers)."""
+    if sys.stdin.isatty():
+        return False
+    try:
+        import stat
+
+        mode = os.fstat(sys.stdin.fileno()).st_mode
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISREG(mode)
+
+
 @dataclass
 class _TraceRef:
     path: str
@@ -810,7 +826,7 @@ def cli(
 
     stdin_data = ""
     stdin_binary_path: str | None = None
-    if not sys.stdin.isatty():
+    if _stdin_is_capturable():
         raw = sys.stdin.buffer.read()
         if raw:
             from .references.helpers import detect_media_suffix
