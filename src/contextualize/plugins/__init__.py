@@ -3,6 +3,7 @@ from .cli import (
     loaded_transcription_gates,
     loaded_transcription_providers,
     sync_plugin_cli_commands,
+    sync_plugin_root_commands,
 )
 from .loader import clear_loaded_plugins_cache, get_loaded_plugins
 from .resolve import (
@@ -27,4 +28,5 @@ __all__ = [
     "collect_plugin_cli_overrides",
     "loaded_transcription_providers",
     "loaded_transcription_gates",
+    "sync_plugin_root_commands",
 ]
