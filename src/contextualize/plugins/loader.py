@@ -31,6 +31,14 @@ def _as_name(value: Any) -> str | None:
     return text or None
 
 
+def _noop_can_resolve(_target: Any, _context: Any) -> bool:
+    return False
+
+
+def _noop_resolve(_target: Any, _context: Any) -> list:
+    return []
+
+
 def _validate_plugin_callables(
     *,
     name: str,
@@ -44,11 +52,15 @@ def _validate_plugin_callables(
     normalize_manifest_config: Any,
     register_cli_options: Any,
     collect_cli_overrides: Any,
+    register_command: Any,
     transcription_providers: Any,
     transcription_gates: Any,
     plugin_kind: Any,
     priority: int,
 ) -> LoadedPlugin | None:
+    if can_resolve is None and resolve is None:
+        can_resolve = _noop_can_resolve
+        resolve = _noop_resolve
     if not callable(can_resolve):
         _warn(f"plugin '{name}' has non-callable can_resolve ({origin})")
         return None
@@ -99,6 +111,12 @@ def _validate_plugin_callables(
             _warn(f"plugin '{name}' has non-callable collect_cli_overrides ({origin})")
             return None
         cli_collect_hook = collect_cli_overrides
+    register_command_hook = None
+    if register_command is not None:
+        if not callable(register_command):
+            _warn(f"plugin '{name}' has non-callable register_command ({origin})")
+            return None
+        register_command_hook = register_command
     provider_items: tuple[TranscriptionProvider, ...] = ()
     if transcription_providers is not None:
         if not isinstance(transcription_providers, (list, tuple)):
@@ -154,6 +172,7 @@ def _validate_plugin_callables(
         normalize_manifest_config=normalize_hook,
         register_cli_options=cli_register_hook,
         collect_cli_overrides=cli_collect_hook,
+        register_command=register_command_hook,
         transcription_providers=provider_items,
         transcription_gates=gate_items,
         plugin_kind=normalized_kind,
@@ -245,6 +264,7 @@ def _load_entrypoint_plugins() -> list[_PluginCandidate]:
             ),
             register_cli_options=getattr(plugin_obj, "register_cli_options", None),
             collect_cli_overrides=getattr(plugin_obj, "collect_cli_overrides", None),
+            register_command=getattr(plugin_obj, "register_command", None),
             transcription_providers=transcription_providers,
             transcription_gates=transcription_gates,
             plugin_kind=getattr(plugin_obj, "PLUGIN_KIND", None),

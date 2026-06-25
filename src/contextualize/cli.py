@@ -250,10 +250,11 @@ class OrderedGroup(click.Group):
 
     def _sync_dynamic_commands(self) -> None:
         from .plugins.auth import sync_plugin_auth_group
-        from .plugins.cli import sync_plugin_cli_commands
+        from .plugins.cli import sync_plugin_cli_commands, sync_plugin_root_commands
 
         sync_plugin_auth_group(self)
         sync_plugin_cli_commands(self)
+        sync_plugin_root_commands(self)
 
     def format_commands(
         self, ctx: click.Context, formatter: click.HelpFormatter
