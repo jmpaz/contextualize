@@ -40,7 +40,15 @@ def _to_resolved_ref(ref: Any) -> ResolvedRef:
         or ""
     )
     source = getattr(ref, "path", None) or getattr(ref, "source", "") or ""
-    label = getattr(ref, "label", None)
+    get_label = getattr(ref, "get_label", None)
+    label = None
+    if callable(get_label):
+        try:
+            label = get_label()
+        except Exception:
+            label = None
+    if not (isinstance(label, str) and label):
+        label = getattr(ref, "label", None)
     label = label if isinstance(label, str) and label else source
     return ResolvedRef(
         source=source,
