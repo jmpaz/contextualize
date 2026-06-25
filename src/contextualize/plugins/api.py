@@ -87,6 +87,7 @@ ResolveFn = Callable[[str, PluginContext], list[PluginDocument]]
 ListTargetsFn = Callable[[str, PluginContext], PluginListEnvelope]
 MaterializeFn = Callable[[str, PluginContext], list[PluginMaterializedFile]]
 RegisterAuthCommandFn = Callable[[Any], None]
+RegisterCommandFn = Callable[[Any], None]
 ClassifyTargetFn = Callable[[str, PluginContext], PluginTargetDescriptor | None]
 NormalizeManifestConfigFn = Callable[[dict[str, Any] | None], dict[str, Any] | None]
 RegisterCliOptionsFn = Callable[[str, Any], None]
@@ -184,6 +185,7 @@ class LoadedPlugin:
     normalize_manifest_config: NormalizeManifestConfigFn | None = None
     register_cli_options: RegisterCliOptionsFn | None = None
     collect_cli_overrides: CollectCliOverridesFn | None = None
+    register_command: RegisterCommandFn | None = None
     transcription_providers: tuple[TranscriptionProvider, ...] = field(
         default_factory=tuple
     )

@@ -92,3 +92,24 @@ def loaded_transcription_gates() -> tuple[Any, ...]:
     for plugin in get_loaded_plugins():
         gates.extend(plugin.transcription_gates)
     return tuple(gates)
+
+
+_ROOT_COMMANDS_ATTR = "_contextualize_root_command_plugins"
+
+
+def sync_plugin_root_commands(root: click.Group) -> None:
+    registered = set(getattr(root, _ROOT_COMMANDS_ATTR, set()))
+    for plugin in get_loaded_plugins():
+        hook = plugin.register_command
+        if hook is None:
+            continue
+        marker = f"{plugin.name}:{plugin.origin}"
+        if marker in registered:
+            continue
+        try:
+            hook(root)
+        except Exception as exc:
+            _warn(f"plugin '{plugin.name}' register_command failed: {exc}")
+            continue
+        registered.add(marker)
+    setattr(root, _ROOT_COMMANDS_ATTR, registered)
