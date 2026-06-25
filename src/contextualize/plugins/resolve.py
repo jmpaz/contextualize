@@ -78,11 +78,21 @@ def _normalize_plugin_document(
         metadata = {}
     metadata.setdefault("plugin_name", plugin_name)
     metadata.setdefault("provider", plugin_name)
+    prose_raw = item.get("prose")
+    prose = prose_raw if isinstance(prose_raw, str) else None
+    authors_raw = item.get("prose_authors")
+    prose_authors = (
+        [a for a in authors_raw if isinstance(a, str)]
+        if isinstance(authors_raw, list)
+        else []
+    )
     return PluginResolvedDocument(
         source=source_raw,
         label=label_raw,
         content=content_raw,
         metadata=metadata,
+        prose=prose,
+        prose_authors=prose_authors,
     )
 
 

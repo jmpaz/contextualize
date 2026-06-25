@@ -9,10 +9,20 @@ PLUGIN_ENTRYPOINT_GROUP = "contextualize.plugins"
 
 
 class PluginDocument(TypedDict, total=False):
+    """A resolved document.
+
+    `prose` is the authored text without scaffolding (frontmatter, media
+    descriptions, comments, structural markup). Omit it to defer to generic
+    extraction; set to "" to declare the unit carries no authored prose.
+    `prose_authors` lists the distinct authors of `prose`.
+    """
+
     source: str
     label: str
     content: str
     metadata: dict[str, Any]
+    prose: str
+    prose_authors: list[str]
 
 
 class PluginListItem(TypedDict, total=False):
