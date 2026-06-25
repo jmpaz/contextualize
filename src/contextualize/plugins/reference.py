@@ -15,6 +15,8 @@ class PluginResolvedDocument:
     label: str
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    prose: str | None = None
+    prose_authors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +51,14 @@ class PluginReference:
         if isinstance(value, str) and value.strip():
             return value
         return self.document.label
+
+    @property
+    def prose(self) -> str | None:
+        return self.document.prose
+
+    @property
+    def prose_authors(self) -> list[str]:
+        return self.document.prose_authors
 
     def read(self) -> str:
         return self.original_file_content
