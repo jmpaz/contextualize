@@ -24,6 +24,8 @@ The plugins extra installs provider plugins from [jmpaz/cx-plugins](https://gith
 
 ## Commands
 
+All of the following commands work with global flags `--prompt`, `--wrap`, `--copy`, `--staged-copy`, `--count`, and `--write-file`.
+
 | command   | purpose |
 |-----------|---------|
 | `cat`     | gather file contents (e.g. for piping to [`llm`](https://github.com/simonw/llm), or pasting elsewhere) |
@@ -32,26 +34,28 @@ The plugins extra installs provider plugins from [jmpaz/cx-plugins](https://gith
 | `payload` | compose text and file blocks from a YAML manifest                                                      |
 | `paste`   | capture staged clipboard snippets                                                                      |
 
-All commands work with the global flags `--prompt`, `--wrap`, `--copy`, `--staged-copy`, `--count`, and `--write-file`.
+`cat` is the default command. Refs given without a subcommand run `cat`, so `contextualize src/ README.md` is shorthand for `contextualize cat src/ README.md`.
+A subcommand name wins over a same-named path; reach such a path via `cat name` or `./name`.
 
 
 **Sample invocations (`cat`):**
 
 ```bash
 # gather files and copy (individually wrapped + labelled, prefixed by '--prompt') to clipboard
-contextualize cat src/ README.md --prompt "how does this work?" --copy
+contextualize src/ README.md --prompt "how does this work?" --copy
 
 # fetch a single file from a remote repo (cached under ~/.local/share/contextualize/cache/git/)
-contextualize cat github:jmpaz/contextualize:README.md
+contextualize github:jmpaz/contextualize:README.md
 
 # gather multiple files/folder(s) from a repo
-contextualize cat https://git.sr.ht/~cismonx/bookmarkfs:README.md,doc
+contextualize https://git.sr.ht/~cismonx/bookmarkfs:README.md,doc
 
 # fetch a single hosted UTF-8 file
-contextualize cat https://modelcontextprotocol.io/llms.txt
+contextualize https://modelcontextprotocol.io/llms.txt
 ```
 
 Details and more examples are available in [`docs/usage.md`](docs/usage.md).
+
 
 ## Plugins
 

@@ -441,100 +441,72 @@ def validate_prompt(ctx, param, value):
     return value
 
 
-def preprocess_args():
+def _classify_root_options(params, help_names):
+    """Split a group's options into (all option strings, value-taking ones).
+
+    An option takes a value unless it is a boolean/count flag. The help option
+    is excluded so ``--help`` after a subcommand still reaches that subcommand.
     """
-    Move forwardable options from after subcommand to before it.
+    all_opts: set[str] = set()
+    value_opts: set[str] = set()
+    for param in params:
+        if not isinstance(param, click.Option):
+            continue
+        takes_value = not (param.is_flag or param.count)
+        for opt in (*param.opts, *param.secondary_opts):
+            if opt in help_names:
+                continue
+            all_opts.add(opt)
+            if takes_value:
+                value_opts.add(opt)
+    return all_opts, value_opts
+
+
+def _find_subcommand(args, known_commands, value_opts):
+    """Locate an explicit subcommand and note whether a positional ref appears.
+
+    Each value-option's value is skipped so a value that happens to match a
+    command name is not mistaken for the subcommand.
     """
-    if len(sys.argv) < 2:
-        return
+    i = 0
+    n = len(args)
+    has_positional = False
+    while i < n:
+        arg = args[i]
+        if arg in known_commands:
+            return i, has_positional
+        if arg in value_opts and i + 1 < n:
+            i += 2
+            continue
+        if not arg.startswith("-"):
+            has_positional = True
+        i += 1
+    return None, has_positional
 
-    subcommands = {
-        "payload",
-        "cat",
-        "map",
-        "shell",
-        "paste",
-        "hydrate",
-        "plugins",
-        "auth",
-    }
 
-    # options that should be moved / which take values
-    forwardable = {
-        "--prompt",
-        "-p",
-        "--wrap",
-        "-w",
-        "--copy",
-        "-c",
-        "--staged-copy",
-        "-s",
-        "--count",
-        "-a",
-        "-b",
-        "--write-file",
-        "--copy-segments",
-        "--token-target",
-        "--md-model",
-        "--md-image-provider",
-        "--codex-app-server-command",
-        "--spec-jobs",
-        "--media-jobs",
-        "--position",
-        "--verbose",
-        "--quiet",
-    }
-    value_options = {
-        "--prompt",
-        "-p",
-        "--wrap",
-        "--write-file",
-        "--copy-segments",
-        "--token-target",
-        "--md-model",
-        "--md-image-provider",
-        "--codex-app-server-command",
-        "--spec-jobs",
-        "--media-jobs",
-        "--position",
-    }
-    short_forwardable = {"-p", "-w", "-c", "-s", "-a", "-b"}
-    short_value_options = {"-p"}
-
-    # find subcommand position
-    subcommand_idx = None
-    i = 1
-    while i < len(sys.argv):
-        arg = sys.argv[i]
-        if arg in subcommands:
-            subcommand_idx = i
-            break
-        elif arg in value_options and i + 1 < len(sys.argv):
-            i += 2  # skip the option value
-        else:
-            i += 1
-
-    if subcommand_idx is None:
-        return
-
-    # extract forwardable options
-    to_move = []
-    remaining = []
-    i = subcommand_idx + 1
-
-    while i < len(sys.argv):
-        arg = sys.argv[i]
+def _forward_root_options(args, sub_idx, all_opts, value_opts):
+    """Move global options trailing the command to before it, where Click's
+    group parser can consume them. Handles ``--opt=val``, value options, and
+    short clusters such as ``-cw``."""
+    short_opts = {o for o in all_opts if len(o) == 2 and o[0] == "-" and o[1] != "-"}
+    short_value_opts = {o for o in short_opts if o in value_opts}
+    to_move: list[str] = []
+    remaining: list[str] = []
+    i = sub_idx + 1
+    n = len(args)
+    while i < n:
+        arg = args[i]
         if arg.startswith("--"):
-            option_name, has_eq, _option_value = arg.partition("=")
-            if option_name in forwardable:
+            option_name, has_eq, _value = arg.partition("=")
+            if option_name in all_opts:
                 to_move.append(arg)
                 if (
-                    option_name in value_options
+                    option_name in value_opts
                     and not has_eq
-                    and i + 1 < len(sys.argv)
-                    and not sys.argv[i + 1].startswith("-")
+                    and i + 1 < n
+                    and not args[i + 1].startswith("-")
                 ):
-                    to_move.append(sys.argv[i + 1])
+                    to_move.append(args[i + 1])
                     i += 1
             else:
                 remaining.append(arg)
@@ -546,16 +518,16 @@ def preprocess_args():
             valid_cluster = True
             while j < len(chars):
                 opt = f"-{chars[j]}"
-                if opt not in short_forwardable:
+                if opt not in short_opts:
                     valid_cluster = False
                     break
                 expanded.append(opt)
-                if opt in short_value_options:
+                if opt in short_value_opts:
                     remainder = chars[j + 1 :]
                     if remainder:
                         expanded.append(remainder)
-                    elif i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
-                        expanded.append(sys.argv[i + 1])
+                    elif i + 1 < n and not args[i + 1].startswith("-"):
+                        expanded.append(args[i + 1])
                         consumed_next = True
                     j = len(chars)
                     break
@@ -566,31 +538,59 @@ def preprocess_args():
                     i += 1
             else:
                 remaining.append(arg)
-        elif arg in forwardable:
+        elif arg in all_opts:
             to_move.append(arg)
-            if (  # check if this option takes a value
-                arg in value_options
-                and i + 1 < len(sys.argv)
-                and not sys.argv[i + 1].startswith("-")
-            ):
-                to_move.append(sys.argv[i + 1])
+            if arg in value_opts and i + 1 < n and not args[i + 1].startswith("-"):
+                to_move.append(args[i + 1])
                 i += 1
         else:
             remaining.append(arg)
         i += 1
-
-    # reconstruct sys.argv
-    if to_move:
-        sys.argv = (
-            sys.argv[:subcommand_idx] + to_move + [sys.argv[subcommand_idx]] + remaining
-        )
+    if not to_move:
+        return args
+    return args[:sub_idx] + to_move + [args[sub_idx]] + remaining
 
 
-preprocess_args()
+DEFAULT_COMMAND = "cat"
+
+
+class DefaultCommandGroup(OrderedGroup):
+    """Root group that makes ``cat`` the implicit command.
+
+    Before Click parses, the argv is rewritten twice:
+
+    1. When the leading token is not a known subcommand yet a positional ref is
+       present, ``cat`` is prepended, so ``contextualize file.txt`` behaves like
+       ``contextualize cat file.txt``. A token naming a subcommand wins; a file
+       named like a command is reached via ``contextualize cat name`` or ``./name``.
+    2. Global options trailing the (explicit or injected) command are moved in
+       front of it, where the group parser can consume them.
+    """
+
+    def parse_args(self, ctx, args):
+        if not ctx.resilient_parsing:
+            args = self._route(ctx, list(args))
+        return super().parse_args(ctx, args)
+
+    def _route(self, ctx, args):
+        help_names = set(ctx.help_option_names or ())
+        all_opts, value_opts = _classify_root_options(self.get_params(ctx), help_names)
+        try:
+            known_commands = set(self.list_commands(ctx))
+        except Exception:
+            known_commands = set(self._commands_order)
+
+        sub_idx, has_positional = _find_subcommand(args, known_commands, value_opts)
+        if sub_idx is None:
+            if not has_positional:
+                return args
+            args = [DEFAULT_COMMAND, *args]
+            sub_idx = 0
+        return _forward_root_options(args, sub_idx, all_opts, value_opts)
 
 
 @click.group(
-    cls=OrderedGroup,
+    cls=DefaultCommandGroup,
     commands_order=[
         "cat",
         "map",
@@ -750,6 +750,10 @@ def cli(
 ):
     """
     Contextualize CLI - model context preparation utility
+
+    Refs given without a subcommand run `cat`, so `contextualize file.txt` is
+    shorthand for `contextualize cat file.txt`. A subcommand name wins over a
+    same-named path; reach such a path via `cat name` or `./name`.
     """
     ctx.ensure_object(dict)
     ctx.obj["prompt"] = prompt
