@@ -11,6 +11,19 @@ GitTarget = _target.GitTarget
 parse_git_target = _target.parse_git_target
 
 
+def _sync_submodules(repo_dir: str) -> None:
+    if not os.path.isfile(os.path.join(repo_dir, ".gitmodules")):
+        return
+    try:
+        subprocess.run(
+            ["git", "-C", repo_dir, "submodule", "update", "--init", "--recursive"],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        pass
+
+
 def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
     if reclone and os.path.isdir(g.cache_dir):
         shutil.rmtree(g.cache_dir)
@@ -157,6 +170,7 @@ def ensure_repo(g: GitTarget, pull: bool = False, reclone: bool = False) -> str:
                 except subprocess.CalledProcessError:
                     continue
 
+    _sync_submodules(g.cache_dir)
     return g.cache_dir
 
 
