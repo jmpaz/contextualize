@@ -1485,11 +1485,23 @@ def _context_sidecar_stem_from_ref(ref: Any) -> str | None:
     return _normalize_context_prefix(raw_stem)
 
 
+_PATH_HOSTILE_RE = re.compile(r'[:*?"<>|\\\x00-\x1f]+')
+
+
+def _sanitize_context_segment(part: str) -> str:
+    cleaned = _PATH_HOSTILE_RE.sub("-", part).strip("-")
+    return cleaned or "item"
+
+
 def _normalize_context_prefix(value: str) -> str | None:
     raw = value.strip().strip("/")
     if not raw:
         return None
-    parts = [part for part in raw.split("/") if part and part not in {".", ".."}]
+    parts = [
+        _sanitize_context_segment(part)
+        for part in raw.split("/")
+        if part and part not in {".", ".."}
+    ]
     return "/".join(parts) or None
 
 

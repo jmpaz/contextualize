@@ -124,6 +124,60 @@ def test_hydrate_manifest_preserves_colon_plugin_target(
     assert "note/doc.md" in rel_paths
 
 
+def test_hydrate_plugin_subpath_hostile_chars_are_sanitized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class _DidEntrypoint:
+        name = "did"
+        value = "contextualize_plugins.did:plugin"
+
+        def load(self):
+            plugin = types.SimpleNamespace()
+            plugin.PLUGIN_API_VERSION = "1"
+            plugin.PLUGIN_NAME = "did"
+            plugin.PLUGIN_PRIORITY = 500
+            plugin.can_resolve = lambda target, _context: target == "did://x"
+            plugin.resolve = lambda target, _context: [
+                {
+                    "source": target,
+                    "label": "doc",
+                    "content": "content",
+                    "metadata": {"context_subpath": "did:plc:abc/lib: guidance.md"},
+                }
+            ]
+            return plugin
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [_DidEntrypoint()]
+    )
+    clear_loaded_plugins_cache()
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [{"name": "main", "files": ["did://x"]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    rel_paths = {
+        path.relative_to(context_dir).as_posix() for path, _ in plan.files_to_write
+    }
+    assert all(":" not in rel for rel in rel_paths)
+    assert "did-plc-abc/lib- guidance.md" in rel_paths
+
+
 def test_hydrate_plugin_dedupe_can_skip_noncanonical_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
