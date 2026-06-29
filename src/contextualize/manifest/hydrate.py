@@ -1690,15 +1690,18 @@ def _resolve_external_items_via_refs(
         http_target = ref_path_raw if isinstance(ref_path_raw, str) else target
         if is_http_url(http_target):
             origin, url_path = _split_url_path(http_target)
-            context_path = _apply_filename_hint(url_path, alias)
-            if ref_sidecar_stem is not None:
-                context_path = _sidecar_context_subpath(
-                    ref_sidecar_stem, context_path
-                )
+            if alias is None and ref_sidecar_stem is None and ref_context_prefix is None:
+                context_path = _http_host_context_path(http_target)
             else:
-                context_path = _join_context_subpath(
-                    ref_context_prefix, context_path
-                )
+                context_path = _apply_filename_hint(url_path, alias)
+                if ref_sidecar_stem is not None:
+                    context_path = _sidecar_context_subpath(
+                        ref_sidecar_stem, context_path
+                    )
+                else:
+                    context_path = _join_context_subpath(
+                        ref_context_prefix, context_path
+                    )
             items.append(
                 ResolvedItem(
                     source_type="http",
@@ -2008,6 +2011,20 @@ def _split_url_path(url: str) -> tuple[str, str]:
         path = raw_path
     path = path.lstrip("/")
     return origin, path or "index"
+
+
+def _http_host_context_path(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or parsed.netloc or url).lower()
+    if host.startswith("www."):
+        host = host[len("www.") :]
+    if parsed.port:
+        host = f"{host}-{parsed.port}"
+    host_seg = _sanitize_path_segment(host, fallback="site")
+    _, url_path = _split_url_path(url)
+    if url_path == "index":
+        return f"{host_seg}.md"
+    return f"{host_seg}/{url_path}"
 
 
 def _apply_filename_hint(path: str, filename_hint: Any | None) -> str:

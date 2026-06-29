@@ -565,6 +565,44 @@ def test_hydrate_embedded_resolution_http_refs_use_ref_path_and_dot_sidecar(
     assert items[0].manifest_spec == "https://example.com/assets/doc.txt"
 
 
+def test_resolve_http_ref_root_url_uses_host_filename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Ref:
+        path = "https://www.pangram.com/"
+        file_content = "homepage"
+
+    monkeypatch.setattr(
+        "contextualize.manifest.hydrate.create_file_references",
+        lambda *_args, **_kwargs: {"refs": [_Ref()]},
+    )
+
+    items = _resolve_external_items_via_refs("https://www.pangram.com/", alias=None)
+
+    assert len(items) == 1
+    assert items[0].source_type == "http"
+    assert items[0].context_subpath == "pangram.com.md"
+
+
+def test_resolve_http_ref_deep_url_nests_under_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Ref:
+        path = "https://paulgraham.com/wealth.html"
+        file_content = "essay"
+
+    monkeypatch.setattr(
+        "contextualize.manifest.hydrate.create_file_references",
+        lambda *_args, **_kwargs: {"refs": [_Ref()]},
+    )
+
+    items = _resolve_external_items_via_refs(
+        "https://paulgraham.com/wealth.html", alias=None
+    )
+
+    assert items[0].context_subpath == "paulgraham.com/wealth.html"
+
+
 def test_hydrate_manifest_embedded_resolution_materializes_embedded_targets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
