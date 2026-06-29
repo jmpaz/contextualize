@@ -60,7 +60,7 @@ def test_hydrate_manifest_uses_custom_plugin_scheme(
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(
         {
-            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "config": {"context": {"dir": str(context_dir), "include-meta": False, "path-strategy": "on-disk"}},
             "components": [{"name": "main", "files": ["demo://abc"]}],
         },
         manifest_cwd=str(tmp_path),
@@ -110,7 +110,7 @@ def test_hydrate_manifest_preserves_colon_plugin_target(
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(
         {
-            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "config": {"context": {"dir": str(context_dir), "include-meta": False, "path-strategy": "on-disk"}},
             "components": [{"name": "main", "files": ["note:voice/abc"]}],
         },
         manifest_cwd=str(tmp_path),
@@ -197,7 +197,7 @@ def test_hydrate_plugin_dedupe_can_skip_noncanonical_paths(
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(
         {
-            "config": {"context": {"dir": str(context_dir), "include-meta": True}},
+            "config": {"context": {"dir": str(context_dir), "include-meta": True, "path-strategy": "on-disk"}},
             "components": [{"name": "main", "files": ["dedupe://root"]}],
         },
         manifest_cwd=str(tmp_path),
@@ -327,7 +327,7 @@ def test_hydrate_embedded_resolution_targets_inherit_parent_context_path(
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(
         {
-            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "config": {"context": {"dir": str(context_dir), "include-meta": False, "path-strategy": "on-disk"}},
             "components": [
                 {
                     "name": "main",
@@ -424,7 +424,7 @@ def test_hydrate_embedded_resolution_media_targets_use_parent_sidecar(
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(
         {
-            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "config": {"context": {"dir": str(context_dir), "include-meta": False, "path-strategy": "on-disk"}},
             "components": [
                 {
                     "name": "main",
@@ -514,7 +514,7 @@ def test_hydrate_embedded_resolution_arena_attachment_uses_dot_sidecar(
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(
         {
-            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "config": {"context": {"dir": str(context_dir), "include-meta": False, "path-strategy": "on-disk"}},
             "components": [
                 {
                     "name": "main",
@@ -692,7 +692,7 @@ def test_hydrate_git_target_copies_binary_files_without_resolving_references(
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(
         {
-            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "config": {"context": {"dir": str(context_dir), "include-meta": False, "path-strategy": "on-disk"}},
             "components": [
                 {"name": "main", "files": ["https://github.com/org/repo:src"]}
             ],
@@ -725,7 +725,7 @@ def test_hydrate_local_file_with_late_invalid_utf8_is_materialized(
 
     plan = build_hydration_plan_data(
         {
-            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "config": {"context": {"dir": str(context_dir), "include-meta": False, "path-strategy": "on-disk"}},
             "components": [{"name": "main", "files": [str(source)]}],
         },
         manifest_cwd=str(tmp_path),
@@ -742,6 +742,32 @@ def test_hydrate_local_file_with_late_invalid_utf8_is_materialized(
     apply_hydration_plan(plan)
 
     assert (context_dir / "asset.dat").read_bytes() == source.read_bytes()
+
+
+def test_hydrate_default_path_strategy_is_by_component(tmp_path: Path) -> None:
+    source = tmp_path / "note.md"
+    source.write_text("hi", encoding="utf-8")
+    context_dir = tmp_path / "ctx"
+
+    plan = build_hydration_plan_data(
+        {
+            "config": {"context": {"dir": str(context_dir), "include-meta": False}},
+            "components": [{"name": "main", "files": [str(source)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    rel_paths = {
+        path.relative_to(context_dir).as_posix()
+        for path, _ in (
+            *plan.files_to_write,
+            *plan.files_to_copy,
+            *plan.files_to_symlink,
+        )
+    }
+    assert rel_paths == {"main/note.md"}
 
 
 def test_hydrate_manifest_fails_for_unresolved_external_scheme(

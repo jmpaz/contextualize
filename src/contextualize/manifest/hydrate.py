@@ -928,7 +928,7 @@ def _resolve_context_config(
         dir_path = Path(os.path.abspath(os.path.join(cwd, dir_path)))
 
     raw_path_strategy = (
-        overrides.path_strategy or context_cfg.get("path-strategy") or "on-disk"
+        overrides.path_strategy or context_cfg.get("path-strategy") or "by-component"
     )
     if not isinstance(raw_path_strategy, str):
         raise ValueError("path-strategy must be a string")
