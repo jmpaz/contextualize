@@ -17,6 +17,9 @@ _REFRESH_CACHE: ContextVar[bool] = ContextVar(
 )
 _CACHE_ONLY: ContextVar[bool] = ContextVar("contextualize_cache_only", default=False)
 _SKIP_MEDIA: ContextVar[bool] = ContextVar("contextualize_skip_media", default=False)
+_DESCRIBE_MEDIA: ContextVar[bool] = ContextVar(
+    "contextualize_describe_media", default=True
+)
 _VERBOSE_LOGGING: ContextVar[bool] = ContextVar(
     "contextualize_verbose_logging", default=False
 )
@@ -131,6 +134,18 @@ def set_skip_media(enabled: bool) -> Token[bool]:
 
 def reset_skip_media(token: Token[bool]) -> None:
     _SKIP_MEDIA.reset(token)
+
+
+def get_describe_media() -> bool:
+    return _DESCRIBE_MEDIA.get()
+
+
+def set_describe_media(enabled: bool) -> Token[bool]:
+    return _DESCRIBE_MEDIA.set(bool(enabled))
+
+
+def reset_describe_media(token: Token[bool]) -> None:
+    _DESCRIBE_MEDIA.reset(token)
 
 
 def get_verbose_logging() -> bool:

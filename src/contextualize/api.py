@@ -60,18 +60,34 @@ def _to_resolved_ref(ref: Any) -> ResolvedRef:
     )
 
 
-def resolve_refs(targets, **kwargs) -> list[ResolvedRef]:
+def resolve_refs(
+    targets, *, describe_media: bool = True, **kwargs
+) -> list[ResolvedRef]:
     """Resolve targets to documents carrying prose.
 
     Each item exposes `.source`, `.label`, `.content`, `.prose` (str | None),
     `.prose_authors`, and `.metadata`. Plain files carry `prose=None`; the caller
     decides how to treat undeclared prose. Extra keyword arguments are forwarded
     to the underlying resolver.
+
+    `describe_media=False` resolves for text only: audio/video transcription
+    still runs (it is authored prose), but the LLM image/frame/media
+    *descriptions* are suppressed across providers and the raw-image path. A
+    consumer that only scores prose (e.g. an analyzer) passes this to avoid
+    paying for descriptions it discards; a later `cat` of the same target still
+    describes, and the cached transcript is reused rather than recomputed.
     """
     from .references.factory import create_file_references
+    from .runtime import reset_describe_media, set_describe_media
 
     if isinstance(targets, str):
         targets = [targets]
-    result = create_file_references(list(targets), **kwargs)
+    token = set_describe_media(describe_media)
+    try:
+        result = create_file_references(
+            list(targets), describe_media=describe_media, **kwargs
+        )
+    finally:
+        reset_describe_media(token)
     refs = result["refs"] if isinstance(result, dict) else result
     return [_to_resolved_ref(ref) for ref in refs]

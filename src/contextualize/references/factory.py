@@ -156,6 +156,45 @@ def _embedded_seen_key(
     )
 
 
+_MEDIA_DESCRIPTION_DISABLES: dict[str, dict[str, Any]] = {
+    "video": {"frame-descriptions": False},
+    "twitter": {"media-descriptions": False},
+    "atproto": {
+        "include-media-descriptions": False,
+        "include-embed-media-descriptions": False,
+    },
+    "soundcloud": {"media": {"describe-artwork": False}},
+}
+
+
+def _disable_media_descriptions(overrides: dict[str, Any]) -> None:
+    """Fold per-provider "don't describe media" switches into ``overrides``.
+
+    Translates the caller's ``describe_media=False`` intent into the concrete,
+    cache-key-aware override each media provider already honors, without
+    clobbering any switch the caller set explicitly. Transcription is untouched;
+    only the visual/audio *descriptions* are suppressed.
+    """
+    for provider, disables in _MEDIA_DESCRIPTION_DISABLES.items():
+        current = overrides.get(provider)
+        if not isinstance(current, dict):
+            overrides[provider] = {
+                key: (dict(value) if isinstance(value, dict) else value)
+                for key, value in disables.items()
+            }
+            continue
+        for key, value in disables.items():
+            if isinstance(value, dict):
+                nested = current.get(key)
+                if not isinstance(nested, dict):
+                    current[key] = dict(value)
+                else:
+                    for nested_key, nested_value in value.items():
+                        nested.setdefault(nested_key, nested_value)
+            else:
+                current.setdefault(key, value)
+
+
 def create_file_references(
     paths,
     ignore_patterns=None,
@@ -168,6 +207,7 @@ def create_file_references(
     depth=5,
     trace_collector=None,
     text_only=False,
+    describe_media: bool = True,
     use_cache: bool = True,
     cache_ttl: timedelta | None = None,
     refresh_cache: bool = False,
@@ -284,6 +324,8 @@ def create_file_references(
     ):
         if provider_overrides is not None:
             effective_plugin_overrides.setdefault(provider_name, provider_overrides)
+    if not describe_media:
+        _disable_media_descriptions(effective_plugin_overrides)
 
     for raw_path in expanded_all_paths:
         spec_opts = parse_target_spec(raw_path)

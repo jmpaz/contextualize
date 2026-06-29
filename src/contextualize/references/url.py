@@ -348,12 +348,16 @@ class URLReference:
         return count_tokens(self.original_file_content, target=encoding)["count"]
 
     def _cache_url(self) -> str:
+        from ..runtime import get_describe_media
+
         relevant_overrides: dict[str, object] = {}
         if isinstance(self.plugin_overrides, dict):
             for key in ("transcribe", "video"):
                 value = self.plugin_overrides.get(key)
                 if isinstance(value, dict):
                     relevant_overrides[key] = dict(value)
+        if not get_describe_media():
+            relevant_overrides["describe_media"] = False
         if not relevant_overrides:
             return self.url
         payload = {

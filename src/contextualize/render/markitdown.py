@@ -1070,7 +1070,10 @@ def _app_server_image_markdown_from_bytes(
 
 def _image_context() -> tuple[bool, str, str, str, str | None, str, str]:
     _load_dotenv_once()
-    llm_enabled = bool(
+    from ..runtime import get_describe_media
+
+    describe = get_describe_media()
+    llm_enabled = describe and bool(
         (os.getenv("OPENAI_API_KEY") or "").strip()
         or (os.getenv("OPENROUTER_API_KEY") or "").strip()
     )
@@ -1080,13 +1083,14 @@ def _image_context() -> tuple[bool, str, str, str, str | None, str, str]:
     exiftool_path = (os.getenv("EXIFTOOL_PATH") or "").strip() or shutil.which(
         "exiftool"
     )
+    provider_mode = _configured_image_provider_mode() if describe else "openrouter"
     return (
         llm_enabled,
         base_url,
         model,
         prompt,
         exiftool_path,
-        _configured_image_provider_mode(),
+        provider_mode,
         _configured_codex_app_server_command(),
     )
 
