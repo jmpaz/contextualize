@@ -195,7 +195,7 @@
             if [ -d "$contextualize_dev_root/../cx-plugins/src" ]; then
               contextualize_pythonpath="$contextualize_pythonpath:$contextualize_dev_root/../cx-plugins/src"
             fi
-            export PYTHONPATH="$contextualize_pythonpath''${PYTHONPATH:+:$PYTHONPATH}"
+            export PYTHONPATH="$contextualize_pythonpath"
           '';
         };
       }) // {
