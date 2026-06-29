@@ -2677,7 +2677,13 @@ def _copy_files(files: list[tuple[Path, Path]]) -> None:
 def _create_symlinks(links: list[tuple[Path, Path]]) -> None:
     for dest, source in links:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.symlink_to(source.resolve())
+        target = source.resolve()
+        if dest.is_symlink() or dest.exists():
+            if dest.is_symlink() and dest.resolve() == target:
+                log_progress("hydrate", "file", "processed", target=str(dest))
+                continue
+            dest.unlink()
+        dest.symlink_to(target)
         log_progress("hydrate", "file", "processed", target=str(dest))
 
 
