@@ -139,6 +139,7 @@ class HydratePlan:
     access: str
     file_timestamps: dict[Path, tuple[float, float]] = field(default_factory=dict)
     files_to_copy: list[tuple[Path, Path]] = field(default_factory=list)
+    dirs_to_symlink: list[tuple[Path, Path]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,7 @@ def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
     _write_files(plan.files_to_write)
     _copy_files(plan.files_to_copy)
     _create_symlinks(plan.files_to_symlink)
+    _create_symlinks(plan.dirs_to_symlink)
     if plan.file_timestamps:
         _apply_timestamps(plan.file_timestamps)
     if plan.access == "read-only":
@@ -271,6 +273,7 @@ def plan_matches_existing(plan: HydratePlan) -> bool:
 
     expected_hashes: dict[str, tuple[int, str]] = {}
     expected_symlinks: dict[str, Path] = {}
+    expected_dir_symlinks: dict[str, Path] = {}
     expected_dirs: set[str] = set()
 
     for path, content in plan.files_to_write:
@@ -294,9 +297,15 @@ def plan_matches_existing(plan: HydratePlan) -> bool:
         expected_symlinks[rel] = source.resolve()
         _collect_parent_dirs(rel, expected_dirs)
 
+    for dest, source in plan.dirs_to_symlink:
+        rel = dest.relative_to(context_dir).as_posix()
+        expected_dir_symlinks[rel] = source.resolve()
+        _collect_parent_dirs(rel, expected_dirs)
+
     all_expected_files = set(expected_hashes.keys()) | set(expected_symlinks.keys())
 
     seen_files: set[str] = set()
+    seen_dir_symlinks: set[str] = set()
     for root, dirs, files in os.walk(context_dir, followlinks=False):
         rel_root = os.path.relpath(root, context_dir)
         if rel_root != "." and rel_root not in expected_dirs:
@@ -332,10 +341,24 @@ def plan_matches_existing(plan: HydratePlan) -> bool:
         for name in dirs:
             dir_path = Path(root) / name
             rel_dir = dir_path.relative_to(context_dir).as_posix()
+            if rel_dir in expected_dir_symlinks:
+                if not dir_path.is_symlink():
+                    return False
+                try:
+                    target = dir_path.resolve()
+                except OSError:
+                    return False
+                if target != expected_dir_symlinks[rel_dir]:
+                    return False
+                seen_dir_symlinks.add(rel_dir)
+                continue
             if rel_dir not in expected_dirs:
                 return False
 
     if seen_files != all_expected_files:
+        return False
+
+    if seen_dir_symlinks != set(expected_dir_symlinks.keys()):
         return False
 
     if plan.access == "read-only":
@@ -390,6 +413,7 @@ def build_hydration_plan(
     *,
     overrides: HydrateOverrides,
     cwd: str,
+    _resolving: tuple[Path, ...] = (),
 ) -> HydratePlan:
     source = load_manifest_source(manifest_path)
     return build_hydration_plan_data(
@@ -398,6 +422,7 @@ def build_hydration_plan(
         manifest_path=source.manifest_path,
         overrides=overrides,
         cwd=cwd,
+        _resolving=_resolving,
     )
 
 
@@ -408,9 +433,17 @@ def build_hydration_plan_data(
     manifest_path: str | None = None,
     overrides: HydrateOverrides,
     cwd: str,
+    _resolving: tuple[Path, ...] = (),
 ) -> HydratePlan:
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a mapping with 'config' and 'components'")
+
+    resolving_chain = _resolving
+    if manifest_path:
+        try:
+            resolving_chain = _resolving + (Path(manifest_path).resolve(),)
+        except OSError:
+            pass
 
     cfg = data.get("config") or {}
     if not isinstance(cfg, dict):
@@ -445,6 +478,7 @@ def build_hydration_plan_data(
     files_to_write: list[tuple[Path, str]] = []
     files_to_copy: list[tuple[Path, Path]] = []
     files_to_symlink: list[tuple[Path, Path]] = []
+    dirs_to_symlink: list[tuple[Path, Path]] = []
     file_timestamps: dict[Path, tuple[float, float]] = {}
     index_components: dict[str, list[dict[str, Any]]] = {}
     normalized_components: list[dict[str, Any]] = []
@@ -470,6 +504,7 @@ def build_hydration_plan_data(
         log_progress("hydrate", "component", "start", target=comp_name)
         comp_files = comp.get("files")
         comp_repos = comp.get("repos")
+        comp_manifests = comp.get("manifests")
         comp_text = comp.get("text")
         comp_prefix = comp.get("prefix")
         comp_suffix = comp.get("suffix")
@@ -502,6 +537,7 @@ def build_hydration_plan_data(
             and comp_text is None
             and comp_prefix is None
             and comp_suffix is None
+            and not comp_manifests
         ):
             raise ValueError(f"Component '{comp_name}' has no content")
 
@@ -526,6 +562,8 @@ def build_hydration_plan_data(
             raise ValueError(f"Component '{comp_name}' files must be a list")
         if comp_repos is not None and not isinstance(comp_repos, list):
             raise ValueError(f"Component '{comp_name}' repos must be a list")
+        if comp_manifests is not None and not isinstance(comp_manifests, list):
+            raise ValueError(f"Component '{comp_name}' manifests must be a list")
 
         all_specs: list[tuple[Any, bool, str | None]] = []
         if comp_files:
@@ -824,6 +862,27 @@ def build_hydration_plan_data(
                     )
                 )
 
+        if comp_manifests:
+            from .contexts import ensure_manifest_link_hydrated
+
+            manifest_root = component_root or Path(comp_name)
+            for link_index, manifest_spec in enumerate(comp_manifests, 1):
+                resolved_link_path = _resolve_manifest_link_spec(
+                    manifest_spec, base_dir, comp_name, link_index
+                )
+                canonical_dir, manifest_name = ensure_manifest_link_hydrated(
+                    resolved_link_path,
+                    parent_overrides=overrides,
+                    resolving=resolving_chain,
+                )
+                slug = _sanitize_path_segment(
+                    manifest_name or resolved_link_path.stem,
+                    fallback=f"manifest-{link_index:03d}",
+                )
+                dest_rel = _dedupe_path(manifest_root / slug, used_paths)
+                _ensure_relative(dest_rel)
+                dirs_to_symlink.append((context_dir / dest_rel, canonical_dir))
+
         if normalized_files:
             normalized_comp["files"] = _dedupe_manifest_entries(normalized_files)
         normalized_components.append(normalized_comp)
@@ -886,6 +945,7 @@ def build_hydration_plan_data(
         access=context_cfg["access"],
         file_timestamps=file_timestamps,
         files_to_copy=files_to_copy,
+        dirs_to_symlink=dirs_to_symlink,
     )
 
 
@@ -1271,6 +1331,29 @@ def _expand_repo_specs(
         else:
             result.append((repo_spec, None))
     return result
+
+
+def _resolve_manifest_link_spec(
+    raw_spec: Any, base_dir: str, comp_name: str, index: int
+) -> Path:
+    if not isinstance(raw_spec, str) or not raw_spec.strip():
+        raise ValueError(
+            f"Component '{comp_name}' manifests[{index}] must be a non-empty string"
+        )
+    spec = os.path.expanduser(raw_spec)
+    if is_http_url(spec) or _has_explicit_scheme(spec) or parse_git_target(spec):
+        raise ValueError(
+            f"Component '{comp_name}' manifests[{index}] must be a local file path; "
+            f"remote manifest links are not supported in this version: {raw_spec}"
+        )
+    if not os.path.isabs(spec):
+        spec = os.path.join(base_dir, spec)
+    resolved = Path(spec).resolve()
+    if not resolved.is_file():
+        raise ValueError(
+            f"Component '{comp_name}' manifests[{index}] not found: {resolved}"
+        )
+    return resolved
 
 
 def _find_common_subpath_prefix(subpaths: list[str]) -> Path | None:
@@ -2686,7 +2769,8 @@ def _hydration_file_count(plan: HydratePlan) -> int:
     written_paths = {path.as_posix() for path, _ in plan.files_to_write}
     copied_paths = {path.as_posix() for path, _ in plan.files_to_copy}
     symlinked_paths = {path.as_posix() for path, _ in plan.files_to_symlink}
-    return len(written_paths | copied_paths | symlinked_paths)
+    linked_dir_paths = {path.as_posix() for path, _ in plan.dirs_to_symlink}
+    return len(written_paths | copied_paths | symlinked_paths | linked_dir_paths)
 
 
 def _write_files(files: list[tuple[Path, str]]) -> None:
@@ -2711,7 +2795,10 @@ def _create_symlinks(links: list[tuple[Path, Path]]) -> None:
             if dest.is_symlink() and dest.resolve() == target:
                 log_progress("hydrate", "file", "processed", target=str(dest))
                 continue
-            dest.unlink()
+            if dest.is_dir() and not dest.is_symlink():
+                shutil.rmtree(dest)
+            else:
+                dest.unlink()
         dest.symlink_to(target)
         log_progress("hydrate", "file", "processed", target=str(dest))
 
@@ -2719,9 +2806,15 @@ def _create_symlinks(links: list[tuple[Path, Path]]) -> None:
 def _apply_read_only(root: Path) -> None:
     for dirpath, dirnames, filenames in os.walk(root):
         for name in filenames:
-            _chmod(Path(dirpath) / name, 0o444)
+            file_path = Path(dirpath) / name
+            if file_path.is_symlink():
+                continue
+            _chmod(file_path, 0o444)
         for name in dirnames:
-            _chmod(Path(dirpath) / name, 0o555)
+            dir_path = Path(dirpath) / name
+            if dir_path.is_symlink():
+                continue
+            _chmod(dir_path, 0o555)
     _chmod(root, 0o555)
 
 

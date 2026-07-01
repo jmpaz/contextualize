@@ -3,6 +3,8 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import pytest
+
 from contextualize.manifest.build import _resolve_spec_to_seed_refs, build_payload_impl
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
@@ -53,6 +55,14 @@ def test_manifest_build_routes_custom_scheme_through_plugins(
     assert trace_items == []
     assert "demo body" in seed_refs[0].output
     assert trace_inputs[0].path == "demo://abc"
+
+
+def test_manifests_component_raises_explicit_payload_scope_error() -> None:
+    with pytest.raises(ValueError, match="only supported under 'hydrate'"):
+        build_payload_impl(
+            [{"name": "linked", "manifests": ["sub.md"]}],
+            ".",
+        )
 
 
 def test_whatsapp_targets_are_not_split_as_symbol_selectors() -> None:

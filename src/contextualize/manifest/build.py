@@ -559,6 +559,11 @@ def build_payload_impl(
             continue
 
         files = comp.get("files")
+        if "manifests" in comp and not files and "text" not in comp:
+            raise ValueError(
+                f"Component '{comp.get('name') or comp}' uses 'manifests', which is "
+                "currently only supported under 'hydrate', not 'payload'."
+            )
         if not name or not files:
             raise ValueError(
                 f"Component must have either 'text' or both 'name' & 'files': {comp}"

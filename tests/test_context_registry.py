@@ -10,6 +10,17 @@ from contextualize.manifest.contexts import ContextHydrationStatus, hydrate_cont
 from contextualize.progress import record_progress
 
 
+def _isolate_manifest_link_cache(monkeypatch, tmp_path: Path) -> None:
+    """`ensure_manifest_link_hydrated` derives its canonical cache/status
+    paths from XDG_DATA_HOME/XDG_STATE_HOME (falling back to HOME) -- all
+    three must be redirected under tmp_path, since XDG_DATA_HOME/XDG_STATE_HOME
+    take priority over HOME and are commonly set in the ambient environment,
+    which would otherwise leak test artifacts into the real user cache."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home" / ".local" / "share"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "home" / ".local" / "state"))
+
+
 def test_hydrate_context_from_registry_data(tmp_path: Path) -> None:
     target_dir = tmp_path / "repo"
     target_dir.mkdir()
@@ -360,6 +371,153 @@ def test_contexts_hydrate_verbose_reports_progress_summary(
     assert "  hydrate context: total=1 done=1" in result.output
     assert "  context demo:" in result.output
     assert "    arena channel: cache_hit=1" in result.output
+
+
+def test_hydrate_context_with_manifests_component(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+
+    sub_manifest = tmp_path / "sub.yaml"
+    sub_manifest.write_text(
+        "config:\n"
+        "  context:\n"
+        "    include-meta: false\n"
+        "components:\n"
+        "  - name: main\n"
+        "    text: hello from sub\n",
+        encoding="utf-8",
+    )
+
+    target_dir = tmp_path / "repo"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    status_path = tmp_path / "status.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "replace": "guarded",
+                        "manifest": {
+                            "data": {
+                                "config": {
+                                    "context": {
+                                        "dir": ".context",
+                                        "include-meta": False,
+                                        "path-strategy": "on-disk",
+                                    }
+                                },
+                                "components": [
+                                    {
+                                        "name": "contexts",
+                                        "manifests": [str(sub_manifest)],
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    statuses = hydrate_contexts(
+        ["demo"],
+        registry_path=registry_path,
+        status_path=status_path,
+    )
+
+    assert statuses[0].result == "hydrated"
+    linked = target_dir / ".context" / "contexts" / "sub"
+    assert linked.is_symlink()
+    assert (
+        linked / "main" / "notes" / "text-001.md"
+    ).read_text(encoding="utf-8").strip() == "hello from sub"
+
+
+def test_hydrate_manifests_shared_sub_manifest_reuses_canonical_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+
+    sub_manifest = tmp_path / "sub.yaml"
+    sub_manifest.write_text(
+        "config:\n"
+        "  context:\n"
+        "    include-meta: false\n"
+        "components:\n"
+        "  - name: main\n"
+        "    text: shared content\n",
+        encoding="utf-8",
+    )
+
+    def _parent_manifest_data(context_dir: Path) -> dict:
+        return {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [
+                {"name": "contexts", "manifests": [str(sub_manifest)]}
+            ],
+        }
+
+    target_dir_a = tmp_path / "repo-a"
+    target_dir_a.mkdir()
+    target_dir_b = tmp_path / "repo-b"
+    target_dir_b.mkdir()
+    registry_path = tmp_path / "registry.json"
+    status_path = tmp_path / "status.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "parent-a": {
+                        "targetDir": str(target_dir_a),
+                        "replace": "guarded",
+                        "manifest": {
+                            "data": _parent_manifest_data(target_dir_a / ".context")
+                        },
+                    },
+                    "parent-b": {
+                        "targetDir": str(target_dir_b),
+                        "replace": "guarded",
+                        "manifest": {
+                            "data": _parent_manifest_data(target_dir_b / ".context")
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    statuses = hydrate_contexts(
+        ["parent-a", "parent-b"],
+        registry_path=registry_path,
+        status_path=status_path,
+    )
+
+    assert [s.result for s in statuses] == ["hydrated", "hydrated"]
+
+    linked_a = (target_dir_a / ".context" / "contexts" / "sub").resolve()
+    linked_b = (target_dir_b / ".context" / "contexts" / "sub").resolve()
+    assert linked_a == linked_b
+
+    second_statuses = hydrate_contexts(
+        ["parent-a", "parent-b"],
+        registry_path=registry_path,
+        status_path=status_path,
+    )
+    assert [s.result for s in second_statuses] == ["up-to-date", "up-to-date"]
 
 
 def test_hydrate_cli_treats_text_file_with_manifest_block_as_manifest(

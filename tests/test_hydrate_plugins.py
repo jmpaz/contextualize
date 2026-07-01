@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import types
 from pathlib import Path
 
@@ -9,7 +10,9 @@ import pytest
 from contextualize.manifest.hydrate import (
     HydrateOverrides,
     apply_hydration_plan,
+    build_hydration_plan,
     build_hydration_plan_data,
+    plan_matches_existing,
     _resolve_external_items_via_refs,
 )
 from contextualize.plugins import clear_loaded_plugins_cache
@@ -904,3 +907,405 @@ def test_hydrate_manifest_fails_for_unloaded_colon_plugin_target(
             overrides=HydrateOverrides(),
             cwd=str(tmp_path),
         )
+
+
+def _isolate_manifest_link_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`ensure_manifest_link_hydrated` derives its canonical cache/status
+    paths from XDG_DATA_HOME/XDG_STATE_HOME (falling back to HOME) -- all
+    three must be redirected under tmp_path, since XDG_DATA_HOME/XDG_STATE_HOME
+    take priority over HOME and are commonly set in the ambient environment,
+    which would otherwise leak test artifacts into the real user cache."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home" / ".local" / "share"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "home" / ".local" / "state"))
+
+
+def _write_sub_manifest(path: Path, *, text: str = "hello") -> None:
+    path.write_text(
+        "config:\n"
+        "  context:\n"
+        "    include-meta: false\n"
+        "components:\n"
+        "  - name: main\n"
+        f"    text: {text}\n",
+        encoding="utf-8",
+    )
+
+
+def test_hydrate_manifests_component_links_sub_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+
+    sub_dir = tmp_path / "sub"
+    sub_dir.mkdir()
+    sub_manifest = sub_dir / "sub.yaml"
+    _write_sub_manifest(sub_manifest, text="hello from sub")
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    assert len(plan.dirs_to_symlink) == 1
+    dest, source = plan.dirs_to_symlink[0]
+    assert dest == context_dir / "contexts" / "sub"
+    assert (
+        source / "main" / "notes" / "text-001.md"
+    ).read_text(encoding="utf-8").strip() == "hello from sub"
+
+    apply_hydration_plan(plan)
+
+    linked = context_dir / "contexts" / "sub"
+    assert linked.is_symlink()
+    assert (
+        linked / "main" / "notes" / "text-001.md"
+    ).read_text(encoding="utf-8").strip() == "hello from sub"
+
+
+def test_hydrate_manifests_prefers_config_name_over_filename(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+
+    sub_manifest = tmp_path / "t062.yaml"
+    sub_manifest.write_text(
+        "config:\n"
+        "  name: pangram\n"
+        "  context:\n"
+        "    include-meta: false\n"
+        "components:\n"
+        "  - name: main\n"
+        "    text: hello\n",
+        encoding="utf-8",
+    )
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    assert len(plan.dirs_to_symlink) == 1
+    dest, _ = plan.dirs_to_symlink[0]
+    assert dest == context_dir / "contexts" / "pangram"
+
+
+def test_hydrate_manifests_component_does_not_raise_no_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+    sub_manifest = tmp_path / "sub.yaml"
+    _write_sub_manifest(sub_manifest)
+
+    build_hydration_plan_data(
+        {
+            "config": {
+                "context": {"dir": str(tmp_path / "ctx"), "include-meta": False}
+            },
+            "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+
+def test_hydrate_manifests_plan_matches_existing_after_apply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+    sub_manifest = tmp_path / "sub.yaml"
+    _write_sub_manifest(sub_manifest)
+
+    manifest_data = {
+        "config": {
+            "context": {
+                "dir": str(tmp_path / "ctx"),
+                "include-meta": False,
+                "path-strategy": "on-disk",
+            }
+        },
+        "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
+    }
+
+    plan = build_hydration_plan_data(
+        manifest_data,
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    second_plan = build_hydration_plan_data(
+        manifest_data,
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    assert plan_matches_existing(second_plan)
+
+
+def test_hydrate_manifests_refreshes_when_sub_manifest_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+    sub_manifest = tmp_path / "sub.yaml"
+    _write_sub_manifest(sub_manifest, text="version-1")
+
+    manifest_data = {
+        "config": {
+            "context": {
+                "dir": str(tmp_path / "ctx"),
+                "include-meta": False,
+                "path-strategy": "on-disk",
+            }
+        },
+        "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
+    }
+
+    plan = build_hydration_plan_data(
+        manifest_data,
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+    _, canonical_dir = plan.dirs_to_symlink[0]
+    assert (
+        canonical_dir / "main" / "notes" / "text-001.md"
+    ).read_text(encoding="utf-8").strip() == "version-1"
+
+    _write_sub_manifest(sub_manifest, text="version-2")
+
+    second_plan = build_hydration_plan_data(
+        manifest_data,
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    _, canonical_dir_2 = second_plan.dirs_to_symlink[0]
+    assert canonical_dir_2 == canonical_dir
+    assert (
+        canonical_dir_2 / "main" / "notes" / "text-001.md"
+    ).read_text(encoding="utf-8").strip() == "version-2"
+
+
+def test_hydrate_manifests_honors_sub_manifest_own_base_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+
+    parent_dir = tmp_path / "parent"
+    parent_dir.mkdir()
+    sub_dir = tmp_path / "sub"
+    sub_dir.mkdir()
+    (sub_dir / "note.md").write_text("sub note", encoding="utf-8")
+    sub_manifest = sub_dir / "sub.yaml"
+    sub_manifest.write_text(
+        "config:\n"
+        "  context:\n"
+        "    include-meta: false\n"
+        "components:\n"
+        "  - name: main\n"
+        "    files: [note.md]\n",
+        encoding="utf-8",
+    )
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
+        },
+        manifest_cwd=str(parent_dir),
+        overrides=HydrateOverrides(),
+        cwd=str(parent_dir),
+    )
+
+    _, canonical_dir = plan.dirs_to_symlink[0]
+    matches = list(canonical_dir.rglob("note.md"))
+    assert len(matches) == 1
+    assert matches[0].read_text(encoding="utf-8") == "sub note"
+
+
+def _restore_writable(root: Path) -> None:
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            path = Path(dirpath) / name
+            if not path.is_symlink():
+                path.chmod(0o755 if path.is_dir() else 0o644)
+    root.chmod(0o755)
+
+
+def test_hydrate_manifests_read_only_parent_does_not_chmod_linked_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+    sub_manifest = tmp_path / "sub.yaml"
+    _write_sub_manifest(sub_manifest)
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                    "access": "read-only",
+                }
+            },
+            "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    try:
+        apply_hydration_plan(plan)
+        _, canonical_dir = plan.dirs_to_symlink[0]
+        assert (canonical_dir.stat().st_mode & 0o777) != 0o555
+    finally:
+        _restore_writable(context_dir)
+
+
+def test_hydrate_read_only_does_not_chmod_symlinked_source_file(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "note.md"
+    source.write_text("hi", encoding="utf-8")
+    context_dir = tmp_path / "ctx"
+
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                    "access": "read-only",
+                }
+            },
+            "components": [{"name": "main", "files": [str(source)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    original_mode = source.stat().st_mode & 0o777
+    try:
+        apply_hydration_plan(plan)
+        assert source.stat().st_mode & 0o777 == original_mode
+    finally:
+        _restore_writable(context_dir)
+
+
+def test_hydrate_manifests_cycle_detection_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+
+    manifest_a = tmp_path / "a.yaml"
+    manifest_b = tmp_path / "b.yaml"
+    manifest_a.write_text(
+        "config:\n  context:\n    include-meta: false\n"
+        "components:\n  - name: link\n    manifests: [\"b.yaml\"]\n",
+        encoding="utf-8",
+    )
+    manifest_b.write_text(
+        "config:\n  context:\n    include-meta: false\n"
+        "components:\n  - name: link\n    manifests: [\"a.yaml\"]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Cycle detected"):
+        build_hydration_plan(
+            str(manifest_a),
+            overrides=HydrateOverrides(),
+            cwd=str(tmp_path),
+        )
+
+
+def test_hydrate_manifests_rejects_remote_target(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be a local file path"):
+        build_hydration_plan_data(
+            {
+                "config": {
+                    "context": {"dir": str(tmp_path / "ctx"), "include-meta": False}
+                },
+                "components": [
+                    {
+                        "name": "contexts",
+                        "manifests": ["https://example.com/manifest.yaml"],
+                    }
+                ],
+            },
+            manifest_cwd=str(tmp_path),
+            overrides=HydrateOverrides(),
+            cwd=str(tmp_path),
+        )
+
+
+def test_hydrate_manifests_snapshot_preserves_raw_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+    sub_manifest = tmp_path / "sub.yaml"
+    _write_sub_manifest(sub_manifest)
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": True,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [{"name": "contexts", "manifests": ["sub.yaml"]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    apply_hydration_plan(plan)
+
+    manifest_yaml = (context_dir / "manifest.yaml").read_text(encoding="utf-8")
+    assert "manifests" in manifest_yaml
+    assert "sub.yaml" in manifest_yaml

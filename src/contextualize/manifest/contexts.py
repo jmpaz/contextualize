@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -27,7 +28,7 @@ from .hydrate import (
     find_untracked_files,
     plan_matches_existing,
 )
-from .source import load_manifest_text
+from .source import load_manifest_source, load_manifest_text
 
 _REPLACE_POLICIES = {"guarded", "always", "never"}
 
@@ -66,6 +67,30 @@ def default_context_status_path() -> Path:
     if state_home:
         return Path(state_home) / "contextualize" / "contexts" / "status.json"
     return Path.home() / ".local" / "state" / "contextualize" / "contexts" / "status.json"
+
+
+def manifest_link_identity(resolved_manifest_path: Path) -> str:
+    return hashlib.sha256(str(resolved_manifest_path).encode("utf-8")).hexdigest()
+
+
+def default_manifest_link_cache_root() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME")
+    root = Path(data_home) if data_home else Path.home() / ".local" / "share"
+    return root / "contextualize" / "cache" / "manifest-links" / "v1"
+
+
+def canonical_manifest_link_dir(
+    resolved_manifest_path: Path, *, cache_root: Path | None = None
+) -> Path:
+    digest = manifest_link_identity(resolved_manifest_path)
+    root = cache_root or default_manifest_link_cache_root()
+    return root / digest[:2] / digest / "context"
+
+
+def default_manifest_link_status_path() -> Path:
+    state_home = os.environ.get("XDG_STATE_HOME")
+    root = Path(state_home) if state_home else Path.home() / ".local" / "state"
+    return root / "contextualize" / "manifest-links" / "status.json"
 
 
 def load_context_registry(
@@ -197,6 +222,8 @@ def _parse_context_entry(name: str, raw: Any) -> ContextEntry:
 def _hydrate_one(
     context: ContextEntry,
     overrides: HydrateOverrides,
+    *,
+    resolving: tuple[Path, ...] = (),
 ) -> ContextHydrationStatus:
     target_dir = context.target_dir
     manifest_source = _manifest_source_label(context)
@@ -212,7 +239,7 @@ def _hydrate_one(
         )
 
     try:
-        plan = _build_plan(context, overrides)
+        plan = _build_plan(context, overrides, resolving=resolving)
         existing_status = _prepare_existing_context(plan, context.replace)
         if existing_status is not None:
             return _status_from_result(
@@ -247,7 +274,12 @@ def _hydrate_one(
         )
 
 
-def _build_plan(context: ContextEntry, overrides: HydrateOverrides):
+def _build_plan(
+    context: ContextEntry,
+    overrides: HydrateOverrides,
+    *,
+    resolving: tuple[Path, ...] = (),
+):
     target_dir = context.target_dir.resolve()
     manifest = context.manifest
     cwd = str(target_dir)
@@ -258,7 +290,9 @@ def _build_plan(context: ContextEntry, overrides: HydrateOverrides):
         source_path = Path(os.path.expanduser(source))
         if not source_path.is_absolute():
             source_path = target_dir / source_path
-        return build_hydration_plan(str(source_path), overrides=overrides, cwd=cwd)
+        return build_hydration_plan(
+            str(source_path), overrides=overrides, cwd=cwd, _resolving=resolving
+        )
     if "text" in manifest:
         text = manifest["text"]
         if not isinstance(text, str):
@@ -270,6 +304,7 @@ def _build_plan(context: ContextEntry, overrides: HydrateOverrides):
             manifest_path=None,
             overrides=overrides,
             cwd=cwd,
+            _resolving=resolving,
         )
     data = manifest["data"]
     if not isinstance(data, dict):
@@ -280,6 +315,7 @@ def _build_plan(context: ContextEntry, overrides: HydrateOverrides):
         manifest_path=None,
         overrides=overrides,
         cwd=cwd,
+        _resolving=resolving,
     )
 
 
@@ -305,6 +341,68 @@ def _prepare_existing_context(plan, replace: str) -> tuple[str, str | None] | No
 
 def _planned_file_count(plan) -> int:
     return len(_planned_paths(plan))
+
+
+def _peek_manifest_name(resolved: Path) -> str | None:
+    try:
+        source = load_manifest_source(str(resolved))
+    except (OSError, ValueError):
+        return None
+    cfg = source.data.get("config") if isinstance(source.data, dict) else None
+    if not isinstance(cfg, dict):
+        return None
+    name = cfg.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
+def ensure_manifest_link_hydrated(
+    manifest_path: str | os.PathLike[str],
+    *,
+    parent_overrides: HydrateOverrides,
+    resolving: tuple[Path, ...] = (),
+) -> tuple[Path, str | None]:
+    resolved = Path(manifest_path).expanduser().resolve()
+    if resolved in resolving:
+        chain = " -> ".join(str(p) for p in (*resolving, resolved))
+        raise ValueError(f"Cycle detected while resolving linked manifests: {chain}")
+    if not resolved.is_file():
+        raise ValueError(f"Linked manifest not found: {resolved}")
+
+    manifest_name = _peek_manifest_name(resolved)
+    canonical_dir = canonical_manifest_link_dir(resolved)
+    entry = ContextEntry(
+        name=f"manifest-link:{manifest_link_identity(resolved)[:16]}",
+        target_dir=resolved.parent,
+        manifest={"source": str(resolved)},
+        replace="guarded",
+    )
+    child_overrides = HydrateOverrides(
+        context_dir=str(canonical_dir),
+        use_cache=parent_overrides.use_cache,
+        cache_ttl=parent_overrides.cache_ttl,
+        refresh_cache=parent_overrides.refresh_cache,
+        plugin_overrides=parent_overrides.plugin_overrides,
+        embedded_resolution=parent_overrides.embedded_resolution,
+    )
+
+    token = set_progress_context(entry.name)
+    try:
+        status = _hydrate_one(entry, child_overrides, resolving=resolving + (resolved,))
+    finally:
+        reset_progress_context(token)
+
+    write_context_status(
+        [status], status_path=default_manifest_link_status_path()
+    )
+
+    hydrated_dir = status.context_dir
+    if status.result in ("hydrated", "up-to-date") and hydrated_dir:
+        return Path(hydrated_dir), manifest_name
+    raise ValueError(
+        f"Failed to hydrate linked manifest {resolved}: {status.reason or status.result}"
+    )
 
 
 def _planned_paths(plan) -> set[str]:
