@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import types
 from pathlib import Path
 
@@ -863,6 +864,45 @@ def test_hydrate_default_path_strategy_is_by_component(tmp_path: Path) -> None:
         )
     }
     assert rel_paths == {"main/note.md"}
+
+
+def test_hydrate_local_repo_gitignore_matches_repo_relative_paths(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / ".gitignore").write_text(".context/\n", encoding="utf-8")
+    src = repo / "src"
+    src.mkdir()
+    (src / "main.txt").write_text("ok", encoding="utf-8")
+    generated = repo / ".context"
+    generated.mkdir()
+    os.symlink(repo / "missing.txt", generated / "broken.md")
+    context_dir = tmp_path / "ctx"
+
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "gitignore": True,
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [{"name": "main", "files": [str(repo)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    symlinked = {
+        dest.relative_to(context_dir).as_posix()
+        for dest, _ in plan.files_to_symlink
+    }
+    assert symlinked == {"repo/src/main.txt"}
 
 
 def test_hydrate_manifest_fails_for_unresolved_external_scheme(

@@ -1858,20 +1858,40 @@ def _source_ignore_spec(ignore_patterns: list[str] | None):
     return PathSpec.from_lines("gitwildmatch", patterns)
 
 
-def _iter_source_files(path: str, ignore_patterns: list[str] | None) -> list[str]:
+def _ignore_match_path(path: str, ignore_base: str | None) -> str:
+    if ignore_base:
+        try:
+            rel_path = os.path.relpath(path, ignore_base)
+        except ValueError:
+            return path
+        if rel_path != os.pardir and not rel_path.startswith(os.pardir + os.sep):
+            return rel_path
+    return path
+
+
+def _iter_source_files(
+    path: str,
+    ignore_patterns: list[str] | None,
+    *,
+    ignore_base: str | None = None,
+) -> list[str]:
     ignore_spec = _source_ignore_spec(ignore_patterns)
     if os.path.isfile(path):
-        return [] if ignore_spec.match_file(path) else [path]
+        match_path = _ignore_match_path(path, ignore_base)
+        return [] if ignore_spec.match_file(match_path) else [path]
     files: list[str] = []
     for root, dirs, names in os.walk(path):
         dirs[:] = [
             name
             for name in dirs
-            if not ignore_spec.match_file(os.path.join(root, name))
+            if not ignore_spec.match_file(
+                _ignore_match_path(os.path.join(root, name), ignore_base)
+            )
         ]
         for name in names:
             file_path = os.path.join(root, name)
-            if not ignore_spec.match_file(file_path):
+            match_path = _ignore_match_path(file_path, ignore_base)
+            if not ignore_spec.match_file(match_path):
                 files.append(file_path)
     return files
 
@@ -1992,6 +2012,7 @@ def _resolve_spec_items(
             )
 
         ignore_patterns = None
+        repo_root = None
         if gitignore:
             repo_root = get_repo_root(full)
             cache_key = repo_root or ""
@@ -1999,7 +2020,9 @@ def _resolve_spec_items(
                 ignore_cache[cache_key] = read_gitignore_patterns(repo_root)
             ignore_patterns = ignore_cache[cache_key]
 
-        for file_path in _iter_source_files(full, ignore_patterns):
+        for file_path in _iter_source_files(
+            full, ignore_patterns, ignore_base=repo_root
+        ):
             try:
                 rel_path = _relative_path(file_path, base_dir)
             except ValueError:
@@ -2046,7 +2069,9 @@ def _resolve_git_items(
             raise FileNotFoundError(
                 f"Component '{component_name}' path not found: {full}"
             )
-        for file_path in _iter_source_files(full, ignore_patterns):
+        for file_path in _iter_source_files(
+            full, ignore_patterns, ignore_base=repo_dir
+        ):
             rel_path = _relative_path(file_path, repo_dir)
             manifest_spec = _format_git_spec(tgt.repo_url, tgt.rev, rel_path)
             content, is_binary = _read_source_content(file_path)
