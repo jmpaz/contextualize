@@ -46,6 +46,7 @@ from .source import load_manifest_source
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _SOURCE_IGNORE_PATTERNS = [
+    ".context/",
     ".git/",
     ".gitignore",
     ".venv/",

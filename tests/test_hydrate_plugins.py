@@ -905,6 +905,42 @@ def test_hydrate_local_repo_gitignore_matches_repo_relative_paths(
     assert symlinked == {"repo/src/main.txt"}
 
 
+def test_hydrate_local_repo_ignores_generated_context_by_default(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src"
+    src.mkdir()
+    (src / "main.txt").write_text("ok", encoding="utf-8")
+    generated = repo / ".context"
+    generated.mkdir()
+    os.symlink(repo / "missing.txt", generated / "broken.md")
+    context_dir = tmp_path / "ctx"
+
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": False,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [{"name": "main", "files": [str(repo)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    symlinked = {
+        dest.relative_to(context_dir).as_posix()
+        for dest, _ in plan.files_to_symlink
+    }
+    assert symlinked == {"repo/src/main.txt"}
+
+
 def test_hydrate_manifest_fails_for_unresolved_external_scheme(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
