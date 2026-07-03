@@ -199,7 +199,95 @@ def test_contexts_hydrate_cli_uses_registry(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "context demo: hydrated" in result.output
+    assert "Progress summary:" in result.output
+    assert "  hydrate context: total=1 done=1" in result.output
     assert (target_dir / ".context/main/notes/text-001.md").exists()
+
+
+def test_contexts_hydrate_quiet_suppresses_default_progress_summary(
+    tmp_path: Path,
+) -> None:
+    target_dir = tmp_path / "repo"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "manifest": {
+                            "data": {
+                                "config": {
+                                    "context": {
+                                        "dir": ".context",
+                                        "include-meta": False,
+                                    }
+                                },
+                                "components": [{"name": "main", "text": "hello"}],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "hydrate", "--quiet", "--registry", str(registry_path), "demo"],
+        env={"XDG_STATE_HOME": str(tmp_path / "state")},
+    )
+
+    assert result.exit_code == 0
+    assert "context demo: hydrated" in result.output
+    assert "Progress summary:" not in result.output
+
+
+def test_contexts_hydrate_global_quiet_suppresses_default_progress_summary(
+    tmp_path: Path,
+) -> None:
+    target_dir = tmp_path / "repo"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "manifest": {
+                            "data": {
+                                "config": {
+                                    "context": {
+                                        "dir": ".context",
+                                        "include-meta": False,
+                                    }
+                                },
+                                "components": [{"name": "main", "text": "hello"}],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["--quiet", "contexts", "hydrate", "--registry", str(registry_path), "demo"],
+        env={"XDG_STATE_HOME": str(tmp_path / "state")},
+    )
+
+    assert result.exit_code == 0
+    assert "context demo: hydrated" in result.output
+    assert "Progress summary:" not in result.output
 
 
 def test_contexts_list_cli_uses_registry(tmp_path: Path) -> None:
@@ -371,6 +459,68 @@ def test_contexts_hydrate_verbose_reports_progress_summary(
     assert "  hydrate context: total=1 done=1" in result.output
     assert "  context demo:" in result.output
     assert "    arena channel: cache_hit=1" in result.output
+
+
+def test_contexts_hydrate_verbose_reports_failed_component_reason(
+    tmp_path: Path,
+) -> None:
+    target_dir = tmp_path / "repo"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    status_path = tmp_path / "status.json"
+    missing_path = target_dir / "missing.md"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "replace": "guarded",
+                        "manifest": {
+                            "data": {
+                                "config": {
+                                    "context": {
+                                        "dir": ".context",
+                                        "include-meta": False,
+                                    }
+                                },
+                                "components": [
+                                    {"name": "ready", "text": "hello"},
+                                    {"name": "voice", "files": ["missing.md"]},
+                                ],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        [
+            "--verbose",
+            "contexts",
+            "hydrate",
+            "--registry",
+            str(registry_path),
+            "--status",
+            str(status_path),
+            "demo",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Progress summary:" in result.output
+    assert "  hydrate context: total=1 failed=1" in result.output
+    assert "latest_failure=demo: Component 'voice' path not found" in result.output
+    assert "  context demo:" in result.output
+    assert "    hydrate component: total=2 failed=1 done=1" in result.output
+    assert "latest_failure=voice: Component 'voice' path not found" in result.output
+    assert str(missing_path) in result.output
 
 
 def test_hydrate_context_with_manifests_component(
@@ -655,4 +805,37 @@ components:
 
     assert result.exit_code == 0
     assert "Hydrated" in result.output
+    assert "Progress summary:" in result.output
+    assert "  hydrate component: total=1 done=1" in result.output
     assert (context_dir / "main/notes/text-001.md").read_text(encoding="utf-8") == "hello"
+
+
+def test_hydrate_cli_quiet_suppresses_default_progress_summary(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest-note.md"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""---
+title: context
+---
+
+```yaml
+config:
+  context:
+    dir: {context_dir}
+    include-meta: false
+components:
+  - name: main
+    text: hello
+```
+""",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["hydrate", "--quiet", str(manifest_path)])
+
+    assert result.exit_code == 0
+    assert "Hydrated" in result.output
+    assert "Progress summary:" not in result.output

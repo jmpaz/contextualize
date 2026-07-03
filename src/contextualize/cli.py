@@ -710,7 +710,7 @@ class DefaultCommandGroup(OrderedGroup):
 @click.option(
     "--quiet",
     is_flag=True,
-    help="Disable provider progress logs on stderr (default).",
+    help="Disable provider progress logs on stderr.",
 )
 @click.option(
     "--position",
@@ -768,6 +768,7 @@ def cli(
         raise click.BadParameter("use --verbose or --quiet, not both")
     verbose_logging = bool(verbose and not quiet)
     ctx.obj["verbose_logging"] = verbose_logging
+    ctx.obj["quiet"] = quiet
     if md_model is not None:
         model = md_model.strip()
         if not model:
@@ -803,21 +804,16 @@ def cli(
     if staged_copy and write_file:
         raise click.BadParameter("--staged-copy cannot be used with --write-file")
 
-    from .progress import reset_progress, set_live_progress
+    from .progress import reset_progress
     from .run_metadata import reset_run_metadata
-    from .runtime import (
-        set_payload_media_jobs,
-        set_payload_spec_jobs,
-        set_verbose_logging,
-    )
+    from .runtime import set_payload_media_jobs, set_payload_spec_jobs
 
     reset_progress()
     reset_run_metadata()
-    set_verbose_logging(verbose_logging)
     set_payload_spec_jobs(spec_jobs)
     set_payload_media_jobs(media_jobs)
-    set_live_progress(verbose_logging)
-    ctx.call_on_close(lambda: _finish_run(verbose_logging=verbose_logging))
+    _set_progress_logging(ctx, verbose_logging)
+    ctx.call_on_close(lambda: _finish_run(ctx))
 
     if append_flag:
         output_pos = "append"
@@ -860,11 +856,25 @@ def cli(
             ctx.exit()
 
 
-def _finish_run(*, verbose_logging: bool) -> None:
+def _set_progress_logging(ctx, enabled: bool) -> None:
+    from .progress import set_live_progress
+    from .runtime import set_verbose_logging
+
+    progress_enabled = bool(enabled)
+    ctx.obj["verbose_logging"] = progress_enabled
+    set_verbose_logging(progress_enabled)
+    set_live_progress(progress_enabled)
+
+
+def _use_default_hydrate_progress(ctx, *, quiet: bool) -> None:
+    _set_progress_logging(ctx, not (quiet or ctx.obj.get("quiet", False)))
+
+
+def _finish_run(ctx) -> None:
     from .progress import flush_progress_summary, set_live_progress
 
     set_live_progress(False)
-    flush_progress_summary(enabled=verbose_logging)
+    flush_progress_summary(enabled=bool(ctx.obj.get("verbose_logging")))
     try:
         from .render.codex import close_shared_codex_app_server_sessions
 
@@ -1667,6 +1677,11 @@ def contexts_status_cmd(status_path) -> None:
     help="Exit non-zero when any context fails.",
 )
 @click.option(
+    "--quiet",
+    is_flag=True,
+    help="Suppress hydrate progress output.",
+)
+@click.option(
     "--dir",
     "context_dir",
     type=click.Path(),
@@ -1765,6 +1780,7 @@ def contexts_hydrate_cmd(
     registry,
     status_path,
     strict,
+    quiet,
     context_dir,
     access,
     path_strategy,
@@ -1785,6 +1801,7 @@ def contexts_hydrate_cmd(
     **extra_params,
 ):
     """Hydrate one or more registered contexts."""
+    _use_default_hydrate_progress(ctx, quiet=quiet)
     used_options = _collect_used_global_option_labels(
         ctx,
         only_names=HYDRATE_IGNORED_GLOBAL_OPTION_NAMES,
@@ -1935,6 +1952,11 @@ def contexts_hydrate_cmd(
     is_flag=True,
     help="Output an itemized list of files prepared for hydration.",
 )
+@click.option(
+    "--quiet",
+    is_flag=True,
+    help="Suppress hydrate progress output.",
+)
 @_video_frame_options
 @click.pass_context
 def hydrate_cmd(
@@ -1959,6 +1981,7 @@ def hydrate_cmd(
     cache_ttl,
     embedded_resolution,
     trace,
+    quiet,
     **extra_params,
 ):
     """
@@ -1968,6 +1991,7 @@ def hydrate_cmd(
     Are.na channels, Discord URLs, SoundCloud URLs/URNs, YouTube URLs, or a single
     YAML manifest file.
     """
+    _use_default_hydrate_progress(ctx, quiet=quiet)
     used_options = _collect_used_global_option_labels(
         ctx,
         only_names=HYDRATE_IGNORED_GLOBAL_OPTION_NAMES,

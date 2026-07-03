@@ -274,13 +274,23 @@ def _hydrate_one(
             manifest_source=manifest_source,
         )
     except (OSError, ValueError) as exc:
+        reason = str(exc)
+        failed_component = _component_failure_name(reason)
+        if failed_component:
+            log_progress(
+                "hydrate",
+                "component",
+                "failed",
+                target=failed_component,
+                detail=reason,
+            )
         return _status(
             name=context.name,
             target_dir=str(target_dir),
             manifest_source=manifest_source,
             context_dir=None,
             result="failed",
-            reason=str(exc),
+            reason=reason,
             replace=context.replace,
         )
 
@@ -352,6 +362,17 @@ def _prepare_existing_context(plan, replace: str) -> tuple[str, str | None] | No
 
 def _planned_file_count(plan) -> int:
     return len(_planned_paths(plan))
+
+
+def _component_failure_name(reason: str) -> str | None:
+    prefix = "Component '"
+    if not reason.startswith(prefix):
+        return None
+    remainder = reason[len(prefix):]
+    name, separator, _ = remainder.partition("'")
+    if separator and name:
+        return name
+    return None
 
 
 def _linked_manifest_failure_reason(failures) -> str | None:

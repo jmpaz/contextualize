@@ -6,7 +6,7 @@
 - `-p, --prompt` prepend and optionally append up to two strings
 - `-w, --wrap` wrap output as `md` or `xml`; `-w` alone is a shorthand for `--wrap xml`
 - `--verbose` enable provider diagnostics, Rich live progress on interactive stderr, and an end-of-run progress summary
-- `--quiet` disable provider progress logs on stderr (default)
+- `--quiet` disable provider progress logs on stderr
 - `-c, --copy` copy to clipboard instead of printing; displays the token count
 - `-s, --staged-copy` with `--prompt` and a copy mode, copy preprompt, content, and postprompt as distinct stages
 - `--count` dry run of `--copy`; prints a string containing the token count
@@ -19,6 +19,8 @@
 `--count` cannot be combined with `--copy` or `--copy-segments`.
 `--copy` and `--copy-segments` cannot be combined.
 `--staged-copy` requires `--prompt` and either `--copy` or `--copy-segments`.
+
+Hydration commands enable progress output by default. Use `contextualize hydrate --quiet ...` or `contextualize contexts hydrate --quiet ...` to suppress the live progress display and summary.
 
 `--copy` uses the local clipboard when available and automatically prefers OSC52 when running over SSH or inside tmux. Set `CONTEXTUALIZE_CLIPBOARD=osc52` to force OSC52, `CONTEXTUALIZE_CLIPBOARD=pyperclip` to force the local clipboard backend, or leave it unset for auto-detection.
 
