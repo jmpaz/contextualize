@@ -141,6 +141,14 @@ class HydratePlan:
     file_timestamps: dict[Path, tuple[float, float]] = field(default_factory=dict)
     files_to_copy: list[tuple[Path, Path]] = field(default_factory=list)
     dirs_to_symlink: list[tuple[Path, Path]] = field(default_factory=list)
+    linked_manifest_failures: list["LinkedManifestFailure"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class LinkedManifestFailure:
+    manifest_path: str
+    context_path: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -486,6 +494,7 @@ def build_hydration_plan_data(
     plugin_pending: dict[tuple[Any, ...], list[_PluginPendingWrite]] = {}
     plugin_seen_counter = 0
     resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]] = {}
+    linked_manifest_failures: list[LinkedManifestFailure] = []
 
     global_strip_prefix: Path | None = None
     if context_cfg["path_strategy"] == "by-component":
@@ -868,14 +877,56 @@ def build_hydration_plan_data(
 
             manifest_root = component_root or Path(comp_name)
             for link_index, manifest_spec in enumerate(comp_manifests, 1):
-                resolved_link_path = _resolve_manifest_link_spec(
-                    manifest_spec, base_dir, comp_name, link_index
-                )
-                canonical_dir, manifest_name = ensure_manifest_link_hydrated(
-                    resolved_link_path,
-                    parent_overrides=overrides,
-                    resolving=resolving_chain,
-                )
+                try:
+                    resolved_link_path = _resolve_manifest_link_spec(
+                        manifest_spec, base_dir, comp_name, link_index
+                    )
+                except (OSError, ValueError) as exc:
+                    label = str(manifest_spec)
+                    slug = _failed_manifest_slug(manifest_spec, link_index)
+                    failure_rel = _dedupe_path(
+                        manifest_root / slug / "FAILED.md", used_paths
+                    )
+                    _record_linked_manifest_failure(
+                        context_dir=context_dir,
+                        files_to_write=files_to_write,
+                        index_components=index_components,
+                        linked_manifest_failures=linked_manifest_failures,
+                        component_name=comp_name,
+                        rel_path=failure_rel,
+                        manifest_label=label,
+                        reason=_linked_manifest_inner_reason(label, str(exc)),
+                    )
+                    continue
+
+                try:
+                    canonical_dir, manifest_name = ensure_manifest_link_hydrated(
+                        resolved_link_path,
+                        parent_overrides=overrides,
+                        resolving=resolving_chain,
+                    )
+                except (OSError, ValueError) as exc:
+                    label = str(resolved_link_path)
+                    slug = _sanitize_path_segment(
+                        _peek_link_manifest_name(resolved_link_path)
+                        or resolved_link_path.stem,
+                        fallback=f"manifest-{link_index:03d}",
+                    )
+                    failure_rel = _dedupe_path(
+                        manifest_root / slug / "FAILED.md", used_paths
+                    )
+                    _record_linked_manifest_failure(
+                        context_dir=context_dir,
+                        files_to_write=files_to_write,
+                        index_components=index_components,
+                        linked_manifest_failures=linked_manifest_failures,
+                        component_name=comp_name,
+                        rel_path=failure_rel,
+                        manifest_label=label,
+                        reason=_linked_manifest_inner_reason(label, str(exc)),
+                    )
+                    continue
+
                 slug = _sanitize_path_segment(
                     manifest_name or resolved_link_path.stem,
                     fallback=f"manifest-{link_index:03d}",
@@ -947,6 +998,7 @@ def build_hydration_plan_data(
         file_timestamps=file_timestamps,
         files_to_copy=files_to_copy,
         dirs_to_symlink=dirs_to_symlink,
+        linked_manifest_failures=linked_manifest_failures,
     )
 
 
@@ -1318,6 +1370,100 @@ def _build_normalized_component(comp: dict[str, Any], name: str) -> dict[str, An
     }
     normalized["name"] = name
     return normalized
+
+
+def _record_linked_manifest_failure(
+    *,
+    context_dir: Path,
+    files_to_write: list[tuple[Path, str]],
+    index_components: dict[str, list[dict[str, Any]]],
+    linked_manifest_failures: list[LinkedManifestFailure],
+    component_name: str,
+    rel_path: Path,
+    manifest_label: str,
+    reason: str,
+) -> None:
+    _ensure_relative(rel_path)
+    content = _linked_manifest_failure_content(manifest_label, reason)
+    files_to_write.append((context_dir / rel_path, content))
+    index_components.setdefault(component_name, []).append(
+        _build_linked_manifest_failure_index_entry(
+            rel_path,
+            manifest_label=manifest_label,
+            reason=reason,
+            content=content,
+        )
+    )
+    linked_manifest_failures.append(
+        LinkedManifestFailure(
+            manifest_path=manifest_label,
+            context_path=rel_path.as_posix(),
+            reason=reason,
+        )
+    )
+    log_progress(
+        "hydrate",
+        "linked-manifest",
+        "failed",
+        target=manifest_label,
+        detail=reason,
+    )
+
+
+def _linked_manifest_failure_content(manifest_label: str, reason: str) -> str:
+    return (
+        "# Linked Manifest Failed\n\n"
+        f"Manifest: `{manifest_label}`\n\n"
+        f"Reason: {reason}\n"
+    )
+
+
+def _build_linked_manifest_failure_index_entry(
+    rel_path: Path,
+    *,
+    manifest_label: str,
+    reason: str,
+    content: str,
+) -> dict[str, Any]:
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return {
+        "context_path": rel_path.as_posix(),
+        "source_type": "manifest-link",
+        "source_ref": manifest_label,
+        "source_path": manifest_label,
+        "source_rev": None,
+        "error": reason,
+        "hash": f"sha256:{digest}",
+    }
+
+
+def _failed_manifest_slug(manifest_spec: Any, index: int) -> str:
+    if isinstance(manifest_spec, str) and manifest_spec.strip():
+        name = Path(manifest_spec.strip()).stem
+    else:
+        name = ""
+    return _sanitize_path_segment(name, fallback=f"manifest-{index:03d}")
+
+
+def _linked_manifest_inner_reason(manifest_label: str, reason: str) -> str:
+    prefix = f"Failed to hydrate linked manifest {manifest_label}: "
+    if reason.startswith(prefix):
+        return reason[len(prefix) :]
+    return reason
+
+
+def _peek_link_manifest_name(resolved: Path) -> str | None:
+    try:
+        source = load_manifest_source(str(resolved))
+    except (OSError, ValueError):
+        return None
+    cfg = source.data.get("config") if isinstance(source.data, dict) else None
+    if not isinstance(cfg, dict):
+        return None
+    name = cfg.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
 
 
 def _expand_repo_specs(

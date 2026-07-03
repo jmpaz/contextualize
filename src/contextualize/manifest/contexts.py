@@ -151,12 +151,16 @@ def hydrate_contexts(
             finally:
                 reset_progress_context(token)
         statuses.append(status)
+        progress_outcome = {
+            "failed": "failed",
+            "partial": "partial",
+        }.get(status.result, "done")
         log_progress(
             "hydrate",
             "context",
-            "failed" if status.result == "failed" else "done",
+            progress_outcome,
             target=name,
-            detail=status.result,
+            detail=status.reason or status.result,
         )
 
     write_context_status(statuses, status_path=status_path)
@@ -240,8 +244,15 @@ def _hydrate_one(
 
     try:
         plan = _build_plan(context, overrides, resolving=resolving)
+        linked_failure_reason = _linked_manifest_failure_reason(
+            plan.linked_manifest_failures
+        )
         existing_status = _prepare_existing_context(plan, context.replace)
         if existing_status is not None:
+            outcome, reason = existing_status
+            if outcome == "up-to-date" and linked_failure_reason:
+                outcome = "partial"
+                reason = linked_failure_reason
             return _status_from_result(
                 context,
                 HydrateResult(
@@ -250,16 +261,16 @@ def _hydrate_one(
                     file_count=_planned_file_count(plan),
                     manifest_written=plan.include_meta,
                 ),
-            outcome=existing_status[0],
-            reason=existing_status[1],
-            manifest_source=manifest_source,
-        )
+                outcome=outcome,
+                reason=reason,
+                manifest_source=manifest_source,
+            )
         result = apply_hydration_plan(plan)
         return _status_from_result(
             context,
             result,
-            outcome="hydrated",
-            reason=None,
+            outcome="partial" if linked_failure_reason else "hydrated",
+            reason=linked_failure_reason,
             manifest_source=manifest_source,
         )
     except (OSError, ValueError) as exc:
@@ -341,6 +352,16 @@ def _prepare_existing_context(plan, replace: str) -> tuple[str, str | None] | No
 
 def _planned_file_count(plan) -> int:
     return len(_planned_paths(plan))
+
+
+def _linked_manifest_failure_reason(failures) -> str | None:
+    if not failures:
+        return None
+    first = failures[0]
+    count = len(failures)
+    noun = "linked manifest" if count == 1 else "linked manifests"
+    suffix = "" if count == 1 else f", and {count - 1} more"
+    return f"{count} {noun} failed: {first.manifest_path}: {first.reason}{suffix}"
 
 
 def _peek_manifest_name(resolved: Path) -> str | None:

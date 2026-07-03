@@ -1192,6 +1192,74 @@ def test_hydrate_manifests_refreshes_when_sub_manifest_changes(
     ).read_text(encoding="utf-8").strip() == "version-2"
 
 
+def test_hydrate_manifests_records_failed_sub_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+
+    good_manifest = tmp_path / "good.yaml"
+    _write_sub_manifest(good_manifest, text="good content")
+    bad_manifest = tmp_path / "bad.yaml"
+    bad_manifest.write_text(
+        "config:\n"
+        "  context:\n"
+        "    include-meta: false\n"
+        "components:\n"
+        "  - name: broken\n"
+        "    files: [missing.md]\n",
+        encoding="utf-8",
+    )
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": True,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [
+                {
+                    "name": "contexts",
+                    "manifests": [str(good_manifest), str(bad_manifest)],
+                }
+            ],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    assert len(plan.linked_manifest_failures) == 1
+    assert "missing.md" in plan.linked_manifest_failures[0].reason
+    apply_hydration_plan(plan)
+
+    assert (context_dir / "contexts" / "good").is_symlink()
+    failure_marker = context_dir / "contexts" / "bad" / "FAILED.md"
+    assert failure_marker.is_file()
+    failure_text = failure_marker.read_text(encoding="utf-8")
+    assert str(bad_manifest) in failure_text
+    assert "missing.md" in failure_text
+
+    index = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    entries = index["components"]["contexts"]
+    failure_entries = [
+        entry
+        for entry in entries
+        if entry["context_path"] == "contexts/bad/FAILED.md"
+    ]
+    assert len(failure_entries) == 1
+    assert failure_entries[0]["source_type"] == "manifest-link"
+    assert "missing.md" in failure_entries[0]["error"]
+
+    manifest_yaml = (context_dir / "manifest.yaml").read_text(encoding="utf-8")
+    assert "manifests" in manifest_yaml
+    assert str(good_manifest) in manifest_yaml
+    assert str(bad_manifest) in manifest_yaml
+
+
 def test_hydrate_manifests_honors_sub_manifest_own_base_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1310,7 +1378,7 @@ def test_hydrate_read_only_does_not_chmod_symlinked_source_file(
         _restore_writable(context_dir)
 
 
-def test_hydrate_manifests_cycle_detection_raises(
+def test_hydrate_manifests_cycle_detection_records_failed_link(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _isolate_manifest_link_cache(monkeypatch, tmp_path)
@@ -1328,32 +1396,49 @@ def test_hydrate_manifests_cycle_detection_raises(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="Cycle detected"):
-        build_hydration_plan(
-            str(manifest_a),
-            overrides=HydrateOverrides(),
-            cwd=str(tmp_path),
-        )
+    plan = build_hydration_plan(
+        str(manifest_a),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    assert len(plan.linked_manifest_failures) == 1
+    assert str(manifest_b) in plan.linked_manifest_failures[0].manifest_path
+    assert "Cycle detected" in plan.linked_manifest_failures[0].reason
+    assert any(
+        path.relative_to(plan.context_dir).as_posix() == "link/b/FAILED.md"
+        and "Cycle detected" in content
+        for path, content in plan.files_to_write
+    )
 
 
-def test_hydrate_manifests_rejects_remote_target(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="must be a local file path"):
-        build_hydration_plan_data(
-            {
-                "config": {
-                    "context": {"dir": str(tmp_path / "ctx"), "include-meta": False}
-                },
-                "components": [
-                    {
-                        "name": "contexts",
-                        "manifests": ["https://example.com/manifest.yaml"],
-                    }
-                ],
+def test_hydrate_manifests_records_remote_target_failure(tmp_path: Path) -> None:
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {"dir": str(tmp_path / "ctx"), "include-meta": False}
             },
-            manifest_cwd=str(tmp_path),
-            overrides=HydrateOverrides(),
-            cwd=str(tmp_path),
-        )
+            "components": [
+                {
+                    "name": "contexts",
+                    "manifests": ["https://example.com/manifest.yaml"],
+                }
+            ],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+
+    assert len(plan.linked_manifest_failures) == 1
+    assert plan.linked_manifest_failures[0].manifest_path == "https://example.com/manifest.yaml"
+    assert "must be a local file path" in plan.linked_manifest_failures[0].reason
+    assert any(
+        path.relative_to(plan.context_dir).as_posix()
+        == "contexts/manifest/FAILED.md"
+        and "must be a local file path" in content
+        for path, content in plan.files_to_write
+    )
 
 
 def test_hydrate_manifests_snapshot_preserves_raw_list(

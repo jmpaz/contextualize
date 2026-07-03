@@ -189,6 +189,7 @@ class _LiveTaskState:
     item_count: int = 0
     byte_count: int = 0
     latest: str = ""
+    latest_failure: str = ""
 
     def __post_init__(self) -> None:
         if self.counts is None:
@@ -312,8 +313,16 @@ class _RichProgressReporter:
                 state.completed = state.total or state.completed
             else:
                 state.completed += 1
-        elif event.outcome in {"processed", "cache_hit", "cache_miss", "failed"}:
+        elif event.outcome in {
+            "processed",
+            "cache_hit",
+            "cache_miss",
+            "failed",
+            "partial",
+        }:
             state.completed += 1
+            if event.outcome in {"failed", "partial"}:
+                state.latest_failure = _format_failure_detail(event)
 
         if state.total is not None:
             state.completed = min(state.completed, state.total)
@@ -343,6 +352,7 @@ def _summary_parts(events: list[ProgressEvent]) -> list[str]:
     item_count = 0
     byte_count = 0
     start_count = 0
+    latest_failure = ""
     for event in events:
         if event.outcome == "total":
             total_value = event.count
@@ -350,6 +360,8 @@ def _summary_parts(events: list[ProgressEvent]) -> list[str]:
         if event.outcome == "start":
             start_count += 1
             continue
+        if event.outcome == "failed":
+            latest_failure = _format_failure_detail(event)
         if not (
             event.provider == "hydrate"
             and event.operation == "file"
@@ -370,6 +382,8 @@ def _summary_parts(events: list[ProgressEvent]) -> list[str]:
         parts.append(f"items={item_count}")
     if byte_count:
         parts.append(f"bytes={_format_bytes(byte_count)}")
+    if latest_failure:
+        parts.append(f"latest_failure={_truncate(latest_failure, 180)}")
     if not parts and start_count:
         parts.append(f"start={start_count}")
     return parts
@@ -381,6 +395,7 @@ def _ordered_outcomes(counters: Counter[str]) -> list[str]:
         "cache_miss",
         "processed",
         "failed",
+        "partial",
         "done",
     ]
     ordered = [outcome for outcome in preferred if counters.get(outcome)]
@@ -426,7 +441,7 @@ def _format_units(state: _LiveTaskState) -> str:
 def _format_task_stats(state: _LiveTaskState) -> str:
     parts: list[str] = []
     counts = state.counts or Counter()
-    for outcome in ("cache_hit", "cache_miss", "processed", "failed", "done"):
+    for outcome in ("cache_hit", "cache_miss", "processed", "failed", "partial", "done"):
         total = counts.get(outcome, 0)
         if total:
             parts.append(f"{_outcome_label(outcome)}={total}")
@@ -436,12 +451,22 @@ def _format_task_stats(state: _LiveTaskState) -> str:
         parts.append(f"bytes={_format_bytes(state.byte_count)}")
     if state.latest:
         parts.append(f"latest={state.latest}")
+    if state.latest_failure:
+        parts.append(f"failure={_truncate(state.latest_failure, 180)}")
     return " ".join(parts)
 
 
 def _format_event_target(event: ProgressEvent) -> str:
     value = event.target or event.detail or ""
     return _truncate(value, 56) if value else ""
+
+
+def _format_failure_detail(event: ProgressEvent) -> str:
+    target = event.target or ""
+    detail = event.detail or ""
+    if target and detail:
+        return f"{target}: {detail}"
+    return target or detail
 
 
 def _format_bytes(value: int) -> str:

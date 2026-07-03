@@ -439,6 +439,113 @@ def test_hydrate_context_with_manifests_component(
     ).read_text(encoding="utf-8").strip() == "hello from sub"
 
 
+def test_contexts_hydrate_partial_when_sub_manifest_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+
+    good_manifest = tmp_path / "good.yaml"
+    good_manifest.write_text(
+        "config:\n"
+        "  context:\n"
+        "    include-meta: false\n"
+        "components:\n"
+        "  - name: main\n"
+        "    text: hello from sub\n",
+        encoding="utf-8",
+    )
+    bad_manifest = tmp_path / "bad.yaml"
+    bad_manifest.write_text(
+        "config:\n"
+        "  context:\n"
+        "    include-meta: false\n"
+        "components:\n"
+        "  - name: broken\n"
+        "    files: [missing.md]\n",
+        encoding="utf-8",
+    )
+
+    target_dir = tmp_path / "repo"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    status_path = tmp_path / "status.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "replace": "guarded",
+                        "manifest": {
+                            "data": {
+                                "config": {
+                                    "context": {
+                                        "dir": ".context",
+                                        "include-meta": False,
+                                        "path-strategy": "on-disk",
+                                    }
+                                },
+                                "components": [
+                                    {
+                                        "name": "contexts",
+                                        "manifests": [
+                                            str(good_manifest),
+                                            str(bad_manifest),
+                                        ],
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        [
+            "contexts",
+            "hydrate",
+            "--registry",
+            str(registry_path),
+            "--status",
+            str(status_path),
+            "demo",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "context demo: partial" in result.output
+    assert str(bad_manifest) in result.output
+    assert "missing.md" in result.output
+    status_data = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status_data["contexts"]["demo"]["result"] == "partial"
+    assert (target_dir / ".context" / "contexts" / "good").is_symlink()
+    assert (target_dir / ".context" / "contexts" / "bad" / "FAILED.md").is_file()
+
+    strict_result = runner.invoke(
+        cli.cli,
+        [
+            "contexts",
+            "hydrate",
+            "--strict",
+            "--registry",
+            str(registry_path),
+            "--status",
+            str(status_path),
+            "demo",
+        ],
+    )
+
+    assert strict_result.exit_code != 0
+    assert "context demo: partial" in strict_result.output
+    assert "1 context(s) failed or partial" in strict_result.output
+
+
 def test_hydrate_manifests_shared_sub_manifest_reuses_canonical_dir(
     monkeypatch, tmp_path: Path
 ) -> None:

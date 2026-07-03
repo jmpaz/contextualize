@@ -1498,7 +1498,7 @@ def _echo_context_hydration_statuses(statuses, *, label: str) -> None:
             parts.append(f"-> {status.context_dir}")
         if status.reason:
             parts.append(f"({status.reason})")
-        click.echo(" ".join(parts), err=status.result in {"failed", "skipped"})
+        click.echo(" ".join(parts), err=status.result in {"failed", "partial", "skipped"})
 
 
 def _context_hydrate_overrides(
@@ -1645,7 +1645,7 @@ def contexts_status_cmd(status_path) -> None:
             parts.append(f"at {target_dir}")
         if reason:
             parts.append(f"({reason})")
-        click.echo(" ".join(parts), err=result in {"failed", "skipped"})
+        click.echo(" ".join(parts), err=result in {"failed", "partial", "skipped"})
 
 
 @contexts_cmd.command("hydrate", cls=PluginGroupedCommand)
@@ -1825,10 +1825,10 @@ def contexts_hydrate_cmd(
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    failed = [status for status in statuses if status.result == "failed"]
+    failed = [status for status in statuses if status.result in {"failed", "partial"}]
     _echo_context_hydration_statuses(statuses, label="context")
     if strict and failed:
-        raise click.ClickException(f"{len(failed)} context(s) failed")
+        raise click.ClickException(f"{len(failed)} context(s) failed or partial")
     return None
 
 

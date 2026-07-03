@@ -50,6 +50,28 @@ def test_progress_summary_groups_by_context_provider_operation() -> None:
     reset_progress()
 
 
+def test_progress_summary_includes_failure_reason() -> None:
+    reset_progress()
+    token = set_progress_context("loom-rs")
+    try:
+        log_progress(
+            "hydrate",
+            "linked-manifest",
+            "failed",
+            target="/home/josh/notes/qvao.md",
+            detail="Component 'general' path not found: /home/josh/sandbox/resume/resume.tex",
+        )
+    finally:
+        reset_progress_context(token)
+
+    lines = progress_summary_lines()
+
+    assert any("linked-manifest: failed=1" in line for line in lines)
+    assert any("latest_failure=/home/josh/notes/qvao.md" in line for line in lines)
+    assert any("resume.tex" in line for line in lines)
+    reset_progress()
+
+
 def test_payload_job_overrides_take_precedence_over_env(monkeypatch) -> None:
     monkeypatch.setenv("CONTEXTUALIZE_PAYLOAD_SPEC_JOBS", "3")
     monkeypatch.setenv("CONTEXTUALIZE_PAYLOAD_MEDIA_JOBS", "2")
