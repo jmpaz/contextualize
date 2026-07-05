@@ -326,7 +326,26 @@ def test_contexts_list_cli_uses_registry(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert f"demo\t{target_dir}" in result.output
+    assert "Context registry: total=1" in result.output
+    assert "name  source       target" in result.output
+    assert f"demo  inline data  {target_dir}" in result.output
+
+
+def test_contexts_list_cli_handles_empty_registry(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps({"version": 1, "contexts": {}}),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(registry_path)],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "Context registry: total=0\n"
 
 
 def test_contexts_hydrate_prefixes_context_warnings(

@@ -1511,6 +1511,39 @@ def _echo_context_hydration_statuses(statuses, *, label: str) -> None:
         click.echo(" ".join(parts), err=status.result in {"failed", "partial", "skipped"})
 
 
+def _echo_context_registry(contexts) -> None:
+    from .manifest.contexts import manifest_source_label
+
+    names = sorted(contexts)
+    click.echo(click.style(f"Context registry: total={len(names)}", bold=True))
+    if not names:
+        return
+
+    name_width = max(term_len(name) for name in names)
+    source_width = max(term_len(manifest_source_label(contexts[name])) for name in names)
+    click.echo(
+        "  "
+        + click.style("name".ljust(name_width), bold=True)
+        + "  "
+        + click.style("source".ljust(source_width), bold=True)
+        + "  "
+        + click.style("target", bold=True)
+    )
+    for name in names:
+        context = contexts[name]
+        padded_name = name + (" " * (name_width - term_len(name)))
+        source = manifest_source_label(context)
+        padded_source = source + (" " * (source_width - term_len(source)))
+        click.echo(
+            "  "
+            + click.style(padded_name, fg="green", bold=True)
+            + "  "
+            + click.style(padded_source, fg="yellow")
+            + "  "
+            + click.style(str(context.target_dir), fg="cyan")
+        )
+
+
 def _context_hydrate_overrides(
     ctx,
     *,
@@ -1609,9 +1642,7 @@ def contexts_list_cmd(registry) -> None:
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    for name in sorted(contexts):
-        context = contexts[name]
-        click.echo(f"{name}\t{context.target_dir}")
+    _echo_context_registry(contexts)
 
 
 @contexts_cmd.command("status")

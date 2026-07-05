@@ -230,7 +230,7 @@ def _hydrate_one(
     resolving: tuple[Path, ...] = (),
 ) -> ContextHydrationStatus:
     target_dir = context.target_dir
-    manifest_source = _manifest_source_label(context)
+    manifest_source = manifest_source_label(context)
     if not target_dir.is_dir():
         return _status(
             name=context.name,
@@ -510,7 +510,7 @@ def _status(
     )
 
 
-def _manifest_source_label(context: ContextEntry) -> str:
+def manifest_source_label(context: ContextEntry) -> str:
     manifest = context.manifest
     if "source" in manifest:
         return str(manifest["source"])
