@@ -38,13 +38,28 @@ let
     ++ lib.optional cfg.contexts.activation.strict "--strict";
   contextActivationCommand =
     lib.escapeShellArgs ([ "${wrapper}/bin/contextualize" ] ++ contextActivationArgs);
-  installedPackage = pkgs.symlinkJoin {
-    name = "contextualize";
-    paths = [ cfg.package ];
-    postBuild = ''
-      ln -sf ${wrapper}/bin/contextualize $out/bin/contextualize
-    '';
-  };
+  installedPackage = pkgs.runCommand "contextualize" { } ''
+    mkdir -p $out/bin
+    ln -s ${wrapper}/bin/contextualize $out/bin/contextualize
+
+    install_completion() {
+      local source=$1
+      local target=$2
+      if [ -e "$source" ]; then
+        install -D -m 0644 "$source" "$target"
+      fi
+    }
+
+    install_completion \
+      ${cfg.package}/share/bash-completion/completions/contextualize \
+      $out/share/bash-completion/completions/contextualize
+    install_completion \
+      ${cfg.package}/share/zsh/site-functions/_contextualize \
+      $out/share/zsh/site-functions/_contextualize
+    install_completion \
+      ${cfg.package}/share/fish/vendor_completions.d/contextualize.fish \
+      $out/share/fish/vendor_completions.d/contextualize.fish
+  '';
   direnvFile = pkgs.writeText "contextualize.envrc" ''
     ${if cfg.cxPluginsDevDir == null then ''
       use flake ${lib.escapeShellArg cfg.devDir}
