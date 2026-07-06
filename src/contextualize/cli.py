@@ -1512,36 +1512,41 @@ def _echo_context_hydration_statuses(statuses, *, label: str) -> None:
 
 
 def _echo_context_registry(contexts) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
     from .manifest.contexts import manifest_source_label
 
     names = sorted(contexts)
-    click.echo(click.style(f"Context registry: total={len(names)}", bold=True))
+    click.echo(f"Context registry: total={len(names)}")
     if not names:
         return
 
-    name_width = max(term_len(name) for name in names)
-    source_width = max(term_len(manifest_source_label(contexts[name])) for name in names)
-    click.echo(
-        "  "
-        + click.style("name".ljust(name_width), bold=True)
-        + "  "
-        + click.style("source".ljust(source_width), bold=True)
-        + "  "
-        + click.style("target", bold=True)
-    )
-    for name in names:
-        context = contexts[name]
-        padded_name = name + (" " * (name_width - term_len(name)))
-        source = manifest_source_label(context)
-        padded_source = source + (" " * (source_width - term_len(source)))
-        click.echo(
-            "  "
-            + click.style(padded_name, fg="green", bold=True)
-            + "  "
-            + click.style(padded_source, fg="yellow")
-            + "  "
-            + click.style(str(context.target_dir), fg="cyan")
+    rows = [
+        (
+            name,
+            manifest_source_label(contexts[name]),
+            contexts[name].origin,
+            str(contexts[name].target_dir),
         )
+        for name in names
+    ]
+    headers = ("name", "source", "origin", "target")
+    table_width = max(
+        sum(term_len(value) for value in row) + (len(row) - 1) * 4
+        for row in [headers, *rows]
+    )
+    table = Table(
+        box=None,
+        padding=(0, 2),
+        show_edge=False,
+        header_style="bold",
+    )
+    for header in headers:
+        table.add_column(header, no_wrap=True, overflow="ignore")
+    for row in rows:
+        table.add_row(*row)
+    Console(width=max(240, table_width + 80)).print(table)
 
 
 def _context_hydrate_overrides(

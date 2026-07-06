@@ -110,7 +110,10 @@ def test_contexts_list_discovers_zk_subscription(
 
     assert result.exit_code == 0
     assert "Context registry: total=1" in result.output
-    assert f"subscribed-demo  {note.resolve()}  {target_root / 'subscribed-demo'}" in result.output
+    assert "subscribed-demo" in result.output
+    assert str(note.resolve()) in result.output
+    assert "tag:ctx/ref" in result.output
+    assert str(target_root / "subscribed-demo") in result.output
 
 
 def test_contexts_subscription_uses_frontmatter_context(
@@ -133,7 +136,10 @@ def test_contexts_subscription_uses_frontmatter_context(
     )
 
     assert result.exit_code == 0
-    assert f"explicit-demo  {note.resolve()}  {target_root / 'explicit-demo'}" in result.output
+    assert "explicit-demo" in result.output
+    assert str(note.resolve()) in result.output
+    assert "tag:ctx/ref" in result.output
+    assert str(target_root / "explicit-demo") in result.output
     assert "ignored-name" not in result.output
 
 
@@ -591,12 +597,19 @@ def test_contexts_list_cli_uses_registry(tmp_path: Path) -> None:
     result = runner.invoke(
         cli.cli,
         ["contexts", "list", "--registry", str(registry_path)],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "empty-config")},
     )
 
     assert result.exit_code == 0
     assert "Context registry: total=1" in result.output
-    assert "name  source       target" in result.output
-    assert f"demo  inline data  {target_dir}" in result.output
+    assert "name" in result.output
+    assert "source" in result.output
+    assert "origin" in result.output
+    assert "target" in result.output
+    assert "demo" in result.output
+    assert "inline data" in result.output
+    assert "registry" in result.output
+    assert str(target_dir) in result.output
 
 
 def test_contexts_list_cli_handles_empty_registry(tmp_path: Path) -> None:
@@ -610,6 +623,7 @@ def test_contexts_list_cli_handles_empty_registry(tmp_path: Path) -> None:
     result = runner.invoke(
         cli.cli,
         ["contexts", "list", "--registry", str(registry_path)],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "empty-config")},
     )
 
     assert result.exit_code == 0

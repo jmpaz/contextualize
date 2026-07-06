@@ -44,6 +44,7 @@ class ContextEntry:
     target_dir: Path
     manifest: dict[str, Any]
     replace: str
+    origin: str = "registry"
     ensure_target_dir: bool = False
 
 
@@ -239,6 +240,7 @@ def _discover_subscription_contexts(
                 target_dir=target_root / name,
                 manifest={"source": str(path.resolve())},
                 replace=subscription["replace"],
+                origin=f"tag:{subscription['tag']}",
                 ensure_target_dir=True,
             )
         )

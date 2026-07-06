@@ -194,7 +194,7 @@ contexts:
 Subscribed notes must contain a contextualize manifest. The context name comes from frontmatter `cx.context` when present, otherwise from a slugged manifest `config.name`. Static registry entries stay authoritative when names or manifest sources overlap.
 
 ```bash
-contextualize contexts list
+contextualize contexts list  # shows source, origin, and target
 contextualize contexts hydrate my-context
 ```
 
