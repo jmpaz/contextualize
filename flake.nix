@@ -133,6 +133,21 @@
             postBuild = ''
               wrapProgram $out/bin/contextualize \
                 --prefix PATH : ${lib.makeBinPath [ unwrapped pkgs.deno pkgs.ffmpeg pkgs.poppler-utils ]}
+              ensure_completion_dir() {
+                if [ -L "$1" ]; then
+                  rm "$1"
+                fi
+                mkdir -p "$1"
+              }
+              ensure_completion_dir $out/share/bash-completion
+              ensure_completion_dir $out/share/bash-completion/completions
+              ensure_completion_dir $out/share/zsh
+              ensure_completion_dir $out/share/zsh/site-functions
+              ensure_completion_dir $out/share/fish
+              ensure_completion_dir $out/share/fish/vendor_completions.d
+              _CONTEXTUALIZE_COMPLETE=bash_source $out/bin/contextualize > $out/share/bash-completion/completions/contextualize
+              _CONTEXTUALIZE_COMPLETE=zsh_source $out/bin/contextualize > $out/share/zsh/site-functions/_contextualize
+              _CONTEXTUALIZE_COMPLETE=fish_source $out/bin/contextualize > $out/share/fish/vendor_completions.d/contextualize.fish
             '';
           };
         venv = mkContextualize {};

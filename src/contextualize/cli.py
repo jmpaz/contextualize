@@ -1,6 +1,8 @@
+import io
 import os
 import re
 import sys
+from contextlib import redirect_stderr
 from dataclasses import dataclass
 from collections.abc import Sequence
 
@@ -1627,6 +1629,29 @@ def _context_hydrate_overrides(
     )
 
 
+def _complete_context_names(ctx, param, incomplete):
+    from click.shell_completion import CompletionItem
+
+    try:
+        from .manifest.contexts import load_context_registry
+
+        with redirect_stderr(io.StringIO()):
+            contexts = load_context_registry(ctx.params.get("registry"))
+    except Exception:
+        return []
+
+    selected = set(ctx.params.get("names") or ())
+    items = []
+    for name, context in sorted(
+        contexts.items(),
+        key=lambda item: (item[1].origin, item[0]),
+    ):
+        if name in selected or not name.startswith(incomplete):
+            continue
+        items.append(CompletionItem(name, help=f"{context.origin} {context.target_dir}"))
+    return items
+
+
 @cli.group("contexts")
 def contexts_cmd() -> None:
     """Work with registered context manifests."""
@@ -1695,7 +1720,7 @@ def contexts_status_cmd(status_path) -> None:
 
 
 @contexts_cmd.command("hydrate", cls=PluginGroupedCommand)
-@click.argument("names", nargs=-1, type=str)
+@click.argument("names", nargs=-1, type=str, shell_complete=_complete_context_names)
 @click.option(
     "--registry",
     type=click.Path(exists=True, dir_okay=False),

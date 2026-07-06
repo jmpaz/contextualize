@@ -200,6 +200,18 @@ contextualize contexts hydrate my-context
 
 Static registry entries default to origin `registry`. Nix-generated registries set origin `nix`; subscribed contexts use `tag:<tag>`.
 
+### shell completion
+
+`contextualize` ships dynamic shell completions for Bash, Zsh, and Fish. The Nix/Home Manager package installs those completion files automatically. Non-Nix installs can source Click's generated completion script directly:
+
+```bash
+_CONTEXTUALIZE_COMPLETE=bash_source contextualize > ~/.local/share/bash-completion/completions/contextualize
+_CONTEXTUALIZE_COMPLETE=zsh_source contextualize > ~/.zfunc/_contextualize
+_CONTEXTUALIZE_COMPLETE=fish_source contextualize > ~/.config/fish/completions/contextualize.fish
+```
+
+Context registry commands complete live context names, including tag-discovered contexts, for `contextualize contexts hydrate <TAB>`.
+
 ### content injection
 
 `--inject` replaces `{cx::...}` patterns inside target files with referenced content. targets can be HTTP URLs, git repos, or local paths. parameters can tweak labels and formats just like the `cat` command.

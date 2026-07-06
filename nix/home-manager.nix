@@ -38,6 +38,13 @@ let
     ++ lib.optional cfg.contexts.activation.strict "--strict";
   contextActivationCommand =
     lib.escapeShellArgs ([ "${wrapper}/bin/contextualize" ] ++ contextActivationArgs);
+  installedPackage = pkgs.symlinkJoin {
+    name = "contextualize";
+    paths = [ cfg.package ];
+    postBuild = ''
+      ln -sf ${wrapper}/bin/contextualize $out/bin/contextualize
+    '';
+  };
   direnvFile = pkgs.writeText "contextualize.envrc" ''
     ${if cfg.cxPluginsDevDir == null then ''
       use flake ${lib.escapeShellArg cfg.devDir}
@@ -142,7 +149,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    home.packages = [ wrapper ];
+    home.packages = [ installedPackage ];
 
     systemd.user.services.contextualize-contexts-hydrate = lib.mkIf (
       pkgs.stdenv.isLinux

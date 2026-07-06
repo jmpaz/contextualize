@@ -717,6 +717,96 @@ def test_contexts_list_cli_rejects_empty_registry_origin(tmp_path: Path) -> None
     assert "Context 'demo' origin must be a non-empty string" in result.output
 
 
+def test_contexts_hydrate_completes_registry_context_names(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    _write_registry(
+        registry_path,
+        {
+            "z-registry": {
+                "targetDir": str(tmp_path / "z-registry"),
+                "manifest": {"data": {"components": []}},
+            },
+            "m-nix": {
+                "targetDir": str(tmp_path / "m-nix"),
+                "origin": "nix",
+                "manifest": {"data": {"components": []}},
+            },
+            "mech-interp": {
+                "targetDir": str(tmp_path / "mech-interp"),
+                "origin": "tag:ctx/ref",
+                "manifest": {"data": {"components": []}},
+            },
+        },
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        [],
+        prog_name="contextualize",
+        env={
+            "XDG_CONFIG_HOME": str(tmp_path / "empty-config"),
+            "_CONTEXTUALIZE_COMPLETE": "bash_complete",
+            "COMP_WORDS": f"contextualize contexts hydrate --registry {registry_path} me",
+            "COMP_CWORD": "5",
+        },
+    )
+
+    assert result.exit_code == 0
+    assert "plain,mech-interp" in result.output
+    assert "m-nix" not in result.output
+    assert "z-registry" not in result.output
+
+
+def test_contexts_hydrate_completion_sorts_by_origin_then_name(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    _write_registry(
+        registry_path,
+        {
+            "z-registry": {
+                "targetDir": str(tmp_path / "z-registry"),
+                "manifest": {"data": {"components": []}},
+            },
+            "m-nix": {
+                "targetDir": str(tmp_path / "m-nix"),
+                "origin": "nix",
+                "manifest": {"data": {"components": []}},
+            },
+            "a-registry": {
+                "targetDir": str(tmp_path / "a-registry"),
+                "manifest": {"data": {"components": []}},
+            },
+            "a-nix": {
+                "targetDir": str(tmp_path / "a-nix"),
+                "origin": "nix",
+                "manifest": {"data": {"components": []}},
+            },
+        },
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        [],
+        prog_name="contextualize",
+        env={
+            "XDG_CONFIG_HOME": str(tmp_path / "empty-config"),
+            "_CONTEXTUALIZE_COMPLETE": "bash_complete",
+            "COMP_WORDS": f"contextualize contexts hydrate --registry {registry_path} ",
+            "COMP_CWORD": "5",
+        },
+    )
+
+    assert result.exit_code == 0
+    positions = [
+        result.output.index("plain,a-nix"),
+        result.output.index("plain,m-nix"),
+        result.output.index("plain,a-registry"),
+        result.output.index("plain,z-registry"),
+    ]
+    assert positions == sorted(positions)
+
+
 def test_contexts_list_cli_handles_empty_registry(tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(
