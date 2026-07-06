@@ -177,6 +177,27 @@ components:
 
 running the command yields the composed payload.
 
+### `contexts`
+
+Registered contexts hydrate named manifests into target directories. Static entries are read from `~/.config/contextualize/contexts.json`. Optional subscriptions in `~/.config/contextualize/config.yaml` can discover zk notes by tag and add them to the registry at runtime.
+
+```yaml
+contexts:
+  subscriptions:
+    - source: zk
+      root: ~/notes
+      tag: ctx/ref
+      targetRoot: ~/ref
+      replace: guarded
+```
+
+Subscribed notes must contain a contextualize manifest. The context name comes from frontmatter `cx.context` when present, otherwise from a slugged manifest `config.name`. Static registry entries stay authoritative when names or manifest sources overlap.
+
+```bash
+contextualize contexts list
+contextualize contexts hydrate my-context
+```
+
 ### content injection
 
 `--inject` replaces `{cx::...}` patterns inside target files with referenced content. targets can be HTTP URLs, git repos, or local paths. parameters can tweak labels and formats just like the `cat` command.

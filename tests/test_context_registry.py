@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -8,6 +9,73 @@ from click.testing import CliRunner
 from contextualize import cli
 from contextualize.manifest.contexts import ContextHydrationStatus, hydrate_contexts
 from contextualize.progress import record_progress
+
+
+def _write_registry(path: Path, contexts: dict) -> None:
+    path.write_text(
+        json.dumps({"version": 1, "contexts": contexts}),
+        encoding="utf-8",
+    )
+
+
+def _write_context_config(path: Path, root: Path, target_root: Path) -> None:
+    config_dir = path / "contextualize"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "contexts:",
+                "  subscriptions:",
+                "    - source: zk",
+                f"      root: {root}",
+                "      tag: ctx/ref",
+                f"      targetRoot: {target_root}",
+                "      replace: guarded",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_note(path: Path, *, frontmatter: str = "", name: str = "Demo") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = f"---\n{frontmatter}---\n\n" if frontmatter else ""
+    path.write_text(
+        prefix
+        + "\n".join(
+            [
+                "```yaml",
+                "config:",
+                f"  name: {name}",
+                "  context:",
+                "    dir: .context",
+                "    include-meta: false",
+                "components:",
+                "  - name: main",
+                "    text: hello",
+                "```",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _mock_zk(monkeypatch, notes: list[Path]) -> None:
+    def _run(args, **kwargs):
+        assert args == ["zk", "list", "--tag", "ctx/ref", "--format", "json", "--quiet"]
+        payload = [
+            {
+                "path": path.name,
+                "absPath": str(path),
+                "title": path.stem,
+            }
+            for path in notes
+        ]
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("contextualize.manifest.contexts.subprocess.run", _run)
 
 
 def _isolate_manifest_link_cache(monkeypatch, tmp_path: Path) -> None:
@@ -19,6 +87,206 @@ def _isolate_manifest_link_cache(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home" / ".local" / "share"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "home" / ".local" / "state"))
+
+
+def test_contexts_list_discovers_zk_subscription(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    notes_dir = tmp_path / "notes"
+    target_root = tmp_path / "ref"
+    note = notes_dir / "demo.md"
+    _write_note(note, name="Subscribed Demo")
+    _write_registry(tmp_path / "registry.json", {})
+    _write_context_config(tmp_path / "config", notes_dir, target_root)
+    _mock_zk(monkeypatch, [note])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(tmp_path / "registry.json")],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert result.exit_code == 0
+    assert "Context registry: total=1" in result.output
+    assert f"subscribed-demo  {note.resolve()}  {target_root / 'subscribed-demo'}" in result.output
+
+
+def test_contexts_subscription_uses_frontmatter_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    notes_dir = tmp_path / "notes"
+    target_root = tmp_path / "ref"
+    note = notes_dir / "demo.md"
+    _write_note(note, frontmatter="cx:\n  context: explicit-demo\n", name="Ignored Name")
+    _write_registry(tmp_path / "registry.json", {})
+    _write_context_config(tmp_path / "config", notes_dir, target_root)
+    _mock_zk(monkeypatch, [note])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(tmp_path / "registry.json")],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert result.exit_code == 0
+    assert f"explicit-demo  {note.resolve()}  {target_root / 'explicit-demo'}" in result.output
+    assert "ignored-name" not in result.output
+
+
+def test_contexts_subscription_requires_target_root(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config" / "contextualize"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "contexts:",
+                "  subscriptions:",
+                "    - source: zk",
+                f"      root: {tmp_path / 'notes'}",
+                "      tag: ctx/ref",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_registry(tmp_path / "registry.json", {})
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(tmp_path / "registry.json")],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert result.exit_code != 0
+    assert "contexts.subscriptions entries require targetRoot" in result.output
+
+
+def test_contexts_subscription_skips_static_manifest_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    notes_dir = tmp_path / "notes"
+    target_root = tmp_path / "ref"
+    static_target = tmp_path / "repo"
+    static_target.mkdir()
+    note = notes_dir / "demo.md"
+    _write_note(note, name="Subscribed Demo")
+    _write_registry(
+        tmp_path / "registry.json",
+        {
+            "manual": {
+                "targetDir": str(static_target),
+                "manifest": {"source": str(note.resolve())},
+            }
+        },
+    )
+    _write_context_config(tmp_path / "config", notes_dir, target_root)
+    _mock_zk(monkeypatch, [note])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(tmp_path / "registry.json")],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert result.exit_code == 0
+    assert "Context registry: total=1" in result.output
+    assert "manual" in result.output
+    assert "subscribed-demo" not in result.output
+
+
+def test_contexts_subscription_warns_on_static_name_collision(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    notes_dir = tmp_path / "notes"
+    target_root = tmp_path / "ref"
+    static_target = tmp_path / "repo"
+    static_target.mkdir()
+    note = notes_dir / "demo.md"
+    _write_note(note, name="Demo")
+    _write_registry(
+        tmp_path / "registry.json",
+        {
+            "demo": {
+                "targetDir": str(static_target),
+                "manifest": {"data": {"components": []}},
+            }
+        },
+    )
+    _write_context_config(tmp_path / "config", notes_dir, target_root)
+    _mock_zk(monkeypatch, [note])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(tmp_path / "registry.json")],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert result.exit_code == 0
+    assert "Context registry: total=1" in result.output
+    assert "context subscription: warning: skipping subscribed context demo" in result.output
+    assert str(target_root / "demo") not in result.output
+
+
+def test_contexts_subscription_fails_duplicate_discovered_names(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    notes_dir = tmp_path / "notes"
+    target_root = tmp_path / "ref"
+    first = notes_dir / "first.md"
+    second = notes_dir / "second.md"
+    _write_note(first, name="Same")
+    _write_note(second, name="Same")
+    _write_registry(tmp_path / "registry.json", {})
+    _write_context_config(tmp_path / "config", notes_dir, target_root)
+    _mock_zk(monkeypatch, [first, second])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(tmp_path / "registry.json")],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert result.exit_code != 0
+    assert "Subscribed context name 'same' is used by both" in result.output
+
+
+def test_contexts_hydrate_includes_subscription_and_creates_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    notes_dir = tmp_path / "notes"
+    target_root = tmp_path / "ref"
+    note = notes_dir / "demo.md"
+    _write_note(note, name="Subscribed Demo")
+    _write_registry(tmp_path / "registry.json", {})
+    _write_context_config(tmp_path / "config", notes_dir, target_root)
+    _mock_zk(monkeypatch, [note])
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    statuses = hydrate_contexts(
+        ["subscribed-demo"],
+        registry_path=tmp_path / "registry.json",
+        status_path=tmp_path / "status.json",
+    )
+
+    assert statuses[0].result == "hydrated"
+    assert (target_root / "subscribed-demo").is_dir()
+    assert (
+        target_root / "subscribed-demo" / ".context/main/notes/text-001.md"
+    ).read_text(encoding="utf-8") == "hello"
 
 
 def test_hydrate_context_from_registry_data(tmp_path: Path) -> None:

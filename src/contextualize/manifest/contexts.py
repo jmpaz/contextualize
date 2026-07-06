@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 from contextlib import redirect_stderr
 from dataclasses import asdict, dataclass
@@ -18,6 +20,7 @@ from ..progress import (
     set_progress_context,
     write_progress_log,
 )
+from ..utils import read_config
 from .hydrate import (
     HydrateOverrides,
     HydrateResult,
@@ -31,6 +34,8 @@ from .hydrate import (
 from .source import load_manifest_source, load_manifest_text
 
 _REPLACE_POLICIES = {"guarded", "always", "never"}
+_CONTEXT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
 
 @dataclass(frozen=True)
@@ -39,6 +44,7 @@ class ContextEntry:
     target_dir: Path
     manifest: dict[str, Any]
     replace: str
+    ensure_target_dir: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,15 +103,252 @@ def load_context_registry(
     registry_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, ContextEntry]:
     path = Path(registry_path).expanduser() if registry_path else default_context_registry_path()
-    with path.open("r", encoding="utf-8") as fh:
-        raw = json.load(fh)
+    if not path.exists():
+        if registry_path:
+            raise FileNotFoundError(str(path))
+        raw: dict[str, Any] = {"contexts": {}}
+    else:
+        with path.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
     contexts = raw.get("contexts") if isinstance(raw, dict) else None
     if not isinstance(contexts, dict):
         raise ValueError("Context registry must contain a 'contexts' mapping")
-    return {
+    static_contexts = {
         name: _parse_context_entry(name, value)
         for name, value in contexts.items()
     }
+    return _merge_subscribed_contexts(static_contexts)
+
+
+def _merge_subscribed_contexts(
+    static_contexts: dict[str, ContextEntry],
+) -> dict[str, ContextEntry]:
+    config = read_config()
+    if not isinstance(config, dict):
+        config = {}
+    subscriptions = _context_subscriptions(config)
+    if not subscriptions:
+        return static_contexts
+
+    contexts = dict(static_contexts)
+    static_sources = {
+        resolved
+        for context in static_contexts.values()
+        if (resolved := _resolved_manifest_source(context)) is not None
+    }
+    discovered: dict[str, str] = {}
+
+    for subscription in subscriptions:
+        for context in _discover_subscription_contexts(subscription):
+            source_path = _resolved_manifest_source(context)
+            if source_path is not None and source_path in static_sources:
+                continue
+            if context.name in static_contexts:
+                static_context = static_contexts[context.name]
+                if source_path != _resolved_manifest_source(static_context):
+                    _warn_context_subscription(
+                        f"skipping subscribed context {context.name}: "
+                        "name collides with static registry entry"
+                    )
+                continue
+            previous_source = discovered.get(context.name)
+            current_source = manifest_source_label(context)
+            if previous_source is not None and previous_source != current_source:
+                raise ValueError(
+                    f"Subscribed context name '{context.name}' is used by both "
+                    f"{previous_source} and {current_source}"
+                )
+            discovered[context.name] = current_source
+            contexts[context.name] = context
+    return contexts
+
+
+def _context_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
+    contexts = config.get("contexts")
+    if not isinstance(contexts, dict):
+        return []
+    subscriptions = contexts.get("subscriptions", [])
+    if subscriptions in (None, []):
+        return []
+    if not isinstance(subscriptions, list):
+        raise ValueError("contexts.subscriptions must be a list")
+    return [_parse_context_subscription(value) for value in subscriptions]
+
+
+def _parse_context_subscription(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("contexts.subscriptions entries must be mappings")
+    source = raw.get("source")
+    if source != "zk":
+        raise ValueError("contexts.subscriptions entries currently require source: zk")
+    root = _required_subscription_string(raw, "root")
+    tag = _required_subscription_string(raw, "tag")
+    target_root = _required_subscription_string(raw, "targetRoot")
+    replace = raw.get("replace", "guarded")
+    if replace not in _REPLACE_POLICIES:
+        raise ValueError(
+            "contexts.subscriptions replace must be one of: always, guarded, never"
+        )
+    return {
+        "source": source,
+        "root": root,
+        "tag": tag,
+        "targetRoot": target_root,
+        "replace": replace,
+    }
+
+
+def _required_subscription_string(raw: dict[str, Any], key: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"contexts.subscriptions entries require {key}")
+    return value.strip()
+
+
+def _discover_subscription_contexts(
+    subscription: dict[str, Any],
+) -> list[ContextEntry]:
+    root = Path(subscription["root"]).expanduser()
+    target_root = Path(subscription["targetRoot"]).expanduser()
+    notes = _zk_subscription_notes(root=root, tag=subscription["tag"])
+    contexts: list[ContextEntry] = []
+    for note in notes:
+        path = _note_path(root, note)
+        if path is None:
+            _warn_context_subscription("skipping subscribed note without a path")
+            continue
+        if not path.is_file():
+            _warn_context_subscription(f"skipping subscribed note missing file: {path}")
+            continue
+        try:
+            source = load_manifest_source(str(path))
+        except (OSError, ValueError) as exc:
+            _warn_context_subscription(
+                f"skipping subscribed note without a valid manifest: {path}: {exc}"
+            )
+            continue
+        name = _subscribed_context_name(path, source.data)
+        if name is None:
+            _warn_context_subscription(
+                f"skipping subscribed note without cx.context or config.name: {path}"
+            )
+            continue
+        contexts.append(
+            ContextEntry(
+                name=name,
+                target_dir=target_root / name,
+                manifest={"source": str(path.resolve())},
+                replace=subscription["replace"],
+                ensure_target_dir=True,
+            )
+        )
+    return contexts
+
+
+def _zk_subscription_notes(*, root: Path, tag: str) -> list[dict[str, Any]]:
+    try:
+        result = subprocess.run(
+            ["zk", "list", "--tag", tag, "--format", "json", "--quiet"],
+            cwd=str(root),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError("zk is required for contexts.subscriptions source: zk") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise ValueError(f"Failed to list zk notes for tag '{tag}'{suffix}") from exc
+
+    stdout = result.stdout.strip()
+    if not stdout:
+        return []
+    try:
+        notes = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"zk list for tag '{tag}' did not return JSON") from exc
+    if not isinstance(notes, list):
+        raise ValueError(f"zk list for tag '{tag}' must return a list")
+    return [note for note in notes if isinstance(note, dict)]
+
+
+def _note_path(root: Path, note: dict[str, Any]) -> Path | None:
+    raw = note.get("absPath") or note.get("path") or note.get("filename")
+    if not isinstance(raw, str) or not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    return path
+
+
+def _subscribed_context_name(path: Path, manifest: dict[str, Any]) -> str | None:
+    override = _frontmatter_context_name(path)
+    if override is not None:
+        return _validate_context_name(override, source=f"{path} frontmatter cx.context")
+    cfg = manifest.get("config") if isinstance(manifest, dict) else None
+    manifest_name = cfg.get("name") if isinstance(cfg, dict) else None
+    if isinstance(manifest_name, str):
+        return _slug_context_name(manifest_name)
+    return None
+
+
+def _frontmatter_context_name(path: Path) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    try:
+        end_idx = next(
+            idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---"
+        )
+    except StopIteration:
+        return None
+    import yaml
+
+    data = yaml.safe_load("\n".join(lines[1:end_idx])) or {}
+    if not isinstance(data, dict):
+        return None
+    cx = data.get("cx")
+    if not isinstance(cx, dict):
+        return None
+    value = cx.get("context")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _validate_context_name(name: str, *, source: str) -> str:
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError(f"{source} must be a context name, not a path")
+    if not _CONTEXT_NAME_RE.fullmatch(name):
+        raise ValueError(f"{source} is not a valid context name: {name}")
+    return name
+
+
+def _slug_context_name(name: str) -> str | None:
+    slug = _SLUG_RE.sub("-", name.strip().lower()).strip("-")
+    if not slug:
+        return None
+    return _validate_context_name(slug, source=f"manifest config.name '{name}'")
+
+
+def _resolved_manifest_source(context: ContextEntry) -> Path | None:
+    source = context.manifest.get("source")
+    if not isinstance(source, str) or not source:
+        return None
+    path = Path(os.path.expanduser(source))
+    if not path.is_absolute():
+        path = context.target_dir / path
+    return path.resolve(strict=False)
+
+
+def _warn_context_subscription(message: str) -> None:
+    print(f"context subscription: warning: {message}", file=sys.stderr)
 
 
 def hydrate_contexts(
@@ -231,6 +474,8 @@ def _hydrate_one(
 ) -> ContextHydrationStatus:
     target_dir = context.target_dir
     manifest_source = manifest_source_label(context)
+    if not target_dir.is_dir() and context.ensure_target_dir and not target_dir.exists():
+        target_dir.mkdir(parents=True)
     if not target_dir.is_dir():
         return _status(
             name=context.name,
