@@ -32,6 +32,12 @@ let
         description = "Replacement policy for an existing context directory.";
       };
 
+      origin = lib.mkOption {
+        type = types.str;
+        default = "nix";
+        description = "Registry origin label displayed by contextualize.";
+      };
+
       manifest = lib.mkOption {
         type = manifestSource;
         default = {};
@@ -51,6 +57,12 @@ let
         type = types.enum [ "guarded" "always" "never" ];
         default = "guarded";
         description = "Replacement policy for an existing context directory.";
+      };
+
+      origin = lib.mkOption {
+        type = types.str;
+        default = "nix";
+        description = "Registry origin label displayed by contextualize.";
       };
 
       manifest = lib.mkOption {

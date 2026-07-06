@@ -198,6 +198,8 @@ contextualize contexts list  # shows source, origin, and target
 contextualize contexts hydrate my-context
 ```
 
+Static registry entries default to origin `registry`. Nix-generated registries set origin `nix`; subscribed contexts use `tag:<tag>`.
+
 ### content injection
 
 `--inject` replaces `{cx::...}` patterns inside target files with referenced content. targets can be HTTP URLs, git repos, or local paths. parameters can tweak labels and formats just like the `cat` command.

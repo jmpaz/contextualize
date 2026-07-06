@@ -1517,7 +1517,7 @@ def _echo_context_registry(contexts) -> None:
 
     from .manifest.contexts import manifest_source_label
 
-    names = sorted(contexts)
+    names = sorted(contexts, key=lambda name: (contexts[name].origin, name))
     click.echo(f"Context registry: total={len(names)}")
     if not names:
         return

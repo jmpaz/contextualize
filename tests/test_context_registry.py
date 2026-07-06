@@ -612,6 +612,111 @@ def test_contexts_list_cli_uses_registry(tmp_path: Path) -> None:
     assert str(target_dir) in result.output
 
 
+def test_contexts_list_cli_uses_registry_origin(tmp_path: Path) -> None:
+    target_dir = tmp_path / "repo"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "origin": "nix",
+                        "manifest": {
+                            "data": {
+                                "config": {
+                                    "context": {
+                                        "dir": ".context",
+                                        "include-meta": False,
+                                    }
+                                },
+                                "components": [{"name": "main", "text": "hello"}],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(registry_path)],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "empty-config")},
+    )
+
+    assert result.exit_code == 0
+    assert "demo" in result.output
+    assert "nix" in result.output
+
+
+def test_contexts_list_cli_sorts_by_origin_then_name(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    _write_registry(
+        registry_path,
+        {
+            "z-registry": {
+                "targetDir": str(tmp_path / "z-registry"),
+                "manifest": {"data": {"components": []}},
+            },
+            "m-nix": {
+                "targetDir": str(tmp_path / "m-nix"),
+                "origin": "nix",
+                "manifest": {"data": {"components": []}},
+            },
+            "a-registry": {
+                "targetDir": str(tmp_path / "a-registry"),
+                "manifest": {"data": {"components": []}},
+            },
+            "a-nix": {
+                "targetDir": str(tmp_path / "a-nix"),
+                "origin": "nix",
+                "manifest": {"data": {"components": []}},
+            },
+        },
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(registry_path)],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "empty-config")},
+    )
+
+    assert result.exit_code == 0
+    positions = [
+        result.output.index("a-nix"),
+        result.output.index("m-nix"),
+        result.output.index("a-registry"),
+        result.output.index("z-registry"),
+    ]
+    assert positions == sorted(positions)
+
+
+def test_contexts_list_cli_rejects_empty_registry_origin(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    _write_registry(
+        registry_path,
+        {
+            "demo": {
+                "targetDir": str(tmp_path / "repo"),
+                "origin": "",
+                "manifest": {"data": {"components": []}},
+            }
+        },
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["contexts", "list", "--registry", str(registry_path)])
+
+    assert result.exit_code != 0
+    assert "Context 'demo' origin must be a non-empty string" in result.output
+
+
 def test_contexts_list_cli_handles_empty_registry(tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(

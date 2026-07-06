@@ -32,6 +32,7 @@ let
       targetDir = context.targetDir;
       replace = context.replace;
       manifest = manifestToRegistry context.manifest;
+      origin = context.origin or "nix";
     }) contexts;
   };
 in

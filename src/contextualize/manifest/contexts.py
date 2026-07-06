@@ -460,11 +460,15 @@ def _parse_context_entry(name: str, raw: Any) -> ContextEntry:
         raise ValueError(
             f"Context '{name}' replace must be one of: always, guarded, never"
         )
+    origin = raw.get("origin", "registry")
+    if not isinstance(origin, str) or not origin.strip():
+        raise ValueError(f"Context '{name}' origin must be a non-empty string")
     return ContextEntry(
         name=name,
         target_dir=Path(os.path.expanduser(target_dir)),
         manifest=manifest,
         replace=replace,
+        origin=origin.strip(),
     )
 
 
