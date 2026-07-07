@@ -14,9 +14,17 @@ import yaml
 
 
 @dataclass(frozen=True)
+class ManifestSlice:
+    body: str
+    line: int
+
+
+@dataclass(frozen=True)
 class ManifestFormat:
     body: str
-    group_slices: dict[tuple[str, ...], str]
+    line: int
+    source_path: str | None
+    group_slices: dict[tuple[str, ...], ManifestSlice]
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,7 @@ def load_manifest_source(path: str | os.PathLike[str]) -> ManifestSource:
     data, source_format = _load_manifest_text_with_format(
         text,
         source_label=str(source_path),
+        source_path=str(source_path.resolve()),
         require_entire_document=source_path.suffix.lower() in {".yaml", ".yml"},
     )
     return ManifestSource(
@@ -67,6 +76,7 @@ def load_manifest_text(
     data, _source_format = _load_manifest_text_with_format(
         text,
         source_label=source_label,
+        source_path=None,
         require_entire_document=require_entire_document,
     )
     return data
@@ -76,6 +86,7 @@ def _load_manifest_text_with_format(
     text: str,
     *,
     source_label: str,
+    source_path: str | None,
     require_entire_document: bool,
 ) -> tuple[dict[str, Any], ManifestFormat | None]:
     direct_error: Exception | None = None
@@ -85,7 +96,7 @@ def _load_manifest_text_with_format(
         direct_error = exc
     else:
         if _is_manifest_mapping(data):
-            return data, _build_manifest_format(text)
+            return data, _build_manifest_format(text, source_path=source_path, line=1)
         if require_entire_document:
             raise ValueError(
                 f"Manifest source {source_label} must be a mapping with 'config' and 'components'"
@@ -108,7 +119,12 @@ def _load_manifest_text_with_format(
             labeled_errors.append(str(exc))
             continue
         if _is_manifest_mapping(data):
-            return data, _build_manifest_format(body)
+            line = text[: match.start("body")].count("\n") + 1
+            return data, _build_manifest_format(
+                body,
+                source_path=source_path,
+                line=line,
+            )
 
     if labeled_errors:
         raise ValueError(
@@ -156,19 +172,27 @@ def _is_manifest_mapping(value: Any) -> bool:
     return isinstance(value, dict) and isinstance(value.get("components"), list)
 
 
-def _build_manifest_format(body: str) -> ManifestFormat:
-    filtered = _strip_commented_list_items(body)
+def _build_manifest_format(
+    body: str,
+    *,
+    source_path: str | None,
+    line: int,
+) -> ManifestFormat:
+    filtered, source_lines = _strip_commented_list_items(body, line)
     return ManifestFormat(
         body=filtered,
-        group_slices=_extract_group_slices(filtered),
+        line=line,
+        source_path=source_path,
+        group_slices=_extract_group_slices(filtered, source_lines),
     )
 
 
-def _strip_commented_list_items(text: str) -> str:
+def _strip_commented_list_items(text: str, start_line: int) -> tuple[str, list[int]]:
     lines = text.splitlines(keepends=True)
     kept: list[str] = []
+    source_lines: list[int] = []
     skip_indent: int | None = None
-    for line in lines:
+    for offset, line in enumerate(lines):
         stripped = line.strip()
         indent = len(line) - len(line.lstrip(" \t"))
         if skip_indent is not None:
@@ -182,17 +206,21 @@ def _strip_commented_list_items(text: str) -> str:
             skip_indent = indent
             continue
         kept.append(line)
-    return "".join(kept)
+        source_lines.append(start_line + offset)
+    return "".join(kept), source_lines
 
 
-def _extract_group_slices(text: str) -> dict[tuple[str, ...], str]:
+def _extract_group_slices(
+    text: str,
+    source_lines: list[int],
+) -> dict[tuple[str, ...], ManifestSlice]:
     lines = text.splitlines(keepends=True)
     components_range = _find_components_range(lines, 0, len(lines), max_indent=0)
     if components_range is None:
         return {}
     start, end = components_range
-    group_slices: dict[tuple[str, ...], str] = {}
-    _collect_group_slices(lines, start, end, (), group_slices)
+    group_slices: dict[tuple[str, ...], ManifestSlice] = {}
+    _collect_group_slices(lines, start, end, (), group_slices, source_lines)
     return group_slices
 
 
@@ -219,7 +247,8 @@ def _collect_group_slices(
     start: int,
     end: int,
     parent_path: tuple[str, ...],
-    group_slices: dict[tuple[str, ...], str],
+    group_slices: dict[tuple[str, ...], ManifestSlice],
+    source_lines: list[int],
 ) -> None:
     index = start
     while index < end:
@@ -239,8 +268,9 @@ def _collect_group_slices(
             continue
 
         group_path = parent_path + (group_name,)
-        group_slices[group_path] = _build_group_manifest_slice(
-            lines[index:item_end], item_indent
+        group_slices[group_path] = ManifestSlice(
+            body=_build_group_manifest_slice(lines[index:item_end], item_indent),
+            line=source_lines[index],
         )
         child_range = _find_components_range(
             lines,
@@ -251,7 +281,12 @@ def _collect_group_slices(
         if child_range is not None:
             child_start, child_end = child_range
             _collect_group_slices(
-                lines, child_start, child_end, group_path, group_slices
+                lines,
+                child_start,
+                child_end,
+                group_path,
+                group_slices,
+                source_lines,
             )
         index = item_end
 

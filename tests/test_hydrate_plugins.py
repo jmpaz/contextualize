@@ -1510,6 +1510,7 @@ components:
     group_manifest = (context_dir / "speech" / "manifest.yaml").read_text(
         encoding="utf-8"
     )
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
 
     assert "# speech materials" in root_manifest
     assert "name: anchor  # primary voice note" in root_manifest
@@ -1527,3 +1528,33 @@ components:
     assert (context_dir / "speech" / "anchor" / "notes" / "text-001.md").read_text(
         encoding="utf-8"
     ) == "hello"
+    assert index_json["manifest_source"] == {
+        "path": str(manifest_path.resolve()),
+        "manifests": {
+            "manifest.yaml": {"group": [], "line": 1},
+            "speech/manifest.yaml": {"group": ["speech"], "line": 9},
+        },
+    }
+
+
+def test_hydrate_data_manifest_omits_manifest_source(tmp_path: Path) -> None:
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": True,
+                    "path-strategy": "by-component",
+                }
+            },
+            "components": [{"name": "main", "text": "hello"}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    assert "manifest_source" not in index_json

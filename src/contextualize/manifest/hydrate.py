@@ -42,7 +42,7 @@ from .manifest import (
     coerce_file_spec,
     normalize_components,
 )
-from .source import ManifestFormat, load_manifest_source
+from .source import ManifestFormat, ManifestSlice, load_manifest_source
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _SOURCE_IGNORE_PATTERNS = [
@@ -987,15 +987,25 @@ def build_hydration_plan_data(
             manifest_format is not None
             and context_cfg["path_strategy"] == "by-component"
         ):
-            _queue_group_manifest_files(
+            group_manifest_sources = _queue_group_manifest_files(
                 files_to_write,
                 context_dir,
                 manifest_format,
                 used_paths,
             )
+        else:
+            group_manifest_sources = {}
+    else:
+        group_manifest_sources = {}
 
     if context_cfg["include_meta"]:
         index_data = {"version": 1, "components": index_components}
+        manifest_source = _build_manifest_source_index(
+            manifest_format,
+            group_manifest_sources,
+        )
+        if manifest_source is not None:
+            index_data["manifest_source"] = manifest_source
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
 
@@ -2903,13 +2913,41 @@ def _queue_group_manifest_files(
     context_dir: Path,
     manifest_format: ManifestFormat,
     used_paths: set[str],
-) -> None:
-    for group_path, content in manifest_format.group_slices.items():
+) -> dict[str, tuple[tuple[str, ...], ManifestSlice]]:
+    manifests: dict[str, tuple[tuple[str, ...], ManifestSlice]] = {}
+    for group_path, source_slice in manifest_format.group_slices.items():
         if not group_path:
             continue
         rel_path = _dedupe_path(Path(*group_path) / "manifest.yaml", used_paths)
         _ensure_relative(rel_path)
-        files_to_write.append((context_dir / rel_path, content))
+        files_to_write.append((context_dir / rel_path, source_slice.body))
+        manifests[rel_path.as_posix()] = (group_path, source_slice)
+    return manifests
+
+
+def _build_manifest_source_index(
+    manifest_format: ManifestFormat | None,
+    group_manifest_sources: dict[str, tuple[tuple[str, ...], ManifestSlice]],
+) -> dict[str, Any] | None:
+    if manifest_format is None or manifest_format.source_path is None:
+        return None
+
+    manifests: dict[str, dict[str, Any]] = {
+        "manifest.yaml": {
+            "line": manifest_format.line,
+            "group": [],
+        }
+    }
+    for rel_path, (group_path, source_slice) in group_manifest_sources.items():
+        manifests[rel_path] = {
+            "line": source_slice.line,
+            "group": list(group_path),
+        }
+
+    return {
+        "path": manifest_format.source_path,
+        "manifests": manifests,
+    }
 
 
 def _dump_index(data: dict[str, Any]) -> str:

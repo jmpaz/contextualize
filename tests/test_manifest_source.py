@@ -35,6 +35,8 @@ components:
     assert source.manifest_cwd == str(tmp_path)
     assert source.data["components"] == [{"name": "main", "text": "hello"}]
     assert source.source_format is not None
+    assert source.source_format.source_path == str(path.resolve())
+    assert source.source_format.line == 6
     assert source.source_format.body == (
         "config:\n"
         "  context:\n"
@@ -72,7 +74,9 @@ components:
     assert "# - name: skipped" not in source.source_format.body
     assert "not hydrated" not in source.source_format.body
     assert "# speech materials" in source.source_format.body
-    assert source.source_format.group_slices[("speech",)] == (
+    speech_slice = source.source_format.group_slices[("speech",)]
+    assert speech_slice.line == 6
+    assert speech_slice.body == (
         "components:\n"
         "  - group: speech\n"
         "    components:\n"
