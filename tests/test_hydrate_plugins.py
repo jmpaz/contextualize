@@ -1470,3 +1470,60 @@ def test_hydrate_manifests_snapshot_preserves_raw_list(
     manifest_yaml = (context_dir / "manifest.yaml").read_text(encoding="utf-8")
     assert "manifests" in manifest_yaml
     assert "sub.yaml" in manifest_yaml
+
+
+def test_hydrate_source_manifest_preserves_format_and_group_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    path-strategy: by-component
+
+components:
+  # speech materials
+  - group: speech
+    components:
+      - name: anchor  # primary voice note
+        text: hello
+      - name: later
+        text: world
+
+  - name: refs
+    text: reference
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_hydration_plan(
+        str(manifest_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    root_manifest = (context_dir / "manifest.yaml").read_text(encoding="utf-8")
+    group_manifest = (context_dir / "speech" / "manifest.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "# speech materials" in root_manifest
+    assert "name: anchor  # primary voice note" in root_manifest
+    assert "speech.anchor" not in root_manifest
+    assert group_manifest == (
+        "components:\n"
+        "  - group: speech\n"
+        "    components:\n"
+        "      - name: anchor  # primary voice note\n"
+        "        text: hello\n"
+        "      - name: later\n"
+        "        text: world\n"
+        "\n"
+    )
+    assert (context_dir / "speech" / "anchor" / "notes" / "text-001.md").read_text(
+        encoding="utf-8"
+    ) == "hello"

@@ -42,7 +42,7 @@ from .manifest import (
     coerce_file_spec,
     normalize_components,
 )
-from .source import load_manifest_source
+from .source import ManifestFormat, load_manifest_source
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _SOURCE_IGNORE_PATTERNS = [
@@ -429,6 +429,7 @@ def build_hydration_plan(
         source.data,
         source.manifest_cwd,
         manifest_path=source.manifest_path,
+        manifest_format=source.source_format,
         overrides=overrides,
         cwd=cwd,
         _resolving=_resolving,
@@ -440,6 +441,7 @@ def build_hydration_plan_data(
     manifest_cwd: str,
     *,
     manifest_path: str | None = None,
+    manifest_format: ManifestFormat | None = None,
     overrides: HydrateOverrides,
     cwd: str,
     _resolving: tuple[Path, ...] = (),
@@ -979,8 +981,18 @@ def build_hydration_plan_data(
             ),
             "components": normalized_components,
         }
-        manifest_text = _dump_manifest(normalized_manifest)
+        manifest_text = _manifest_text(normalized_manifest, manifest_format)
         files_to_write.append((context_dir / "manifest.yaml", manifest_text))
+        if (
+            manifest_format is not None
+            and context_cfg["path_strategy"] == "by-component"
+        ):
+            _queue_group_manifest_files(
+                files_to_write,
+                context_dir,
+                manifest_format,
+                used_paths,
+            )
 
     if context_cfg["include_meta"]:
         index_data = {"version": 1, "components": index_components}
@@ -2874,6 +2886,30 @@ def _dump_manifest(data: dict[str, Any]) -> str:
         allow_unicode=True,
         Dumper=_LiteralDumper,
     )
+
+
+def _manifest_text(
+    normalized_manifest: dict[str, Any],
+    manifest_format: ManifestFormat | None,
+) -> str:
+    if manifest_format is None:
+        return _dump_manifest(normalized_manifest)
+    body = manifest_format.body
+    return body if body.endswith("\n") else f"{body}\n"
+
+
+def _queue_group_manifest_files(
+    files_to_write: list[tuple[Path, str]],
+    context_dir: Path,
+    manifest_format: ManifestFormat,
+    used_paths: set[str],
+) -> None:
+    for group_path, content in manifest_format.group_slices.items():
+        if not group_path:
+            continue
+        rel_path = _dedupe_path(Path(*group_path) / "manifest.yaml", used_paths)
+        _ensure_relative(rel_path)
+        files_to_write.append((context_dir / rel_path, content))
 
 
 def _dump_index(data: dict[str, Any]) -> str:
