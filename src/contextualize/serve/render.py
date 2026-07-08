@@ -151,7 +151,7 @@ def render_links(result: dict[str, Any]) -> str:
             )
 
     coverage = result.get("coverage")
-    if coverage:
+    if coverage and result.get("in") is not None:
         skipped = coverage.get("skipped_unhydrated") or []
         note = f"  ({len(skipped)} unhydrated: {', '.join(skipped)})" if skipped else ""
         lines.append(

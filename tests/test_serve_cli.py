@@ -112,6 +112,27 @@ def test_cat_resolves_context_selector_and_around(tmp_path: Path) -> None:
     assert "first note" in result.output
 
 
+def test_cat_selector_honors_registry_flag(tmp_path: Path) -> None:
+    drive = tmp_path / "drive"
+    _write_manifest(drive)
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {"version": 1, "contexts": {"demo": {"targetDir": str(drive), "manifest": {"source": "manifest.yaml"}}}}
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli.cli,
+        ["cat", "demo:alpha.a", "--registry", str(registry_path)],
+        env=_isolated_env(tmp_path),
+    )
+    assert result.exit_code == 0
+    assert "alpha content" in result.output
+
+
 def test_cat_json_carries_selector_structure(tmp_path: Path) -> None:
     drive = tmp_path / "drive"
     _write_manifest(drive)

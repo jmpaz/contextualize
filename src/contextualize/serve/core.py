@@ -623,6 +623,22 @@ def _empty_drift() -> dict[str, Any]:
     }
 
 
+def _local_entry_source_path(handle: ManifestHandle, entry: dict[str, Any]) -> Path | None:
+    context_path = entry.get("context_path")
+    if context_path and handle.context_dir is not None:
+        hydrated = handle.context_dir / context_path
+        if hydrated.is_symlink():
+            try:
+                return hydrated.resolve(strict=False)
+            except OSError:
+                pass
+    source_ref = entry.get("source_ref")
+    source_path = entry.get("source_path")
+    if source_ref and source_path:
+        return Path(source_ref) / source_path
+    return None
+
+
 def _compute_drift(handle: ManifestHandle, index_mtime: float | None) -> dict[str, Any]:
     sources_changed = []
     members_vanished = []
@@ -643,11 +659,9 @@ def _compute_drift(handle: ManifestHandle, index_mtime: float | None) -> dict[st
             for entry in entries:
                 if not isinstance(entry, dict) or entry.get("source_type") != "local":
                     continue
-                source_ref = entry.get("source_ref")
-                source_path = entry.get("source_path")
-                if not source_ref or not source_path:
+                absolute = _local_entry_source_path(handle, entry)
+                if absolute is None:
                     continue
-                absolute = Path(source_ref) / source_path
                 try:
                     mtime = absolute.stat().st_mtime
                 except OSError:

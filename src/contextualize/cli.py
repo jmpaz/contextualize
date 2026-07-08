@@ -2456,6 +2456,12 @@ def hydrate_cmd(
     default=None,
     help="Include N lines of authored adjacency (manifest source/comments) around each context selector.",
 )
+@click.option(
+    "--registry",
+    "selector_registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Context registry path for name:component.member selectors (default: XDG contextualize/contexts.json).",
+)
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
 @_video_frame_options
 @click.pass_context
@@ -2489,6 +2495,7 @@ def cat_cmd(
     cache_only,
     skip_media,
     around,
+    selector_registry,
     json_output,
     **extra_params,
 ):
@@ -2653,7 +2660,9 @@ def cat_cmd(
             if ":" not in p:
                 spliced_paths.append(p)
                 continue
-            selector_result = _cat_selector(p, around=around, cwd=os.getcwd())
+            selector_result = _cat_selector(
+                p, around=around, registry_path=selector_registry, cwd=os.getcwd()
+            )
             if selector_result["state"] == "not-found" and selector_result["origin"]["kind"] == "unknown":
                 spliced_paths.append(p)
                 continue
