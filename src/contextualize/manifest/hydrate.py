@@ -9,7 +9,7 @@ import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ..concurrency import run_indexed_tasks_fail_fast
@@ -46,9 +46,13 @@ from .manifest import (
 from .source import (
     ManifestFormat,
     ManifestSlice,
+    frontmatter_has_manifest_tag,
     iter_active_leaves,
     load_manifest_source,
+    path_contains_manifest,
 )
+
+_MANIFEST_REFERENCE_EXTENSIONS = {".md", ".markdown", ".yaml", ".yml"}
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _SOURCE_IGNORE_PATTERNS = [
@@ -503,6 +507,13 @@ def build_hydration_plan_data(
     plugin_seen_counter = 0
     resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]] = {}
     linked_manifest_failures: list[LinkedManifestFailure] = []
+    reference_edges: list[dict[str, Any]] = []
+    registry_sources_cache: list[set[Path]] = []
+
+    def get_registry_sources() -> set[Path]:
+        if not registry_sources_cache:
+            registry_sources_cache.append(_load_registry_manifest_sources())
+        return registry_sources_cache[0]
 
     global_strip_prefix: Path | None = None
     if context_cfg["path_strategy"] == "by-component":
@@ -612,6 +623,7 @@ def build_hydration_plan_data(
                     str | None,
                     dict[str, Any],
                     str | None,
+                    bool,
                 ]
             ] = []
             spec_jobs = get_payload_spec_jobs()
@@ -767,6 +779,7 @@ def build_hydration_plan_data(
                         extract_ranges(item.content, ranges) if ranges else item.content
                     )
                     suffix = _build_suffix(ranges, symbols)
+                    from_files = not spec_cache_key[1]
                     resolved_items.append(
                         (
                             item,
@@ -778,6 +791,7 @@ def build_hydration_plan_data(
                             spec_comment,
                             file_opts,
                             spec_root,
+                            from_files,
                         )
                     )
 
@@ -829,6 +843,7 @@ def build_hydration_plan_data(
                         spec_comment,
                         file_opts,
                         _spec_root,
+                        _from_files,
                     ) in resolved_items
                 )
             else:
@@ -842,6 +857,7 @@ def build_hydration_plan_data(
                     spec_comment,
                     file_opts,
                     spec_root,
+                    from_files,
                 ) in resolved_items:
                     rel_path, should_write = _resolve_context_path(
                         comp_name,
@@ -858,6 +874,14 @@ def build_hydration_plan_data(
                         skip_external_root=skip_external_root,
                         external_root_prefix=spec_root,
                     )
+                    if from_files:
+                        _record_recognized_reference(
+                            reference_edges,
+                            component_name=comp_name,
+                            item=item,
+                            context_path=rel_path,
+                            registry_sources=get_registry_sources,
+                        )
                     plugin_identity = _plugin_pending_key(item, ranges, symbols)
                     if plugin_identity is not None:
                         plugin_pending.setdefault(plugin_identity, []).append(
@@ -990,6 +1014,17 @@ def build_hydration_plan_data(
                 dest_rel = _dedupe_path(manifest_root / slug, used_paths)
                 _ensure_relative(dest_rel)
                 dirs_to_symlink.append((context_dir / dest_rel, canonical_dir))
+                reference_edges.append(
+                    {
+                        "component": comp_name,
+                        "form": "full",
+                        "spec": str(manifest_spec),
+                        "target_path": str(resolved_link_path),
+                        "detected_via": "manifests-key",
+                        "payload": "pointer",
+                        "context_path": dest_rel.as_posix(),
+                    }
+                )
 
         if normalized_files:
             normalized_comp["files"] = _dedupe_manifest_entries(normalized_files)
@@ -1062,6 +1097,8 @@ def build_hydration_plan_data(
             index_data["manifest_source"] = manifest_source
         if manifest_format is not None and manifest_format.outline:
             index_data["outline"] = manifest_format.outline
+        if reference_edges:
+            index_data["references"] = {"out": reference_edges}
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
 
@@ -1648,6 +1685,79 @@ def _find_global_subpath_prefix(
             except (FileNotFoundError, ValueError):
                 pass
     return _find_common_subpath_prefix(all_subpaths)
+
+
+def _record_recognized_reference(
+    edges: list[dict[str, Any]],
+    *,
+    component_name: str,
+    item: ResolvedItem,
+    context_path: Path,
+    registry_sources: Callable[[], set[Path]],
+) -> None:
+    if item.source_type != "local" or not item.source_full_path:
+        return
+    path = Path(item.source_full_path)
+    if path.suffix.lower() not in _MANIFEST_REFERENCE_EXTENSIONS:
+        return
+    detected_via = _detect_manifest_reference(path, registry_sources)
+    if detected_via is None:
+        return
+    edges.append(
+        {
+            "component": component_name,
+            "form": "recognized",
+            "spec": item.manifest_spec,
+            "target_path": str(path),
+            "detected_via": detected_via,
+            "payload": "copy",
+            "context_path": context_path.as_posix(),
+        }
+    )
+
+
+def _detect_manifest_reference(
+    path: Path, registry_sources: Callable[[], set[Path]]
+) -> str | None:
+    # registry_sources() can shell out to zk; local checks must run first
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = None
+    if text is not None and frontmatter_has_manifest_tag(text):
+        return "frontmatter-tag"
+    if path_contains_manifest(path):
+        return "fenced-block"
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    if resolved in registry_sources():
+        return "registry"
+    return None
+
+
+def _load_registry_manifest_sources() -> set[Path]:
+    from .contexts import load_context_registry
+
+    sources: set[Path] = set()
+    try:
+        registry = load_context_registry()
+    except Exception:
+        return sources
+    for entry in registry.values():
+        manifest = entry.manifest if isinstance(entry.manifest, dict) else {}
+        raw_source = manifest.get("source")
+        if not isinstance(raw_source, str) or not raw_source:
+            continue
+        candidate = Path(os.path.expanduser(raw_source))
+        if not candidate.is_absolute():
+            candidate = entry.target_dir / candidate
+        try:
+            sources.add(candidate.resolve(strict=False))
+        except OSError:
+            continue
+    return sources
 
 
 def _manifest_has_local_sources(components: list[dict[str, Any]]) -> bool:
