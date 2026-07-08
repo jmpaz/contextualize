@@ -45,6 +45,7 @@ ALL_STATES = {
     "unresolvable-source",
     "stale-cache",
     "dangling-reference",
+    "hydrate-failed",
     "ok",
 }
 
@@ -101,6 +102,41 @@ def test_empty_group(monkeypatch, tmp_path, empty_registry):
     result = show(f"{manifest}:g", registry_path=empty_registry)
     _assert_legible(result)
     assert result["state"] == "empty-group"
+
+
+def test_failed_hydrate_outranks_green_status(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    (drive / "a.md").write_text("a\n", encoding="utf-8")
+    (drive / "manifest.yaml").write_text(
+        "config:\n  name: demo\n  context:\n    dir: .context/demo\ncomponents:\n"
+        "  - name: m\n    files:\n      - a.md\n",
+        encoding="utf-8",
+    )
+    registry_path = _registry(
+        tmp_path / "registry.json",
+        {"demo": {"targetDir": str(drive), "manifest": {"source": "manifest.yaml"}}},
+    )
+    hydrate_contexts(["demo"], registry_path=registry_path, status_path=str(tmp_path / "status.json"))
+
+    failed_status = tmp_path / "failed-status.json"
+    failed_status.write_text(
+        json.dumps(
+            {
+                "contexts": {
+                    "demo": {"result": "failed", "reason": "source repo unreachable"}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = status("demo", registry_path=registry_path, status_path=str(failed_status))
+    _assert_legible(result)
+    assert result["state"] == "hydrate-failed"
+    assert "source repo unreachable" in result["detail"]
+    assert result["hydrated"] is True
 
 
 def test_components_less_manifest_is_empty_manifest_not_empty_group(

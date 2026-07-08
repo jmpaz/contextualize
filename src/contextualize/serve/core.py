@@ -60,6 +60,9 @@ NEXT_STEPS = {
     "stale-cache": [
         "Run `contextualize contexts hydrate <name>` to refresh.",
     ],
+    "hydrate-failed": [
+        "Address the recorded failure reason, then re-run `contextualize contexts hydrate <name>`.",
+    ],
 }
 
 
@@ -787,12 +790,20 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
         "hydrated": handle.hydrated,
         "hydration": hydration,
     }
+    failed_reason: str | None = None
+    if hydration and hydration.get("result") == "failed":
+        failed_reason = hydration.get("reason") or "no reason recorded"
+
     if not handle.hydrated:
         result.update(
             cache_age_seconds=None,
             drift=_empty_drift(),
             state="unhydrated",
-            detail="Not yet hydrated.",
+            detail=(
+                f"Not hydrated; the last attempt failed: {failed_reason}"
+                if failed_reason
+                else "Not yet hydrated."
+            ),
             next_steps=_next_steps("unhydrated", handle),
         )
         return result
@@ -809,7 +820,13 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
     result["cache_age_seconds"] = (time.time() - index_mtime) if index_mtime is not None else None
     result["drift"] = drift
 
-    if drift["any"]:
+    if failed_reason is not None:
+        result.update(
+            state="hydrate-failed",
+            detail=f"Serving the previous hydration; the last hydrate failed: {failed_reason}",
+            next_steps=_next_steps("hydrate-failed", handle),
+        )
+    elif drift["any"]:
         state = "stale-cache" if (drift["hydration_stale"] or drift["sources_changed"]) else "dangling-reference"
         result.update(state=state, detail=_drift_detail(drift), next_steps=_next_steps("stale-cache", handle))
     else:

@@ -18,6 +18,7 @@ STATE_LABELS = {
     "empty-manifest": "empty manifest",
     "unresolvable-source": "unresolvable source",
     "stale-cache": "stale",
+    "hydrate-failed": "hydrate failed",
     "dangling-reference": "dangling reference",
 }
 
