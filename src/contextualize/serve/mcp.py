@@ -37,7 +37,10 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "selector": {
                     "type": "string",
-                    "description": "name-or-path[:component[.member]]",
+                    "description": (
+                        "name-or-path[:component[.member]]. A member token is its "
+                        "alias, its filename slug, or a 1-based ordinal."
+                    ),
                 },
                 "depth": {
                     "type": "integer",
@@ -56,7 +59,13 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "selector": {"type": "string", "description": "name-or-path:component[.member]"},
+                "selector": {
+                    "type": "string",
+                    "description": (
+                        "name-or-path:component[.member]. A member token is its "
+                        "alias, its filename slug, or a 1-based ordinal."
+                    ),
+                },
                 "around": {
                     "type": "integer",
                     "description": "Include N lines of authored adjacency from the manifest source.",

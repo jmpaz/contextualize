@@ -41,6 +41,7 @@ ALL_STATES = {
     "disabled",
     "disabled-only",
     "empty-group",
+    "empty-manifest",
     "unresolvable-source",
     "stale-cache",
     "dangling-reference",
@@ -100,6 +101,20 @@ def test_empty_group(monkeypatch, tmp_path, empty_registry):
     result = show(f"{manifest}:g", registry_path=empty_registry)
     _assert_legible(result)
     assert result["state"] == "empty-group"
+
+
+def test_components_less_manifest_is_empty_manifest_not_empty_group(
+    monkeypatch, tmp_path, empty_registry
+):
+    _isolate(monkeypatch, tmp_path)
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        "config:\n  context:\n    dir: .context/empty\ncomponents: []\n", encoding="utf-8"
+    )
+    _hydrate(manifest, tmp_path)
+    result = show(str(manifest), registry_path=empty_registry)
+    _assert_legible(result)
+    assert result["state"] == "empty-manifest"
 
 
 def test_disabled_component_and_disabled_member(monkeypatch, tmp_path, empty_registry):

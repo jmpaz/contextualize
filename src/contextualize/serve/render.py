@@ -15,6 +15,7 @@ STATE_LABELS = {
     "disabled": "disabled",
     "disabled-only": "disabled-only",
     "empty-group": "empty group",
+    "empty-manifest": "empty manifest",
     "unresolvable-source": "unresolvable source",
     "stale-cache": "stale",
     "dangling-reference": "dangling reference",

@@ -358,7 +358,7 @@ def resolve_target(handle: ManifestHandle, tokens: tuple[str, ...]) -> Target:
             detail="This component has no enabled members.",
         )
     token = lookup.remainder[0]
-    match = match_member(comp, token)
+    match, ambiguity = match_member(comp, token)
     if match is None:
         disabled_hit = find_disabled_member(node, token)
         if disabled_hit is not None:
@@ -371,15 +371,25 @@ def resolve_target(handle: ManifestHandle, tokens: tuple[str, ...]) -> Target:
                 detail=f"'{'.'.join(dotted)}.{token}' is disabled in the manifest source.",
                 disabled_member=disabled_hit,
             )
+        valid = member_tokens(comp)
+        total = len(component_members(comp))
+        hint = (
+            f" Member tokens: alias, filename slug, or ordinal 1-{total}."
+            f" Valid here: {', '.join(valid)}."
+            if valid
+            else ""
+        )
         return Target(
             kind="not-found",
             node=node,
             dotted_path=dotted,
             comp=comp,
             member=None,
-            detail=f"No member '{token}' on '{'.'.join(dotted)}'.",
+            detail=f"No member '{token}' on '{'.'.join(dotted)}'.{hint}",
         )
-    return Target(kind="member", node=node, dotted_path=dotted, comp=comp, member=match)
+    return Target(
+        kind="member", node=node, dotted_path=dotted, comp=comp, member=match, detail=ambiguity
+    )
 
 
 def spec_text(entry: Any) -> str:
@@ -439,19 +449,39 @@ def component_members(comp: dict[str, Any]) -> list[tuple[str, int, Any]]:
     return members
 
 
-def match_member(comp: dict[str, Any], token: str) -> tuple[str, int, Any] | None:
+def member_tokens(comp: dict[str, Any]) -> list[str]:
+    tokens: list[str] = []
+    for _key, _position, entry in component_members(comp):
+        alias = spec_alias(entry)
+        if alias and alias not in tokens:
+            tokens.append(alias)
+        slug = slugify(spec_text(entry))
+        if slug not in tokens:
+            tokens.append(slug)
+    return tokens
+
+
+def match_member(
+    comp: dict[str, Any], token: str
+) -> tuple[tuple[str, int, Any] | None, str | None]:
     members = component_members(comp)
-    for key, position, entry in members:
-        if spec_alias(entry) == token:
-            return key, position, entry
-    for key, position, entry in members:
-        if slugify(spec_text(entry)) == token:
-            return key, position, entry
+    hits = [m for m in members if spec_alias(m[2]) == token]
+    if not hits:
+        hits = [m for m in members if slugify(spec_text(m[2])) == token]
+    if hits:
+        ambiguity = None
+        if len(hits) > 1:
+            ambiguity = (
+                f"'{token}' matches {len(hits)} members; resolved to the first "
+                f"(ordinal {members.index(hits[0]) + 1}). "
+                f"Ordinals 1-{len(members)} address members uniquely."
+            )
+        return hits[0], ambiguity
     if token.isdigit():
         ordinal = int(token)
         if 1 <= ordinal <= len(members):
-            return members[ordinal - 1]
-    return None
+            return members[ordinal - 1], None
+    return None, None
 
 
 _DISABLED_HINT_RE = re.compile(r"^-?\s*(?:[A-Za-z_-]+:\s*)?(?P<val>.+)$")

@@ -51,6 +51,9 @@ NEXT_STEPS = {
     "empty-group": [
         "Add components to this group in the manifest source.",
     ],
+    "empty-manifest": [
+        "Add components to the manifest source.",
+    ],
     "unresolvable-source": [
         "Confirm the manifest file still exists at its recorded path.",
     ],
@@ -235,10 +238,10 @@ def _render_node(
 
 
 def _manifest_state(handle: ManifestHandle) -> tuple[str, str | None]:
+    if not handle.outline:
+        return "empty-manifest", "Manifest has no components."
     if not handle.hydrated:
         return "unhydrated", "This manifest has not been hydrated yet."
-    if not handle.outline:
-        return "empty-group", "Manifest has no components."
     return "ok", None
 
 
@@ -325,7 +328,7 @@ def show(
     if target.kind == "member":
         key, position, entry = target.require_member()
         result["node"] = _render_member(target.require_node(), key, position, entry)
-        result.update(state="ok", detail=None, next_steps=[])
+        result.update(state="ok", detail=target.detail, next_steps=[])
         return result
 
     result["node"] = _render_node(target.require_node(), target.dotted_path, handle, depth)
@@ -531,7 +534,7 @@ def cat_selector(
         if adjacency is None:
             result["adjacency_note"] = handle.source_error or "Authored source unavailable for adjacency."
 
-    result.update(state="ok", detail=None, next_steps=[])
+    result.update(state="ok", detail=target.detail, next_steps=[])
     return result
 
 

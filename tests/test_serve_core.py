@@ -310,6 +310,39 @@ def test_links_join_out_and_in_across_registered_contexts(monkeypatch, tmp_path)
     assert inbound["coverage"]["scanned"] == 1
 
 
+def test_member_not_found_names_the_valid_tokens(monkeypatch, grammar_dir, empty_registry):
+    _isolate(monkeypatch, grammar_dir)
+    origin = str(grammar_dir / "manifest.yaml")
+
+    result = show(f"{origin}:content.alpha.nosuch", registry_path=empty_registry)
+    assert result["state"] == "not-found"
+    assert "alias, filename slug, or ordinal" in result["detail"]
+    assert "a, b" in result["detail"]
+
+
+def test_ambiguous_member_slug_resolves_first_and_says_so(monkeypatch, tmp_path, empty_registry):
+    _isolate(monkeypatch, tmp_path)
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    (tmp_path / "one" / "note.md").write_text("first note\n", encoding="utf-8")
+    (tmp_path / "two" / "note.md").write_text("second note\n", encoding="utf-8")
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        "components:\n  - name: twins\n    files:\n      - one/note.md\n      - two/note.md\n",
+        encoding="utf-8",
+    )
+
+    result = show(f"{manifest}:twins.note", registry_path=empty_registry)
+    assert result["state"] == "ok"
+    assert "matches 2 members" in result["detail"]
+    assert "ordinal 1" in result["detail"]
+
+    second = cat_selector(f"{manifest}:twins.2", registry_path=empty_registry, cwd=str(tmp_path))
+    assert second["state"] == "ok"
+    assert second["detail"] is None
+    assert second["specs"] == [str(tmp_path / "two" / "note.md")]
+
+
 def test_links_surfaces_shared_membership_across_contexts(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     left_dir = tmp_path / "left"
