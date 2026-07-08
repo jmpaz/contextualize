@@ -1537,6 +1537,73 @@ components:
     }
 
 
+def test_hydrate_outline_records_order_comments_and_disabled_members(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    path-strategy: by-component
+
+components:
+  # curated notes
+  - name: notes
+    files:
+      - notes/a.md
+      - notes/b.md  # keeper
+      # - notes/c.md
+
+  # - name: dropped
+  #   files:
+  #     - notes/d.md
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "a.md").write_text("a", encoding="utf-8")
+    (tmp_path / "notes" / "b.md").write_text("b", encoding="utf-8")
+
+    plan = build_hydration_plan(
+        str(manifest_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    root_manifest = (context_dir / "manifest.yaml").read_text(encoding="utf-8")
+    assert "# - notes/c.md" in root_manifest
+    assert "# - name: dropped" in root_manifest
+
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    outline = index_json["outline"]
+    assert [node["kind"] for node in outline] == ["component", "component"]
+
+    notes_node, dropped_node = outline
+    assert notes_node["name"] == "notes"
+    assert notes_node["order"] == 0
+    assert notes_node["disabled"] is False
+    assert notes_node["comment"]["text"] == "curated notes"
+
+    files = notes_node["members"]["files"]
+    assert [member["disabled"] for member in files] == [False, False, True]
+    assert files[1]["inline_comment"] == "keeper"
+    assert files[2]["raw"] == "- notes/c.md"
+
+    assert dropped_node["name"] == "dropped"
+    assert dropped_node["disabled"] is True
+    assert dropped_node["order"] == 1
+    assert "notes/d.md" in dropped_node["raw"]
+
+    # disabled members produce no payload and are never resolved
+    assert not (context_dir / "notes" / "c.md").exists()
+    assert not (context_dir / "dropped").exists()
+    assert set(index_json["components"].keys()) == {"notes"}
+
+
 def test_hydrate_data_manifest_omits_manifest_source(tmp_path: Path) -> None:
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(

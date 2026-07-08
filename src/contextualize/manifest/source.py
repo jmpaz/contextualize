@@ -8,7 +8,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -25,6 +25,7 @@ class ManifestFormat:
     line: int
     source_path: str | None
     group_slices: dict[tuple[str, ...], ManifestSlice]
+    outline: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,11 @@ class ManifestSource:
 _FENCE_RE = re.compile(
     r"(?ms)^```(?P<label>[A-Za-z0-9_-]*)[^\n]*\n(?P<body>.*?)^```[ \t]*$"
 )
+
+_MEMBER_KEYS = ("files", "repos", "manifests")
+_COMPONENT_KEY_NAMES = ("name", "group", "set")
+_DASH_ITEM_RE = re.compile(r"^(?P<indent> *)-(?P<rest>.*)$")
+_DISABLED_ITEM_RE = re.compile(r"^(?P<indent> *)#[ \t]*-[ \t]+(?P<rest>.*)$")
 
 
 def load_manifest_source(path: str | os.PathLike[str]) -> ManifestSource:
@@ -178,49 +184,29 @@ def _build_manifest_format(
     source_path: str | None,
     line: int,
 ) -> ManifestFormat:
-    filtered, source_lines = _strip_commented_list_items(body, line)
+    lines = body.splitlines(keepends=True)
     return ManifestFormat(
-        body=filtered,
+        body=body,
         line=line,
         source_path=source_path,
-        group_slices=_extract_group_slices(filtered, source_lines),
+        group_slices=_extract_group_slices(lines, line),
+        outline=_build_outline(lines, line),
     )
 
 
-def _strip_commented_list_items(text: str, start_line: int) -> tuple[str, list[int]]:
-    lines = text.splitlines(keepends=True)
-    kept: list[str] = []
-    source_lines: list[int] = []
-    skip_indent: int | None = None
-    for offset, line in enumerate(lines):
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" \t"))
-        if skip_indent is not None:
-            if not stripped:
-                skip_indent = None
-            elif stripped.startswith("#") and indent >= skip_indent:
-                continue
-            else:
-                skip_indent = None
-        if re.match(r"^[ \t]*#[ \t]*-[ \t]+", line):
-            skip_indent = indent
-            continue
-        kept.append(line)
-        source_lines.append(start_line + offset)
-    return "".join(kept), source_lines
+# --- group manifest slicing (hydrated `.context/<name>/**/manifest.yaml` copies) ---
 
 
 def _extract_group_slices(
-    text: str,
-    source_lines: list[int],
+    lines: list[str],
+    start_line: int,
 ) -> dict[tuple[str, ...], ManifestSlice]:
-    lines = text.splitlines(keepends=True)
     components_range = _find_components_range(lines, 0, len(lines), max_indent=0)
     if components_range is None:
         return {}
     start, end = components_range
     group_slices: dict[tuple[str, ...], ManifestSlice] = {}
-    _collect_group_slices(lines, start, end, (), group_slices, source_lines)
+    _collect_group_slices(lines, start, end, (), group_slices, start_line)
     return group_slices
 
 
@@ -248,7 +234,7 @@ def _collect_group_slices(
     end: int,
     parent_path: tuple[str, ...],
     group_slices: dict[tuple[str, ...], ManifestSlice],
-    source_lines: list[int],
+    start_line: int,
 ) -> None:
     index = start
     while index < end:
@@ -270,7 +256,7 @@ def _collect_group_slices(
         group_path = parent_path + (group_name,)
         group_slices[group_path] = ManifestSlice(
             body=_build_group_manifest_slice(lines[index:item_end], item_indent),
-            line=source_lines[index],
+            line=start_line + index,
         )
         child_range = _find_components_range(
             lines,
@@ -286,23 +272,13 @@ def _collect_group_slices(
                 child_end,
                 group_path,
                 group_slices,
-                source_lines,
+                start_line,
             )
         index = item_end
 
 
 def _parse_group_name(raw: str) -> str | None:
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        value = yaml.safe_load(raw)
-    except Exception:
-        value = raw
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    return value or None
+    return _parse_scalar(raw)
 
 
 def _build_group_manifest_slice(lines: list[str], item_indent: int) -> str:
@@ -332,3 +308,429 @@ def _find_block_end(
         if indent <= parent_indent:
             return index
     return end
+
+
+# --- authored outline: order, comments, disabled members (§3.1, §3.2) ---
+
+
+def _build_outline(lines: list[str], start_line: int) -> list[dict[str, Any]]:
+    top = _find_components_range(lines, 0, len(lines), max_indent=0)
+    if top is None:
+        return []
+    start, end = top
+    indent = _first_item_indent(lines, start, end)
+    if indent is None:
+        return []
+    return _parse_component_list(lines, start, end, indent, start_line)
+
+
+def iter_active_leaves(nodes: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Depth-first walk yielding non-disabled component/set nodes.
+
+    Mirrors the traversal order of `manifest.normalize_components`, so the
+    Nth node yielded here corresponds to the Nth entry of its flattened
+    component list.
+    """
+    for node in nodes:
+        if node.get("disabled"):
+            continue
+        if node["kind"] == "group":
+            yield from iter_active_leaves(node.get("children", []))
+        else:
+            yield node
+
+
+def _find_item_end(lines: list[str], start: int, end: int, parent_indent: int) -> int:
+    """Find where a component/member item's own span ends.
+
+    Unlike `_find_block_end` (used for group-slice text boundaries, which
+    treats every comment as trailing filler regardless of indent), this
+    stops at a same-or-shallower comment line too -- such a line is a
+    sibling's block comment or a disabled sibling, not this item's content.
+    """
+    for index in range(start, end):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip(" \t"))
+        if indent <= parent_indent:
+            return index
+    return end
+
+
+def _first_item_indent(lines: list[str], start: int, end: int) -> int | None:
+    for index in range(start, end):
+        raw = lines[index].rstrip("\n")
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        m = _DASH_ITEM_RE.match(raw)
+        if m:
+            return len(m.group("indent"))
+        if stripped.startswith("#"):
+            continue
+        return None
+    return None
+
+
+def _parse_component_list(
+    lines: list[str],
+    start: int,
+    end: int,
+    indent: int,
+    start_line: int,
+) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    index = start
+    order = 0
+    pending: list[tuple[int, str]] = []
+    while index < end:
+        raw = lines[index].rstrip("\n")
+        bare = raw.strip()
+        if not bare:
+            pending = []
+            index += 1
+            continue
+        line_indent = len(raw) - len(raw.lstrip(" "))
+        if line_indent != indent:
+            index += 1
+            continue
+
+        disabled_match = _DISABLED_ITEM_RE.match(raw)
+        if disabled_match:
+            item_end = _consume_disabled_block(lines, index, end, indent)
+            comment = _reduce_pending(pending)
+            pending = []
+            nodes.append(
+                _build_disabled_component_node(
+                    lines, index, item_end, start_line, order, comment
+                )
+            )
+            order += 1
+            index = item_end
+            continue
+
+        if bare.startswith("#"):
+            pending.append((start_line + index, bare.lstrip("#").strip()))
+            index += 1
+            continue
+
+        item_match = _DASH_ITEM_RE.match(raw)
+        if not item_match:
+            index += 1
+            continue
+
+        item_end = _find_item_end(lines, index + 1, end, indent)
+        comment = _reduce_pending(pending)
+        pending = []
+        nodes.append(
+            _build_component_node(lines, index, item_end, start_line, order, comment)
+        )
+        order += 1
+        index = item_end
+
+    return nodes
+
+
+def _consume_disabled_block(lines: list[str], start: int, end: int, indent: int) -> int:
+    index = start + 1
+    while index < end:
+        line = lines[index].rstrip("\n")
+        bare = line.strip()
+        if not bare:
+            break
+        line_indent = len(line) - len(line.lstrip(" \t"))
+        if bare.startswith("#") and line_indent >= indent:
+            index += 1
+            continue
+        break
+    return index
+
+
+def _reduce_pending(pending: list[tuple[int, str]]) -> dict[str, Any] | None:
+    if not pending:
+        return None
+    text = "\n".join(t for _, t in pending)
+    return {
+        "text": text,
+        "line_start": pending[0][0],
+        "line_end": pending[-1][0],
+    }
+
+
+def _disabled_raw_text(lines: list[str], start: int, end: int) -> str:
+    out = []
+    for index in range(start, end):
+        line = lines[index].rstrip("\n")
+        match = re.match(r"^ *#[ \t]?(?P<rest>.*)$", line)
+        out.append(match.group("rest") if match else line.strip())
+    return "\n".join(out)
+
+
+def _build_disabled_component_node(
+    lines: list[str],
+    start: int,
+    end: int,
+    start_line: int,
+    order: int,
+    comment: dict[str, Any] | None,
+) -> dict[str, Any]:
+    raw_text = _disabled_raw_text(lines, start, end)
+    kind, name = _classify_disabled_component(raw_text)
+    return {
+        "kind": kind,
+        "name": name,
+        "order": order,
+        "disabled": True,
+        "line_start": start_line + start,
+        "line_end": start_line + end - 1,
+        "comment": comment,
+        "inline_comment": None,
+        "members": {},
+        "children": [],
+        "raw": raw_text,
+    }
+
+
+def _classify_disabled_component(raw_text: str) -> tuple[str, str | None]:
+    first = raw_text.splitlines()[0].strip() if raw_text else ""
+    if first.startswith("-"):
+        first = first[1:].strip()
+    match = re.match(r"^(?P<key>[A-Za-z0-9_-]+)\s*:\s*(?P<value>.*)$", first)
+    if match and match.group("key") in _COMPONENT_KEY_NAMES:
+        key = match.group("key")
+        kind = "group" if key == "group" else ("set" if key == "set" else "component")
+        return kind, _parse_scalar(match.group("value"))
+    return "component", None
+
+
+def _build_component_node(
+    lines: list[str],
+    start: int,
+    end: int,
+    start_line: int,
+    order: int,
+    comment: dict[str, Any] | None,
+) -> dict[str, Any]:
+    first_line = lines[start].rstrip("\n")
+    _, inline_comment = _split_inline_comment(first_line)
+    indent = len(first_line) - len(first_line.lstrip(" "))
+    key, name = _detect_item_key(lines, start, end, indent)
+    line_start = start_line + start
+    line_end = start_line + end - 1
+
+    if key == "group":
+        children: list[dict[str, Any]] = []
+        child_range = _find_components_range(lines, start + 1, end, max_indent=None)
+        if child_range is not None:
+            child_start, child_end = child_range
+            child_indent = _first_item_indent(lines, child_start, child_end)
+            if child_indent is not None:
+                children = _parse_component_list(
+                    lines, child_start, child_end, child_indent, start_line
+                )
+        return {
+            "kind": "group",
+            "name": name,
+            "order": order,
+            "disabled": False,
+            "line_start": line_start,
+            "line_end": line_end,
+            "comment": comment,
+            "inline_comment": inline_comment,
+            "members": {},
+            "children": children,
+        }
+
+    kind = "set" if key == "set" else "component"
+    members = _parse_all_member_lists(lines, start, end, indent, start_line)
+    return {
+        "kind": kind,
+        "name": name,
+        "order": order,
+        "disabled": False,
+        "line_start": line_start,
+        "line_end": line_end,
+        "comment": comment,
+        "inline_comment": inline_comment,
+        "members": members,
+        "children": [],
+    }
+
+
+def _detect_item_key(
+    lines: list[str], start: int, end: int, indent: int
+) -> tuple[str, str | None]:
+    first_line = lines[start].rstrip("\n")
+    code, _ = _split_inline_comment(first_line)
+    match = re.match(r"^ *-\s*(?P<key>[A-Za-z0-9_-]+)\s*:\s*(?P<value>.*)$", code)
+    if match and match.group("key") in _COMPONENT_KEY_NAMES:
+        return match.group("key"), _parse_scalar(match.group("value"))
+
+    child_indent: int | None = None
+    for index in range(start + 1, end):
+        line = lines[index].rstrip("\n")
+        bare = line.strip()
+        if not bare or bare.startswith("#"):
+            continue
+        line_indent = len(line) - len(line.lstrip(" "))
+        if line_indent <= indent:
+            break
+        if child_indent is None:
+            child_indent = line_indent
+        if line_indent != child_indent:
+            continue
+        code, _ = _split_inline_comment(line)
+        match = re.match(r"^ *(?P<key>[A-Za-z0-9_-]+)\s*:\s*(?P<value>.*)$", code)
+        if match and match.group("key") in _COMPONENT_KEY_NAMES:
+            return match.group("key"), _parse_scalar(match.group("value"))
+
+    return "name", None
+
+
+def _parse_all_member_lists(
+    lines: list[str],
+    start: int,
+    end: int,
+    indent: int,
+    start_line: int,
+) -> dict[str, list[dict[str, Any]]]:
+    members: dict[str, list[dict[str, Any]]] = {}
+    for key in _MEMBER_KEYS:
+        list_range = _find_named_list_range(lines, start + 1, end, key, indent)
+        if list_range is None:
+            continue
+        list_start, list_end = list_range
+        item_indent = _first_item_indent(lines, list_start, list_end)
+        if item_indent is None:
+            continue
+        parsed = _parse_member_items(lines, list_start, list_end, item_indent, start_line)
+        if parsed:
+            members[key] = parsed
+    return members
+
+
+def _find_named_list_range(
+    lines: list[str],
+    start: int,
+    end: int,
+    key: str,
+    parent_indent: int,
+) -> tuple[int, int] | None:
+    pattern = re.compile(rf"^(?P<indent> *){key}\s*:\s*(?:#.*)?$")
+    for index in range(start, end):
+        line = lines[index].rstrip("\n")
+        match = pattern.match(line)
+        if not match:
+            continue
+        list_indent = len(match.group("indent"))
+        if list_indent <= parent_indent:
+            continue
+        return index + 1, _find_block_end(lines, index + 1, end, list_indent)
+    return None
+
+
+def _parse_member_items(
+    lines: list[str],
+    start: int,
+    end: int,
+    indent: int,
+    start_line: int,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    index = start
+    order = 0
+    pending: list[tuple[int, str]] = []
+    while index < end:
+        raw = lines[index].rstrip("\n")
+        bare = raw.strip()
+        if not bare:
+            pending = []
+            index += 1
+            continue
+        line_indent = len(raw) - len(raw.lstrip(" "))
+        if line_indent != indent:
+            index += 1
+            continue
+
+        disabled_match = _DISABLED_ITEM_RE.match(raw)
+        if disabled_match:
+            item_end = _consume_disabled_block(lines, index, end, indent)
+            comment = _reduce_pending(pending)
+            pending = []
+            items.append(
+                {
+                    "order": order,
+                    "disabled": True,
+                    "line_start": start_line + index,
+                    "line_end": start_line + item_end - 1,
+                    "comment": comment,
+                    "inline_comment": None,
+                    "raw": _disabled_raw_text(lines, index, item_end),
+                }
+            )
+            order += 1
+            index = item_end
+            continue
+
+        if bare.startswith("#"):
+            pending.append((start_line + index, bare.lstrip("#").strip()))
+            index += 1
+            continue
+
+        item_match = _DASH_ITEM_RE.match(raw)
+        if not item_match:
+            index += 1
+            continue
+
+        item_end = _find_item_end(lines, index + 1, end, indent)
+        _, inline_comment = _split_inline_comment(raw)
+        comment = _reduce_pending(pending)
+        pending = []
+        items.append(
+            {
+                "order": order,
+                "disabled": False,
+                "line_start": start_line + index,
+                "line_end": start_line + item_end - 1,
+                "comment": comment,
+                "inline_comment": inline_comment,
+            }
+        )
+        order += 1
+        index = item_end
+
+    return items
+
+
+def _split_inline_comment(line: str) -> tuple[str, str | None]:
+    in_single = False
+    in_double = False
+    for index, ch in enumerate(line):
+        if in_single:
+            if ch == "'":
+                in_single = False
+        elif in_double:
+            if ch == '"':
+                in_double = False
+        elif ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch == "#" and (index == 0 or line[index - 1] in " \t"):
+            code = line[:index].rstrip()
+            comment = line[index + 1 :].strip()
+            return code, (comment or None)
+    return line, None
+
+
+def _parse_scalar(raw: str) -> str | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        value = yaml.safe_load(raw)
+    except Exception:
+        return raw
+    return value if isinstance(value, str) else raw
