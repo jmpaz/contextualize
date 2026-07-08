@@ -1006,6 +1006,8 @@ def build_hydration_plan_data(
         )
         if manifest_source is not None:
             index_data["manifest_source"] = manifest_source
+        if manifest_format is not None and manifest_format.outline:
+            index_data["outline"] = manifest_format.outline
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
 

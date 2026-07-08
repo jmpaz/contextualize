@@ -71,8 +71,8 @@ components:
     source = load_manifest_source(path)
 
     assert source.source_format is not None
-    assert "# - name: skipped" not in source.source_format.body
-    assert "not hydrated" not in source.source_format.body
+    assert "# - name: skipped" in source.source_format.body
+    assert "not hydrated" in source.source_format.body
     assert "# speech materials" in source.source_format.body
     speech_slice = source.source_format.group_slices[("speech",)]
     assert speech_slice.line == 6
@@ -82,8 +82,31 @@ components:
         "    components:\n"
         "      - name: anchor  # main voice note\n"
         "        text: hello\n"
+        "      # - name: skipped\n"
+        "      #   text: not hydrated\n"
         "\n"
     )
+
+    outline = source.source_format.outline
+    assert [node["kind"] for node in outline] == ["group", "component"]
+    speech_group = outline[0]
+    assert speech_group["name"] == "speech"
+    assert speech_group["order"] == 0
+    assert speech_group["comment"] == {
+        "text": "speech materials",
+        "line_start": 5,
+        "line_end": 5,
+    }
+    anchor, skipped = speech_group["children"]
+    assert anchor["name"] == "anchor"
+    assert anchor["disabled"] is False
+    assert anchor["inline_comment"] == "main voice note"
+    assert skipped["name"] == "skipped"
+    assert skipped["disabled"] is True
+    assert skipped["raw"] == "- name: skipped\n  text: not hydrated"
+    refs = outline[1]
+    assert refs["name"] == "refs"
+    assert refs["order"] == 1
 
 
 def test_load_manifest_text_rejects_text_without_manifest() -> None:
