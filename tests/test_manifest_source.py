@@ -6,7 +6,12 @@ from subprocess import CompletedProcess
 import pytest
 
 from contextualize.manifest import source as manifest_source
-from contextualize.manifest.source import load_manifest_source, load_manifest_text
+from contextualize.manifest.manifest import normalize_components
+from contextualize.manifest.source import (
+    iter_active_leaves,
+    load_manifest_source,
+    load_manifest_text,
+)
 
 
 def test_load_manifest_source_extracts_yaml_block_from_text_file(
@@ -137,3 +142,37 @@ def test_load_manifest_source_evaluates_nix_manifest(
 
     assert source.manifest_cwd == str(tmp_path)
     assert source.data["components"] == [{"name": "main", "text": "hello"}]
+
+
+def test_outline_handles_zero_indent_block_sequences(tmp_path: Path) -> None:
+    # YAML permits list items at the same indentation as their parent key;
+    # this style is common in the wild and previously produced an empty
+    # outline (the "components:"/"files:" block-end scan stopped on the
+    # first item instead of the next sibling key).
+    path = tmp_path / "manifest.yaml"
+    path.write_text(
+        """config:
+  root: '~'
+components:
+- name: percept span and facets
+  files:
+  - dev/mood-board/packages/percept/src/percept/span.py
+  - dev/mood-board/packages/percept/src/percept/contracts.py
+- name: current ad-hoc extraction to replace
+  files:
+  - dev/mood-board/src/mood_board/core/director/orchestrator.py
+""",
+        encoding="utf-8",
+    )
+
+    source = load_manifest_source(path)
+    assert source.source_format is not None
+
+    normalized = normalize_components(source.data["components"])
+    leaves = list(iter_active_leaves(source.source_format.outline))
+    assert len(leaves) == len(normalized) == 2
+    assert [leaf["name"] for leaf in leaves] == [
+        "percept span and facets",
+        "current ad-hoc extraction to replace",
+    ]
+    assert [len(leaf["members"]["files"]) for leaf in leaves] == [2, 1]
