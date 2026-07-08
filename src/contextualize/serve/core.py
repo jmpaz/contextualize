@@ -232,6 +232,9 @@ def _render_node(
     comp = component_for_node(handle, dotted_path)
     members = _render_members(node, comp)
     base["members"] = members
+    inline_keys = [key for key in ("text", "prefix", "suffix") if comp and comp.get(key)]
+    if inline_keys:
+        base["inline_content"] = inline_keys
     if node["kind"] == "set" and isinstance(node.get("set"), dict):
         base["set"] = node["set"]
     state, detail = _leaf_state(members)

@@ -88,7 +88,10 @@ def _render_component(node: dict[str, Any], indent: int, ordinal: int | None) ->
         return lines
 
     counts = {key: len(items) for key, items in node.get("members", {}).items()}
-    summary = ", ".join(f"{count} {key}" for key, count in counts.items()) or "no members"
+    summary = ", ".join(f"{count} {key}" for key, count in counts.items())
+    if not summary:
+        inline_keys = node.get("inline_content") or []
+        summary = f"inline {', '.join(inline_keys)}" if inline_keys else "no members"
     kind_label = " (set)" if node["kind"] == "set" else ""
     inline = f"   # {node['inline_comment']}" if node.get("inline_comment") else ""
     lines.append(f"{pad}{marker}{name}{kind_label}  {summary}{state_note}{inline}")

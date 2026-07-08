@@ -234,3 +234,19 @@ def test_status_cli_registry_wide_and_per_context(tmp_path: Path) -> None:
     )
     assert per_context.exit_code == 0
     assert "unhydrated" in per_context.output
+
+
+def test_show_names_inline_text_instead_of_no_members(tmp_path: Path) -> None:
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    (drive / "manifest.yaml").write_text(
+        "components:\n  - name: excerpts\n    text: |\n      inline body\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli, ["show", str(drive / "manifest.yaml")], env=_isolated_env(tmp_path)
+    )
+    assert result.exit_code == 0
+    assert "inline text" in result.output
+    assert "no members" not in result.output
