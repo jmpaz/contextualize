@@ -135,6 +135,8 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
                 if "components" not in entry:
                     raise ValueError(f"Group '{group_name}' must define components")
                 group_components = entry.get("components")
+                if group_components is None:
+                    group_components = []
                 if not isinstance(group_components, list):
                     raise ValueError("Group components must be a list")
 

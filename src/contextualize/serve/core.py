@@ -435,6 +435,26 @@ def _adjacency_for_span(
     return {"line_start": start, "line_end": end, "text": "\n".join(lines[start - 1 : end])}
 
 
+def _no_specs_state(target: Target) -> tuple[str, str]:
+    if target.kind == "group":
+        state, detail = _group_state(target.node.get("children", []))
+        if state != "ok":
+            return state, detail or ""
+        return (
+            "not-found",
+            "This group has enabled components, but none resolve to a file/repo/manifest member.",
+        )
+    node_members = target.node.get("members", {}) if target.node else {}
+    all_items = [item for items in node_members.values() for item in items]
+    if all_items and all(item["disabled"] for item in all_items):
+        return "disabled-only", "All members of this component are disabled."
+    return (
+        "not-found",
+        "This component has no files/repos/manifests members; its content may be authored "
+        "inline (text/prefix/suffix), which cat does not draw directly.",
+    )
+
+
 def cat_selector(
     selector_text: str,
     *,
@@ -486,11 +506,8 @@ def cat_selector(
     result["payload"] = payload
 
     if not specs:
-        result.update(
-            state="disabled-only",
-            detail="This selector has no resolvable members.",
-            next_steps=NEXT_STEPS["disabled-only"],
-        )
+        state, detail = _no_specs_state(target)
+        result.update(state=state, detail=detail, next_steps=NEXT_STEPS.get(state, NEXT_STEPS["not-found-node"]))
         return result
 
     if around is not None and span is not None:
@@ -799,10 +816,3 @@ def shelf_for_cwd(cwd: str, registry: dict[str, ContextEntry]) -> list[dict[str,
         )
     shelf.sort(key=lambda item: item["name"])
     return shelf
-
-
-def full_shelf(registry: dict[str, ContextEntry]) -> list[dict[str, Any]]:
-    return [
-        {"name": name, "manifest_source": manifest_source_label(entry), "target": str(entry.target_dir)}
-        for name in sorted(registry)
-    ]
