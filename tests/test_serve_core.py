@@ -469,3 +469,23 @@ def test_designed_state_unresolvable_source(monkeypatch, tmp_path, empty_registr
 
     result = show("gone", registry_path=registry_path)
     assert result["state"] == "unresolvable-source"
+
+
+def test_null_root_resolves_members_against_home(monkeypatch, tmp_path, empty_registry):
+    _isolate(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    (home / "dev").mkdir(parents=True)
+    (home / "dev" / "a.md").write_text("rooted at home\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    manifest = notes / "manifest.yaml"
+    manifest.write_text(
+        "config:\n  root: ~\ncomponents:\n  - name: local\n    files:\n      - dev/a.md\n",
+        encoding="utf-8",
+    )
+
+    result = cat_selector(f"{manifest}:local", registry_path=empty_registry, cwd=str(notes))
+    assert result["state"] == "ok"
+    assert result["specs"] == [str(home / "dev" / "a.md")]

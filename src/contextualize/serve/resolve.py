@@ -416,9 +416,8 @@ def manifest_base_dir(handle: ManifestHandle) -> str:
         raw_cfg = handle.source.data.get("config")
         if isinstance(raw_cfg, dict):
             cfg = raw_cfg
-    root = cfg.get("root")
-    if isinstance(root, str) and root:
-        return os.path.abspath(os.path.expanduser(root))
+    if "root" in cfg:
+        return os.path.abspath(os.path.expanduser(cfg.get("root") or "~"))
     manifest_cwd = handle.source.manifest_cwd if handle.source is not None else None
     return os.path.abspath(manifest_cwd or os.getcwd())
 
