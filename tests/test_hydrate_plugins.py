@@ -1697,6 +1697,183 @@ components:
     assert (context_dir / "g" / "plain" / "p.md").exists()
 
 
+def test_hydrate_recognizes_manifest_reference_via_frontmatter_tag(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "ref-note.md").write_text(
+        """---
+title: sub ctx
+tags:
+  - ctx/manifest
+---
+
+```yaml
+components:
+  - name: main
+    text: hello
+```
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "plain.md").write_text("just a note, not a manifest", encoding="utf-8")
+
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    path-strategy: by-component
+
+components:
+  - name: refs
+    files:
+      - ref-note.md
+      - plain.md
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_hydration_plan(
+        str(manifest_path), overrides=HydrateOverrides(), cwd=str(tmp_path)
+    )
+    apply_hydration_plan(plan)
+
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    out_edges = index_json["references"]["out"]
+    assert len(out_edges) == 1
+    edge = out_edges[0]
+    assert edge["form"] == "recognized"
+    assert edge["detected_via"] == "frontmatter-tag"
+    assert edge["payload"] == "copy"
+    assert edge["context_path"] == "refs/ref-note.md"
+    # the payload is the authored note itself, hydrated like any other file
+    assert (context_dir / "refs" / "ref-note.md").exists()
+    assert (context_dir / "refs" / "plain.md").exists()
+
+
+def test_hydrate_recognizes_manifest_reference_via_fenced_block_without_tag(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "untagged.md").write_text(
+        """# just a heading, no ctx/manifest tag
+
+```yaml
+components:
+  - name: main
+    text: hello
+```
+""",
+        encoding="utf-8",
+    )
+
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    path-strategy: by-component
+
+components:
+  - name: refs
+    files:
+      - untagged.md
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_hydration_plan(
+        str(manifest_path), overrides=HydrateOverrides(), cwd=str(tmp_path)
+    )
+    apply_hydration_plan(plan)
+
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    edge = index_json["references"]["out"][0]
+    assert edge["detected_via"] == "fenced-block"
+
+
+def test_hydrate_recognizes_manifest_reference_via_registry_membership(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from contextualize.manifest import contexts as contexts_module
+
+    registered_note = tmp_path / "registered.md"
+    registered_note.write_text("plain prose, no fenced block or tag", encoding="utf-8")
+
+    class _FakeEntry:
+        def __init__(self, source: Path) -> None:
+            self.manifest = {"source": str(source)}
+            self.target_dir = tmp_path
+
+    monkeypatch.setattr(
+        contexts_module,
+        "load_context_registry",
+        lambda *args, **kwargs: {"registered": _FakeEntry(registered_note)},
+    )
+
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    path-strategy: by-component
+
+components:
+  - name: refs
+    files:
+      - registered.md
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_hydration_plan(
+        str(manifest_path), overrides=HydrateOverrides(), cwd=str(tmp_path)
+    )
+    apply_hydration_plan(plan)
+
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    edge = index_json["references"]["out"][0]
+    assert edge["detected_via"] == "registry"
+
+
+def test_hydrate_records_full_inclusion_edge_as_pointer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_manifest_link_cache(monkeypatch, tmp_path)
+    sub_manifest = tmp_path / "sub.yaml"
+    _write_sub_manifest(sub_manifest)
+
+    context_dir = tmp_path / "ctx"
+    plan = build_hydration_plan_data(
+        {
+            "config": {
+                "context": {
+                    "dir": str(context_dir),
+                    "include-meta": True,
+                    "path-strategy": "on-disk",
+                }
+            },
+            "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
+        },
+        manifest_cwd=str(tmp_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    edge = index_json["references"]["out"][0]
+    assert edge["form"] == "full"
+    assert edge["detected_via"] == "manifests-key"
+    assert edge["payload"] == "pointer"
+    assert edge["target_path"] == str(sub_manifest.resolve())
+
+
 def test_hydrate_data_manifest_omits_manifest_source(tmp_path: Path) -> None:
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(

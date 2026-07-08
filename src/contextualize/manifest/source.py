@@ -147,6 +147,29 @@ def path_contains_manifest(path: str | os.PathLike[str]) -> bool:
     return True
 
 
+def frontmatter_has_manifest_tag(text: str, *, tag: str = "ctx/manifest") -> bool:
+    """Recognition tier for §3.4: a `ctx/manifest` tag in YAML frontmatter."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    try:
+        end_index = next(
+            index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"
+        )
+    except StopIteration:
+        return False
+    try:
+        frontmatter = yaml.safe_load("\n".join(lines[1:end_index])) or {}
+    except Exception:
+        return False
+    if not isinstance(frontmatter, dict):
+        return False
+    tags = frontmatter.get("tags")
+    if not isinstance(tags, list):
+        return False
+    return any(isinstance(candidate, str) and candidate.strip() == tag for candidate in tags)
+
+
 def _load_nix_manifest_source(path: Path, cwd: str) -> dict[str, Any]:
     try:
         result = subprocess.run(
