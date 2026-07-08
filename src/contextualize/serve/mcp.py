@@ -67,7 +67,11 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "links",
-        "description": "The connective tissue between contexts: who cites this one (in) and what it cites (out).",
+        "description": (
+            "The connective tissue between contexts: who cites this one (in), what it "
+            "cites (out), and which sources it holds in common with other registered "
+            "contexts (shared members)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {

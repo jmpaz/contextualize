@@ -543,6 +543,37 @@ def _resolved(path: Path | str) -> str:
     return str(Path(path).resolve(strict=False))
 
 
+def _entry_source_identity(handle: ManifestHandle, entry: dict[str, Any]) -> str | None:
+    if entry.get("kind") == "set":
+        return None
+    if entry.get("source_type") == "local":
+        local = _local_entry_source_path(handle, entry)
+        return _resolved(local) if local is not None else None
+    source_type = entry.get("source_type")
+    source_ref = entry.get("source_ref")
+    if not source_type or not source_ref:
+        return None
+    source_path = entry.get("source_path")
+    return f"{source_type}:{source_ref}" + (f":{source_path}" if source_path else "")
+
+
+def _member_source_identities(handle: ManifestHandle) -> dict[str, list[str]]:
+    identities: dict[str, list[str]] = {}
+    components = handle.index.get("components") if handle.index else None
+    if not isinstance(components, dict):
+        return identities
+    for dotted, entries in components.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            identity = _entry_source_identity(handle, entry)
+            if identity is not None and dotted not in identities.setdefault(identity, []):
+                identities[identity].append(dotted)
+    return identities
+
+
 def links(
     selector_text: str,
     *,
@@ -561,9 +592,9 @@ def links(
     selector = parse_selector(selector_text, cwd=cwd)
     handle = load_manifest_handle(selector.origin, registry=registry, registry_path=registry_path, cwd=cwd)
     if handle is None:
-        return {**_not_found(selector_text, selector.origin), "out": None, "in": None, "coverage": None}
+        return {**_not_found(selector_text, selector.origin), "out": None, "in": None, "shared": None, "coverage": None}
     if handle.source is None:
-        return {**_unresolvable_source(handle), "out": None, "in": None, "coverage": None}
+        return {**_unresolvable_source(handle), "out": None, "in": None, "shared": None, "coverage": None}
 
     result = _base_result(handle, selector)
     context_label = handle.registry_name or handle.display_name
@@ -577,9 +608,12 @@ def links(
         )
 
     in_edges: list[dict[str, Any]] | None = None
+    shared: list[dict[str, Any]] | None = None
     coverage = {"registry_total": len(registry), "scanned": 0, "skipped_unhydrated": []}
     if direction in ("in", "both") and handle.manifest_path is not None:
         in_edges = []
+        own_identities = _member_source_identities(handle) if handle.hydrated else {}
+        shared = [] if handle.hydrated else None
         target_resolved = _resolved(handle.manifest_path)
         for name, entry in registry.items():
             if name == handle.registry_name:
@@ -595,9 +629,24 @@ def links(
                 edge_target = edge.get("target_path")
                 if edge_target and _resolved(edge_target) == target_resolved:
                     in_edges.append(dict(edge, source_context=name, target_context=context_label))
+            if shared is None or not own_identities:
+                continue
+            for identity, their_components in _member_source_identities(other).items():
+                own_components = own_identities.get(identity)
+                if own_components:
+                    shared.append(
+                        {
+                            "kind": "shared-member",
+                            "source": identity,
+                            "context": name,
+                            "components": own_components,
+                            "their_components": their_components,
+                        }
+                    )
 
     result["out"] = out_edges
     result["in"] = in_edges
+    result["shared"] = shared
     result["coverage"] = coverage
 
     if direction in ("out", "both") and not handle.hydrated:
@@ -608,7 +657,7 @@ def links(
         )
         return result
 
-    has_any = bool(out_edges) or bool(in_edges)
+    has_any = bool(out_edges) or bool(in_edges) or bool(shared)
     if not has_any:
         result.update(state="ok", detail="No references recorded in either direction.", next_steps=[])
     else:

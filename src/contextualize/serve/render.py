@@ -150,6 +150,15 @@ def render_links(result: dict[str, Any]) -> str:
                 f"    {edge.get('source_context')}  ({edge.get('form')}, {edge.get('payload')})"
             )
 
+    if result.get("shared") is not None:
+        lines.append(f"\n  shared members ({len(result['shared'])})")
+        for edge in result["shared"]:
+            here = ", ".join(edge.get("components") or [])
+            theirs = ", ".join(edge.get("their_components") or [])
+            lines.append(
+                f"    {edge.get('source')}  (here: {here}; {edge.get('context')}: {theirs})"
+            )
+
     coverage = result.get("coverage")
     if coverage and result.get("in") is not None:
         skipped = coverage.get("skipped_unhydrated") or []

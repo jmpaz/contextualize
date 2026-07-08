@@ -310,6 +310,53 @@ def test_links_join_out_and_in_across_registered_contexts(monkeypatch, tmp_path)
     assert inbound["coverage"]["scanned"] == 1
 
 
+def test_links_surfaces_shared_membership_across_contexts(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    left_dir = tmp_path / "left"
+    right_dir = tmp_path / "right"
+    left_dir.mkdir()
+    right_dir.mkdir()
+    common = tmp_path / "common.md"
+    common.write_text("held in common\n", encoding="utf-8")
+
+    (left_dir / "manifest.yaml").write_text(
+        "config:\n  name: left\n  context:\n    dir: .context/left\n    include-meta: true\n"
+        "components:\n  - name: core\n    files:\n      - ../common.md\n",
+        encoding="utf-8",
+    )
+    (right_dir / "manifest.yaml").write_text(
+        "config:\n  name: right\n  context:\n    dir: .context/right\n    include-meta: true\n"
+        "components:\n  - name: shelf\n    files:\n      - ../common.md\n",
+        encoding="utf-8",
+    )
+
+    registry_path = _registry(
+        tmp_path / "registry.json",
+        {
+            "left": {"targetDir": str(left_dir), "manifest": {"source": "manifest.yaml"}},
+            "right": {"targetDir": str(right_dir), "manifest": {"source": "manifest.yaml"}},
+        },
+    )
+
+    statuses = hydrate_contexts(
+        ["left", "right"], registry_path=registry_path, status_path=str(tmp_path / "status.json")
+    )
+    assert all(s.result == "hydrated" for s in statuses)
+
+    result = links("left", registry_path=registry_path)
+    assert result["state"] == "ok"
+    assert len(result["shared"]) == 1
+    edge = result["shared"][0]
+    assert edge["kind"] == "shared-member"
+    assert edge["source"] == str(common.resolve())
+    assert edge["context"] == "right"
+    assert edge["components"] == ["core"]
+    assert edge["their_components"] == ["shelf"]
+
+    unrelated = links("right", registry_path=registry_path, direction="out")
+    assert unrelated["shared"] is None
+
+
 def test_status_detects_drift(monkeypatch, grammar_dir, empty_registry):
     _isolate(monkeypatch, grammar_dir)
     origin = str(grammar_dir / "manifest.yaml")
