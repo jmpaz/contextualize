@@ -2237,8 +2237,18 @@ def _iter_source_files(
         for name in names:
             file_path = os.path.join(root, name)
             match_path = _ignore_match_path(file_path, ignore_base)
-            if not ignore_spec.match_file(match_path):
-                files.append(file_path)
+            if ignore_spec.match_file(match_path):
+                continue
+            if os.path.islink(file_path) and not os.path.exists(file_path):
+                log_progress(
+                    "hydrate",
+                    "file",
+                    "skipped",
+                    target=file_path,
+                    detail="dangling symlink in source",
+                )
+                continue
+            files.append(file_path)
     return files
 
 

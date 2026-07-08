@@ -1698,6 +1698,46 @@ components:
     assert (context_dir / "g" / "plain" / "p.md").exists()
 
 
+def test_hydrate_skips_dangling_symlink_instead_of_aborting(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "real.md").write_text("real content\n", encoding="utf-8")
+    (source_dir / "broken.md").symlink_to(tmp_path / "nowhere" / "gone.md")
+
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    copy: true
+
+components:
+  - name: docs
+    files:
+      - src
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_hydration_plan(
+        str(manifest_path), overrides=HydrateOverrides(copy=True), cwd=str(tmp_path)
+    )
+    apply_hydration_plan(plan)
+
+    assert (context_dir / "docs" / "real.md").exists()
+    assert not (context_dir / "docs" / "broken.md").exists()
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    recorded = [
+        entry["source_path"]
+        for entries in index_json["components"].values()
+        for entry in entries
+    ]
+    assert any("real.md" in path for path in recorded)
+    assert not any("broken.md" in path for path in recorded)
+
+
 def test_hydrate_recognizes_manifest_reference_via_frontmatter_tag(
     tmp_path: Path,
 ) -> None:
