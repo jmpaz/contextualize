@@ -116,6 +116,36 @@ def test_contexts_list_discovers_zk_subscription(
     assert str(target_root / "subscribed-demo") in result.output
 
 
+def test_contexts_list_json_discovers_zk_subscription(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    notes_dir = tmp_path / "notes"
+    target_root = tmp_path / "ref"
+    note = notes_dir / "demo.md"
+    _write_note(note, name="Subscribed Demo")
+    _write_registry(tmp_path / "registry.json", {})
+    _write_context_config(tmp_path / "config", notes_dir, target_root)
+    _mock_zk(monkeypatch, [note])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--json", "--registry", str(tmp_path / "registry.json")],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == [
+        {
+            "name": "subscribed-demo",
+            "source": str(note.resolve()),
+            "origin": "tag:ctx/ref",
+            "target": str(target_root / "subscribed-demo"),
+        }
+    ]
+
+
 def test_contexts_subscription_uses_frontmatter_context(
     monkeypatch,
     tmp_path: Path,
@@ -610,6 +640,44 @@ def test_contexts_list_cli_uses_registry(tmp_path: Path) -> None:
     assert "inline data" in result.output
     assert "registry" in result.output
     assert str(target_dir) in result.output
+
+
+def test_contexts_list_cli_json_uses_registry(tmp_path: Path) -> None:
+    target_dir = tmp_path / "repo"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "origin": "nix",
+                        "manifest": {"source": "manifest.yaml"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.cli,
+        ["contexts", "list", "--json", "--registry", str(registry_path)],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "empty-config")},
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == [
+        {
+            "name": "demo",
+            "source": "manifest.yaml",
+            "origin": "nix",
+            "target": str(target_dir),
+        }
+    ]
 
 
 def test_contexts_list_cli_uses_registry_origin(tmp_path: Path) -> None:

@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import sys
@@ -1551,6 +1552,21 @@ def _echo_context_registry(contexts) -> None:
     Console(width=max(240, table_width + 80)).print(table)
 
 
+def _echo_context_registry_json(contexts) -> None:
+    from .manifest.contexts import manifest_source_label
+
+    payload = [
+        {
+            "name": name,
+            "source": manifest_source_label(contexts[name]),
+            "origin": contexts[name].origin,
+            "target": str(contexts[name].target_dir),
+        }
+        for name in sorted(contexts, key=lambda name: (contexts[name].origin, name))
+    ]
+    click.echo(json.dumps(payload, indent=2))
+
+
 def _context_hydrate_overrides(
     ctx,
     *,
@@ -1663,7 +1679,8 @@ def contexts_cmd() -> None:
     type=click.Path(exists=True, dir_okay=False),
     help="Context registry path (default: XDG contextualize/contexts.json).",
 )
-def contexts_list_cmd(registry) -> None:
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+def contexts_list_cmd(registry, json_output) -> None:
     """List registered contexts."""
     from .manifest.contexts import load_context_registry
 
@@ -1672,7 +1689,10 @@ def contexts_list_cmd(registry) -> None:
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    _echo_context_registry(contexts)
+    if json_output:
+        _echo_context_registry_json(contexts)
+    else:
+        _echo_context_registry(contexts)
 
 
 @contexts_cmd.command("status")
