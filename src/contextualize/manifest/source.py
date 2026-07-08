@@ -247,7 +247,7 @@ def _find_components_range(
         indent = len(match.group("indent"))
         if max_indent is not None and indent > max_indent:
             continue
-        return index + 1, _find_block_end(lines, index + 1, end, indent)
+        return index + 1, _find_key_block_end(lines, index + 1, end, indent)
     return None
 
 
@@ -329,6 +329,32 @@ def _find_block_end(
             continue
         indent = len(line) - len(line.lstrip(" "))
         if indent <= parent_indent:
+            return index
+    return end
+
+
+def _find_key_block_end(
+    lines: list[str],
+    start: int,
+    end: int,
+    key_indent: int,
+) -> int:
+    """Find where a `key:` mapping's value block ends.
+
+    YAML permits a block sequence to sit at the same indentation as its
+    parent key (`key:\\n- item`), so unlike `_find_block_end` (an item
+    terminator, where a same-indent dash is a sibling), a same-indent dash
+    line here still belongs to this key's value.
+    """
+    for index in range(start, end):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent < key_indent:
+            return index
+        if indent == key_indent and not stripped.startswith("-"):
             return index
     return end
 
@@ -650,7 +676,7 @@ def _find_named_list_range(
         list_indent = len(match.group("indent"))
         if list_indent <= parent_indent:
             continue
-        return index + 1, _find_block_end(lines, index + 1, end, list_indent)
+        return index + 1, _find_key_block_end(lines, index + 1, end, list_indent)
     return None
 
 
