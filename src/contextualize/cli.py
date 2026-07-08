@@ -832,7 +832,7 @@ def cli(
 
     stdin_data = ""
     stdin_binary_path: str | None = None
-    if _stdin_is_capturable():
+    if ctx.invoked_subcommand != "serve" and _stdin_is_capturable():
         raw = sys.stdin.buffer.read()
         if raw:
             from .references.helpers import detect_media_suffix
@@ -3013,6 +3013,25 @@ def status_cmd(ctx, selector, registry, status_path, json_output) -> None:
 
     result = query_status(selector, registry_path=registry, status_path=status_path, cwd=os.getcwd())
     _emit_serve_result(ctx, result, json_output, render_status)
+
+
+@cli.command("serve")
+@click.option(
+    "--registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Context registry path (default: XDG contextualize/contexts.json).",
+)
+@click.option(
+    "--status",
+    "status_path",
+    type=click.Path(dir_okay=False),
+    help="Context hydration status path (default: XDG contextualize/contexts/status.json).",
+)
+def serve_cmd(registry, status_path) -> None:
+    """Host show/cat/links/status as an MCP server over stdio."""
+    from .serve.mcp import run_stdio_server
+
+    run_stdio_server(cwd=os.getcwd(), registry_path=registry, status_path=status_path)
 
 
 @cli.command("paste")
