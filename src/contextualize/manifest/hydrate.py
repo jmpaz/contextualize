@@ -2588,6 +2588,7 @@ def _build_set_fusion(
             str | None,
             dict[str, Any],
             str | None,
+            bool,
         ]
     ],
     outline_node: dict[str, Any] | None = None,
