@@ -1517,6 +1517,7 @@ components:
     assert "speech.anchor" not in root_manifest
     assert group_manifest == (
         "components:\n"
+        "  # speech materials\n"
         "  - group: speech\n"
         "    components:\n"
         "      - name: anchor  # primary voice note\n"

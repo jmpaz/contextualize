@@ -83,6 +83,7 @@ components:
     assert speech_slice.line == 6
     assert speech_slice.body == (
         "components:\n"
+        "  # speech materials\n"
         "  - group: speech\n"
         "    components:\n"
         "      - name: anchor  # main voice note\n"

@@ -277,8 +277,21 @@ def _collect_group_slices(
             continue
 
         group_path = parent_path + (group_name,)
+        slice_start = index
+        while slice_start - 1 >= start:
+            prev = lines[slice_start - 1].rstrip("\n")
+            bare = prev.strip()
+            prev_indent = len(prev) - len(prev.lstrip(" "))
+            if (
+                bare.startswith("#")
+                and prev_indent == item_indent
+                and not _DISABLED_ITEM_RE.match(prev)
+            ):
+                slice_start -= 1
+                continue
+            break
         group_slices[group_path] = ManifestSlice(
-            body=_build_group_manifest_slice(lines[index:item_end], item_indent),
+            body=_build_group_manifest_slice(lines[slice_start:item_end], item_indent),
             line=start_line + index,
         )
         child_range = _find_components_range(
