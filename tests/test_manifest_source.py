@@ -176,3 +176,28 @@ components:
         "current ad-hoc extraction to replace",
     ]
     assert [len(leaf["members"]["files"]) for leaf in leaves] == [2, 1]
+
+
+def test_outline_finds_members_on_bare_unnamed_component(tmp_path: Path) -> None:
+    # `- files:` with no `name:`/`group:`/`set:` key puts the member list key
+    # directly on the item's dash line rather than on its own line.
+    path = tmp_path / "manifest.yaml"
+    path.write_text(
+        """components:
+  - files:
+      - a.md
+      - b.md
+  - name: named
+    files:
+      - c.md
+""",
+        encoding="utf-8",
+    )
+
+    source = load_manifest_source(path)
+    assert source.source_format is not None
+    leaves = list(iter_active_leaves(source.source_format.outline))
+    assert leaves[0]["name"] is None
+    assert len(leaves[0]["members"]["files"]) == 2
+    assert leaves[1]["name"] == "named"
+    assert len(leaves[1]["members"]["files"]) == 1

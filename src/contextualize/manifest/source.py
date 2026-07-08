@@ -647,7 +647,9 @@ def _parse_all_member_lists(
 ) -> dict[str, list[dict[str, Any]]]:
     members: dict[str, list[dict[str, Any]]] = {}
     for key in _MEMBER_KEYS:
-        list_range = _find_named_list_range(lines, start + 1, end, key, indent)
+        list_range = _first_line_member_list_range(
+            lines, start, end, key, indent
+        ) or _find_named_list_range(lines, start + 1, end, key, indent)
         if list_range is None:
             continue
         list_start, list_end = list_range
@@ -658,6 +660,20 @@ def _parse_all_member_lists(
         if parsed:
             members[key] = parsed
     return members
+
+
+def _first_line_member_list_range(
+    lines: list[str],
+    start: int,
+    end: int,
+    key: str,
+    indent: int,
+) -> tuple[int, int] | None:
+    """Handle a bare (unnamed) component whose dash is `- files:` itself."""
+    line = lines[start].rstrip("\n")
+    if not re.match(rf"^ *-\s*{key}\s*:\s*(?:#.*)?$", line):
+        return None
+    return start + 1, _find_key_block_end(lines, start + 1, end, indent)
 
 
 def _find_named_list_range(
