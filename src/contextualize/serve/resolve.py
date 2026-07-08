@@ -392,6 +392,28 @@ def spec_alias(entry: Any) -> str | None:
     return None
 
 
+def manifest_base_dir(handle: ManifestHandle) -> str:
+    cfg: dict[str, Any] = {}
+    if handle.source is not None and isinstance(handle.source.data, dict):
+        raw_cfg = handle.source.data.get("config")
+        if isinstance(raw_cfg, dict):
+            cfg = raw_cfg
+    root = cfg.get("root")
+    if isinstance(root, str) and root:
+        return os.path.abspath(os.path.expanduser(root))
+    manifest_cwd = handle.source.manifest_cwd if handle.source is not None else None
+    return os.path.abspath(manifest_cwd or os.getcwd())
+
+
+def resolve_live_spec(handle: ManifestHandle, raw_spec: str) -> str:
+    if is_external_target(raw_spec):
+        return raw_spec
+    candidate = Path(os.path.expanduser(raw_spec))
+    if candidate.is_absolute():
+        return str(candidate)
+    return str(Path(manifest_base_dir(handle)) / candidate)
+
+
 def slugify(text: str) -> str:
     stem = Path(text.split("::", 1)[0]).stem or text
     cleaned = _SLUG_RE.sub("-", stem).strip("-").lower()

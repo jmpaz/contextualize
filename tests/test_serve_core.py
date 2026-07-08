@@ -152,14 +152,16 @@ def test_cat_gathers_group_and_member_with_adjacency(monkeypatch, grammar_dir, e
 
     whole = cat_selector(f"{origin}:content.alpha")
     assert whole["state"] == "ok"
-    assert whole["specs"] == ["a.md", "b.md"]
+    assert whole["specs"] == [str(grammar_dir / "a.md"), str(grammar_dir / "b.md")]
     assert whole["payload"] == "live-source"
 
     group = cat_selector(f"{origin}:content")
-    assert sorted(group["specs"]) == ["a.md", "b.md", "c.md"]
+    assert sorted(group["specs"]) == sorted(
+        str(grammar_dir / name) for name in ("a.md", "b.md", "c.md")
+    )
 
     member = cat_selector(f"{origin}:content.alpha.a", around=1)
-    assert member["specs"] == ["a.md"]
+    assert member["specs"] == [str(grammar_dir / "a.md")]
     assert "a.md" in member["adjacency"]["text"]
     assert member["adjacency"]["line_start"] <= member["adjacency"]["line_end"]
 

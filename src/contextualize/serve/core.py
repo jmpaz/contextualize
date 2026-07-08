@@ -23,6 +23,7 @@ from .resolve import (
     component_members,
     load_manifest_handle,
     parse_selector,
+    resolve_live_spec,
     resolve_target,
     spec_alias,
     spec_text,
@@ -337,9 +338,9 @@ def _index_entries_for(handle: ManifestHandle, dotted_path: tuple[str, ...]) -> 
 
 
 def _one_member(
-    node: dict[str, Any], key: str, position: int, entry: Any
+    node: dict[str, Any], key: str, position: int, entry: Any, handle: ManifestHandle
 ) -> tuple[list[dict[str, Any]], list[str], str, tuple[int, int] | None]:
-    spec = spec_text(entry)
+    spec = resolve_live_spec(handle, spec_text(entry))
     member = {"key": key, "spec": spec, "alias": spec_alias(entry), "payload": "live-source"}
     item = _member_outline_item(node, key, position)
     span = (item["line_start"], item["line_end"]) if item else None
@@ -382,10 +383,11 @@ def _gather_leaf(
     members = []
     specs = []
     for key, _position, entry in component_members(comp):
+        resolved_spec = resolve_live_spec(handle, spec_text(entry))
         members.append(
-            {"key": key, "spec": spec_text(entry), "alias": spec_alias(entry), "payload": "live-source"}
+            {"key": key, "spec": resolved_spec, "alias": spec_alias(entry), "payload": "live-source"}
         )
-        specs.append(spec_text(entry))
+        specs.append(resolved_spec)
     return members, specs, "live-source", span
 
 
@@ -475,7 +477,7 @@ def cat_selector(
         members, specs, payload, span = _gather_group(target.node, target.dotted_path, handle)
     elif target.kind == "member":
         key, position, entry = target.member
-        members, specs, payload, span = _one_member(target.node, key, position, entry)
+        members, specs, payload, span = _one_member(target.node, key, position, entry, handle)
     else:
         members, specs, payload, span = _gather_leaf(target.node, target.dotted_path, target.comp, handle)
 
@@ -668,6 +670,8 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
     name = handle.registry_name or handle.display_name
     hydration = _latest_hydration_status(handle.registry_name, status_path)
     result: dict[str, Any] = {
+        "selector": name,
+        "origin": _origin_block(handle),
         "name": name,
         "manifest_path": str(handle.manifest_path) if handle.manifest_path else None,
         "context_dir": str(handle.context_dir) if handle.context_dir else None,
@@ -713,15 +717,10 @@ def _context_status(
 ) -> dict[str, Any]:
     handle = load_manifest_handle(name, registry=registry, registry_path=registry_path, cwd=cwd)
     if handle is None:
-        return {
-            "name": name,
-            "state": "not-found",
-            "detail": "Registry entry could not be resolved.",
-            "next_steps": NEXT_STEPS["not-found"],
-        }
+        not_found = _not_found(name, name)
+        return {**not_found, "name": name, "detail": "Registry entry could not be resolved."}
     if handle.source is None:
-        base = _unresolvable_source(handle)
-        return {"name": name, **{k: v for k, v in base.items() if k not in ("selector", "origin", "node")}}
+        return {**_unresolvable_source(handle), "name": name}
     return _full_status(handle, status_path=status_path)
 
 

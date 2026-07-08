@@ -18,8 +18,11 @@ COMMAND_GROUPS = (
     ("Sources", ("cat", "map", "shell", "paste")),
     ("Manifest", ("hydrate", "payload")),
     ("Context Registry", ("contexts",)),
+    ("Serve", ("show", "links", "status", "serve")),
     ("Plugins", ("plugins", "auth")),
 )
+
+_SERVE_STATE_EXIT_NONZERO = {"not-found", "unresolvable-source"}
 HELP_COL_MAX = 30
 HELP_COL_SPACING = 2
 
@@ -2447,6 +2450,13 @@ def hydrate_cmd(
     is_flag=True,
     help="Skip processing of images and video files.",
 )
+@click.option(
+    "--around",
+    type=int,
+    default=None,
+    help="Include N lines of authored adjacency (manifest source/comments) around each context selector.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
 @_video_frame_options
 @click.pass_context
 def cat_cmd(
@@ -2478,6 +2488,8 @@ def cat_cmd(
     cache_ttl,
     cache_only,
     skip_media,
+    around,
+    json_output,
     **extra_params,
 ):
     """
@@ -2631,6 +2643,26 @@ def cat_cmd(
             expanded_all_paths.extend(brace_expand(p))
         else:
             expanded_all_paths.append(p)
+
+    selector_cat_results: list[dict] = []
+    if any(":" in p for p in expanded_all_paths):
+        from .serve.core import cat_selector as _cat_selector
+
+        spliced_paths = []
+        for p in expanded_all_paths:
+            if ":" not in p:
+                spliced_paths.append(p)
+                continue
+            selector_result = _cat_selector(p, around=around, cwd=os.getcwd())
+            if selector_result["state"] == "not-found" and selector_result["origin"]["kind"] == "unknown":
+                spliced_paths.append(p)
+                continue
+            selector_cat_results.append(selector_result)
+            if selector_result["state"] != "ok":
+                detail = selector_result.get("detail") or selector_result["state"]
+                raise click.ClickException(f"{p}: {detail}")
+            spliced_paths.extend(selector_result["specs"])
+        expanded_all_paths = spliced_paths
 
     def render_listing_targets(targets: list[str]) -> str:
         if not targets:
@@ -2872,7 +2904,115 @@ def cat_cmd(
         )
         ctx.obj["trace_output"] = trace_output
 
+    if selector_cat_results and around is not None:
+        from .serve.render import render_cat_adjacency
+
+        adjacency_blocks = [
+            block
+            for r in selector_cat_results
+            if (block := render_cat_adjacency(r)) is not None
+        ]
+        if adjacency_blocks:
+            result = result + "\n\n" + "\n\n".join(adjacency_blocks)
+
+    if json_output:
+        click.echo(json.dumps({"content": result, "selectors": selector_cat_results}, indent=2))
+        ctx.exit()
+
     return result
+
+
+def _emit_serve_result(ctx, result, json_output: bool, render) -> None:
+    if json_output:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(render(result))
+    if result.get("state") in _SERVE_STATE_EXIT_NONZERO:
+        ctx.exit(1)
+
+
+@cli.command("show")
+@click.argument("selector", required=False)
+@click.option("--depth", type=int, default=None, help="Limit nested group expansion to N levels.")
+@click.option(
+    "--registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Context registry path (default: XDG contextualize/contexts.json).",
+)
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.pass_context
+def show_cmd(ctx, selector, depth, registry, json_output) -> None:
+    """Render a context/manifest as authored: components, groups, and sets
+    in order, comments as marginalia, disabled members visibly off."""
+    if not selector:
+        click.echo(ctx.get_help())
+        ctx.exit()
+
+    from .serve.core import show as query_show
+    from .serve.render import render_show
+
+    result = query_show(selector, depth=depth, registry_path=registry, cwd=os.getcwd())
+    _emit_serve_result(ctx, result, json_output, render_show)
+
+
+@cli.command("links")
+@click.argument("selector", required=False)
+@click.option("--in", "direction_in", is_flag=True, help="Show who cites this context.")
+@click.option("--out", "direction_out", is_flag=True, help="Show what this context cites.")
+@click.option(
+    "--registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Context registry path (default: XDG contextualize/contexts.json).",
+)
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.pass_context
+def links_cmd(ctx, selector, direction_in, direction_out, registry, json_output) -> None:
+    """The connective tissue between contexts: who cites this one (--in)
+    and what it cites (--out). Both directions by default."""
+    if not selector:
+        click.echo(ctx.get_help())
+        ctx.exit()
+
+    if direction_in and direction_out:
+        direction = "both"
+    elif direction_in:
+        direction = "in"
+    elif direction_out:
+        direction = "out"
+    else:
+        direction = "both"
+
+    from .serve.core import links as query_links
+    from .serve.render import render_links
+
+    result = query_links(selector, direction=direction, registry_path=registry, cwd=os.getcwd())
+    _emit_serve_result(ctx, result, json_output, render_links)
+
+
+@cli.command("status")
+@click.argument("selector", required=False)
+@click.option(
+    "--registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Context registry path (default: XDG contextualize/contexts.json).",
+)
+@click.option(
+    "--status",
+    "status_path",
+    type=click.Path(dir_okay=False),
+    help="Context hydration status path (default: XDG contextualize/contexts/status.json).",
+)
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.pass_context
+def status_cmd(ctx, selector, registry, status_path, json_output) -> None:
+    """Freshness and drift, per context or registry-wide: hydration state,
+    cache age, per-source resolution, and how the composition has drifted
+    from its territory."""
+    from .serve.core import status as query_status
+    from .serve.render import render_status
+
+    result = query_status(selector, registry_path=registry, status_path=status_path, cwd=os.getcwd())
+    _emit_serve_result(ctx, result, json_output, render_status)
 
 
 @cli.command("paste")
