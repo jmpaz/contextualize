@@ -409,6 +409,7 @@ def _find_item_end(lines: list[str], start: int, end: int, parent_indent: int) -
 
 
 def _first_item_indent(lines: list[str], start: int, end: int) -> int | None:
+    disabled_fallback: int | None = None
     for index in range(start, end):
         raw = lines[index].rstrip("\n")
         stripped = raw.strip()
@@ -418,9 +419,13 @@ def _first_item_indent(lines: list[str], start: int, end: int) -> int | None:
         if m:
             return len(m.group("indent"))
         if stripped.startswith("#"):
+            if disabled_fallback is None:
+                disabled_match = _DISABLED_ITEM_RE.match(raw)
+                if disabled_match:
+                    disabled_fallback = len(disabled_match.group("indent"))
             continue
         return None
-    return None
+    return disabled_fallback
 
 
 def _parse_component_list(
