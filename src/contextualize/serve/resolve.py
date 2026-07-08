@@ -18,9 +18,7 @@ from typing import Any
 
 from ..manifest.contexts import ContextEntry, load_context_registry
 from ..manifest.manifest import normalize_components
-from ..manifest.source import ManifestSource, load_manifest_source
-
-_MEMBER_KEYS = ("files", "repos", "manifests")
+from ..manifest.source import MEMBER_KEYS, ManifestSource, load_manifest_source
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
 
@@ -432,7 +430,7 @@ def slugify(text: str) -> str:
 
 def component_members(comp: dict[str, Any]) -> list[tuple[str, int, Any]]:
     members: list[tuple[str, int, Any]] = []
-    for key in _MEMBER_KEYS:
+    for key in MEMBER_KEYS:
         raw_list = comp.get(key)
         if not isinstance(raw_list, list):
             continue
@@ -468,7 +466,7 @@ def disabled_member_slug(raw: str) -> str:
 
 
 def find_disabled_member(node: dict[str, Any], token: str) -> tuple[str, dict[str, Any]] | None:
-    for key in _MEMBER_KEYS:
+    for key in MEMBER_KEYS:
         for item in node.get("members", {}).get(key, []):
             if item.get("disabled") and disabled_member_slug(item.get("raw", "")) == token:
                 return key, item

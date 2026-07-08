@@ -40,7 +40,7 @@ _FENCE_RE = re.compile(
     r"(?ms)^```(?P<label>[A-Za-z0-9_-]*)[^\n]*\n(?P<body>.*?)^```[ \t]*$"
 )
 
-_MEMBER_KEYS = ("files", "repos", "manifests")
+MEMBER_KEYS = ("files", "repos", "manifests")
 _COMPONENT_KEY_NAMES = ("name", "group", "set")
 _DASH_ITEM_RE = re.compile(r"^(?P<indent> *)-(?P<rest>.*)$")
 _DISABLED_ITEM_RE = re.compile(r"^(?P<indent> *)#[ \t]*-[ \t]+(?P<rest>.*)$")
@@ -651,7 +651,7 @@ def _parse_all_member_lists(
     start_line: int,
 ) -> dict[str, list[dict[str, Any]]]:
     members: dict[str, list[dict[str, Any]]] = {}
-    for key in _MEMBER_KEYS:
+    for key in MEMBER_KEYS:
         list_range = _first_line_member_list_range(
             lines, start, end, key, indent
         ) or _find_named_list_range(lines, start + 1, end, key, indent)

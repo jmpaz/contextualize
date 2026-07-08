@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..manifest.source import MEMBER_KEYS
 from ..manifest.contexts import (
     ContextEntry,
     default_context_registry_path,
@@ -57,8 +58,6 @@ NEXT_STEPS = {
         "Run `contextualize contexts hydrate <name>` to refresh.",
     ],
 }
-
-_MEMBER_KEYS = ("files", "repos", "manifests")
 
 
 def _age_seconds(path: Path) -> float | None:
@@ -125,6 +124,14 @@ def _unresolvable_source(handle: ManifestHandle) -> dict[str, Any]:
     }
 
 
+def _next_steps(state: str, handle: ManifestHandle) -> list[str]:
+    name = handle.registry_name or handle.origin
+    return [
+        step.replace("<name>", name).replace("<origin>", handle.origin)
+        for step in NEXT_STEPS.get(state, NEXT_STEPS["not-found-node"])
+    ]
+
+
 def _node_path_segment(node: dict[str, Any]) -> str:
     name = node.get("name")
     if isinstance(name, str) and name:
@@ -152,8 +159,8 @@ def _render_members(
 ) -> dict[str, list[dict[str, Any]]]:
     rendered: dict[str, list[dict[str, Any]]] = {}
     node_members = node.get("members", {})
-    comp_lists = {key: (comp.get(key) if comp else None) or [] for key in _MEMBER_KEYS}
-    for key in _MEMBER_KEYS:
+    comp_lists = {key: (comp.get(key) if comp else None) or [] for key in MEMBER_KEYS}
+    for key in MEMBER_KEYS:
         items = node_members.get(key, [])
         if not items:
             continue
@@ -288,7 +295,7 @@ def show(
     result = _base_result(handle, selector)
 
     if target.kind == "not-found":
-        result.update(node=None, state="not-found", detail=target.detail, next_steps=NEXT_STEPS["not-found-node"])
+        result.update(node=None, state="not-found", detail=target.detail, next_steps=_next_steps("not-found-node", handle))
         return result
 
     if target.kind == "root":
@@ -301,7 +308,7 @@ def show(
             ],
         }
         state, detail = _manifest_state(handle)
-        result.update(state=state, detail=detail, next_steps=NEXT_STEPS.get(state, []))
+        result.update(state=state, detail=detail, next_steps=_next_steps(state, handle) if state in NEXT_STEPS else [])
         return result
 
     if target.kind == "disabled":
@@ -312,7 +319,7 @@ def show(
             result["node"] = _render_node(target.node, target.dotted_path, handle, depth)
         else:
             result["node"] = None
-        result.update(state="disabled", detail=target.detail, next_steps=NEXT_STEPS["disabled"])
+        result.update(state="disabled", detail=target.detail, next_steps=_next_steps("disabled", handle))
         return result
 
     if target.kind == "member":
@@ -323,7 +330,7 @@ def show(
 
     result["node"] = _render_node(target.require_node(), target.dotted_path, handle, depth)
     state, detail = result["node"]["state"], result["node"].get("detail")
-    result.update(state=state, detail=detail, next_steps=NEXT_STEPS.get(state, []))
+    result.update(state=state, detail=detail, next_steps=_next_steps(state, handle) if state in NEXT_STEPS else [])
     return result
 
 
@@ -485,19 +492,19 @@ def cat_selector(
             node=None,
             state="not-found",
             detail="cat needs a component selector: name-or-path:component[.member].",
-            next_steps=NEXT_STEPS["not-found-node"],
+            next_steps=_next_steps("not-found-node", handle),
         )
         return result
 
     if target.kind == "not-found":
-        result.update(node=None, state="not-found", detail=target.detail, next_steps=NEXT_STEPS["not-found-node"])
+        result.update(node=None, state="not-found", detail=target.detail, next_steps=_next_steps("not-found-node", handle))
         return result
 
     node = target.require_node()
     result["node"] = {"path": ".".join(target.dotted_path), "kind": node["kind"], "name": node.get("name")}
 
     if target.kind == "disabled":
-        result.update(state="disabled", detail=target.detail, next_steps=NEXT_STEPS["disabled"])
+        result.update(state="disabled", detail=target.detail, next_steps=_next_steps("disabled", handle))
         return result
 
     if target.kind == "group":
@@ -515,7 +522,7 @@ def cat_selector(
 
     if not specs:
         state, detail = _no_specs_state(target)
-        result.update(state=state, detail=detail, next_steps=NEXT_STEPS.get(state, NEXT_STEPS["not-found-node"]))
+        result.update(state=state, detail=detail, next_steps=_next_steps(state, handle))
         return result
 
     if around is not None and span is not None:
@@ -653,7 +660,7 @@ def links(
         result.update(
             state="unhydrated",
             detail="Outbound references are recorded at hydration time.",
-            next_steps=NEXT_STEPS["unhydrated"],
+            next_steps=_next_steps("unhydrated", handle),
         )
         return result
 
@@ -783,7 +790,7 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
             drift=_empty_drift(),
             state="unhydrated",
             detail="Not yet hydrated.",
-            next_steps=NEXT_STEPS["unhydrated"],
+            next_steps=_next_steps("unhydrated", handle),
         )
         return result
 
@@ -801,7 +808,7 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
 
     if drift["any"]:
         state = "stale-cache" if (drift["hydration_stale"] or drift["sources_changed"]) else "dangling-reference"
-        result.update(state=state, detail=_drift_detail(drift), next_steps=NEXT_STEPS["stale-cache"])
+        result.update(state=state, detail=_drift_detail(drift), next_steps=_next_steps("stale-cache", handle))
     else:
         result.update(state="ok", detail=None, next_steps=[])
     return result
