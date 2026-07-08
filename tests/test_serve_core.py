@@ -153,7 +153,7 @@ def test_cat_gathers_group_and_member_with_adjacency(monkeypatch, grammar_dir, e
     whole = cat_selector(f"{origin}:content.alpha")
     assert whole["state"] == "ok"
     assert whole["specs"] == [str(grammar_dir / "a.md"), str(grammar_dir / "b.md")]
-    assert whole["payload"] == "live-source"
+    assert whole["payload"] == "pointer"
 
     group = cat_selector(f"{origin}:content")
     assert sorted(group["specs"]) == sorted(
@@ -166,19 +166,51 @@ def test_cat_gathers_group_and_member_with_adjacency(monkeypatch, grammar_dir, e
     assert member["adjacency"]["line_start"] <= member["adjacency"]["line_end"]
 
 
-def test_cat_prefers_resolved_copy_once_hydrated(monkeypatch, grammar_dir, empty_registry):
+def test_cat_reports_true_payload_kind_once_hydrated(monkeypatch, grammar_dir, empty_registry):
     _isolate(monkeypatch, grammar_dir)
     _hydrate(grammar_dir / "manifest.yaml", grammar_dir)
     origin = str(grammar_dir / "manifest.yaml")
 
     result = cat_selector(f"{origin}:content.alpha", cwd=str(grammar_dir))
-    assert result["payload"] == "resolved-copy"
+    assert result["payload"] == "pointer"
     assert all(spec.startswith(str(grammar_dir / ".context")) for spec in result["specs"])
+    assert all(Path(spec).is_symlink() for spec in result["specs"])
 
     fused = cat_selector(f"{origin}:fused", cwd=str(grammar_dir))
-    assert fused["payload"] == "resolved-copy"
+    assert fused["payload"] == "copy"
+    assert not Path(fused["specs"][0]).is_symlink()
     text = Path(fused["specs"][0]).read_text(encoding="utf-8")
     assert "alpha content" in text and "beta content" in text
+
+
+def test_cat_serves_amended_source_through_a_labeled_pointer(monkeypatch, grammar_dir, empty_registry):
+    _isolate(monkeypatch, grammar_dir)
+    _hydrate(grammar_dir / "manifest.yaml", grammar_dir)
+    origin = str(grammar_dir / "manifest.yaml")
+
+    (grammar_dir / "a.md").write_text("alpha content AMENDED\n", encoding="utf-8")
+
+    result = cat_selector(f"{origin}:content.alpha", cwd=str(grammar_dir))
+    assert result["payload"] == "pointer"
+    hydrated_a = next(spec for spec in result["specs"] if spec.endswith("a.md"))
+    assert Path(hydrated_a).is_symlink()
+    assert Path(hydrated_a).read_text(encoding="utf-8") == "alpha content AMENDED\n"
+
+
+def test_cat_copy_mode_hydration_is_labeled_copy(monkeypatch, grammar_dir, empty_registry):
+    _isolate(monkeypatch, grammar_dir)
+    plan = build_hydration_plan(
+        str(grammar_dir / "manifest.yaml"),
+        overrides=HydrateOverrides(copy=True),
+        cwd=str(grammar_dir),
+    )
+    apply_hydration_plan(plan)
+    origin = str(grammar_dir / "manifest.yaml")
+
+    result = cat_selector(f"{origin}:content.alpha", cwd=str(grammar_dir))
+    assert result["payload"] == "copy"
+    hydrated_a = next(spec for spec in result["specs"] if spec.endswith("a.md"))
+    assert not Path(hydrated_a).is_symlink()
 
 
 def test_cat_disabled_member_reports_disabled_not_missing(monkeypatch, grammar_dir, empty_registry):

@@ -90,7 +90,7 @@ def test_unhydrated_is_root_level_show_status_and_links_out(monkeypatch, tmp_pat
 
     cat_whole = cat_selector(f"{origin}:m", cwd=str(tmp_path))
     assert cat_whole["state"] == "ok", "cat draws live substance without hydration"
-    assert cat_whole["payload"] == "live-source"
+    assert cat_whole["payload"] == "pointer"
 
 
 def test_empty_group(monkeypatch, tmp_path, empty_registry):

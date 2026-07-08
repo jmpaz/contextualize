@@ -1746,10 +1746,10 @@ components:
     edge = out_edges[0]
     assert edge["form"] == "recognized"
     assert edge["detected_via"] == "frontmatter-tag"
-    assert edge["payload"] == "copy"
+    assert edge["payload"] == "pointer"
     assert edge["context_path"] == "refs/ref-note.md"
     # the payload is the authored note itself, hydrated like any other file
-    assert (context_dir / "refs" / "ref-note.md").exists()
+    assert (context_dir / "refs" / "ref-note.md").is_symlink()
     assert (context_dir / "refs" / "plain.md").exists()
 
 

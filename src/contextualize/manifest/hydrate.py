@@ -881,6 +881,9 @@ def build_hydration_plan_data(
                             item=item,
                             context_path=rel_path,
                             registry_sources=get_registry_sources,
+                            ranges=ranges,
+                            symbols=symbols,
+                            copy_files=context_cfg["copy"],
                         )
                     plugin_identity = _plugin_pending_key(item, ranges, symbols)
                     if plugin_identity is not None:
@@ -1694,6 +1697,9 @@ def _record_recognized_reference(
     item: ResolvedItem,
     context_path: Path,
     registry_sources: Callable[[], set[Path]],
+    ranges: list[tuple[int, int]] | None,
+    symbols: list[str] | None,
+    copy_files: bool,
 ) -> None:
     if item.source_type != "local" or not item.source_full_path:
         return
@@ -1703,6 +1709,7 @@ def _record_recognized_reference(
     detected_via = _detect_manifest_reference(path, registry_sources)
     if detected_via is None:
         return
+    payload = "pointer" if _will_symlink_local(item, ranges, symbols, copy_files) else "copy"
     edges.append(
         {
             "component": component_name,
@@ -1710,7 +1717,7 @@ def _record_recognized_reference(
             "spec": item.manifest_spec,
             "target_path": str(path),
             "detected_via": detected_via,
-            "payload": "copy",
+            "payload": payload,
             "context_path": context_path.as_posix(),
         }
     )
@@ -2981,6 +2988,21 @@ def _plugin_rank(item: ResolvedItem, encounter_index: int) -> tuple[int, int]:
     return (rank, encounter_index)
 
 
+def _will_symlink_local(
+    item: ResolvedItem,
+    ranges: list[tuple[int, int]] | None,
+    symbols: list[str] | None,
+    copy_files: bool,
+) -> bool:
+    return (
+        bool(item.source_full_path)
+        and not ranges
+        and not symbols
+        and item.source_type == "local"
+        and not copy_files
+    )
+
+
 def _queue_hydrated_file(
     dest: Path,
     item: ResolvedItem,
@@ -2995,7 +3017,7 @@ def _queue_hydrated_file(
 ) -> None:
     source = Path(item.source_full_path) if item.source_full_path else None
     if source is not None and not ranges and not symbols:
-        if item.source_type == "local" and not copy_files:
+        if _will_symlink_local(item, ranges, symbols, copy_files):
             files_to_symlink.append((dest, source))
             return
         if item.source_type in {"local", "git"}:

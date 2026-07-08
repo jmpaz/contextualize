@@ -337,14 +337,18 @@ def _index_entries_for(handle: ManifestHandle, dotted_path: tuple[str, ...]) -> 
     return entries if isinstance(entries, list) else None
 
 
+def _payload_kind_for_hydrated_path(path: Path) -> str:
+    return "pointer" if path.is_symlink() else "copy"
+
+
 def _one_member(
     node: dict[str, Any], key: str, position: int, entry: Any, handle: ManifestHandle
 ) -> tuple[list[dict[str, Any]], list[str], str, tuple[int, int] | None]:
     spec = resolve_live_spec(handle, spec_text(entry))
-    member = {"key": key, "spec": spec, "alias": spec_alias(entry), "payload": "live-source"}
+    member = {"key": key, "spec": spec, "alias": spec_alias(entry), "payload": "pointer"}
     item = _member_outline_item(node, key, position)
     span = (item["line_start"], item["line_end"]) if item else None
-    return [member], [spec], "live-source", span
+    return [member], [spec], "pointer", span
 
 
 def _gather_leaf(
@@ -360,35 +364,37 @@ def _gather_leaf(
                     "key": "set",
                     "spec": str(fused_path),
                     "alias": None,
-                    "payload": "resolved-copy",
+                    "payload": "copy",
                 }
-                return [member], [str(fused_path)], "resolved-copy", span
+                return [member], [str(fused_path)], "copy", span
 
     entries = _index_entries_for(handle, dotted_path)
     if entries:
         members = []
         specs = []
+        payload_kinds: set[str] = set()
         for entry in entries:
             context_path = entry.get("context_path")
             if not context_path or handle.context_dir is None:
                 continue
             absolute = handle.context_dir / context_path
-            members.append(
-                {"key": "resolved", "spec": str(absolute), "alias": None, "payload": "resolved-copy"}
-            )
+            kind = _payload_kind_for_hydrated_path(absolute)
+            payload_kinds.add(kind)
+            members.append({"key": "resolved", "spec": str(absolute), "alias": None, "payload": kind})
             specs.append(str(absolute))
         if specs:
-            return members, specs, "resolved-copy", span
+            payload = payload_kinds.pop() if len(payload_kinds) == 1 else "mixed"
+            return members, specs, payload, span
 
     members = []
     specs = []
     for key, _position, entry in component_members(comp):
         resolved_spec = resolve_live_spec(handle, spec_text(entry))
         members.append(
-            {"key": key, "spec": resolved_spec, "alias": spec_alias(entry), "payload": "live-source"}
+            {"key": key, "spec": resolved_spec, "alias": spec_alias(entry), "payload": "pointer"}
         )
         specs.append(resolved_spec)
-    return members, specs, "live-source", span
+    return members, specs, "pointer", span
 
 
 def _iter_leaves_with_path(nodes, prefix: tuple[str, ...]):
@@ -416,7 +422,7 @@ def _gather_group(
         members.extend(leaf_members)
         specs.extend(leaf_specs)
         payload_kinds.add(payload_kind)
-    payload = payload_kinds.pop() if len(payload_kinds) == 1 else ("mixed" if payload_kinds else "live-source")
+    payload = payload_kinds.pop() if len(payload_kinds) == 1 else ("mixed" if payload_kinds else "pointer")
     return members, specs, payload, (node["line_start"], node["line_end"])
 
 
