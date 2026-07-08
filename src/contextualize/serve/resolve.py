@@ -243,6 +243,7 @@ def resolve_node(outline: list[dict[str, Any]], tokens: tuple[str, ...]) -> Node
 
     level = outline
     path: list[str] = []
+    match: dict[str, Any] | None = None
     for index, token in enumerate(tokens):
         match = next((node for node in level if node.get("name") == token), None)
         if match is None:
@@ -272,6 +273,7 @@ def resolve_node(outline: list[dict[str, Any]], tokens: tuple[str, ...]) -> Node
             found=True,
             blocked_disabled=False,
         )
+    assert match is not None, "non-empty tokens ran the loop"
     return NodeLookup(node=match, path=tuple(path), remainder=(), found=True, blocked_disabled=False)
 
 
@@ -296,6 +298,14 @@ class Target:
     member: tuple[str, int, Any] | None
     detail: str | None = None
     disabled_member: tuple[str, dict[str, Any]] | None = None
+
+    def require_node(self) -> dict[str, Any]:
+        assert self.node is not None, f"kind={self.kind!r} resolves to a node"
+        return self.node
+
+    def require_member(self) -> tuple[str, int, Any]:
+        assert self.member is not None, f"kind={self.kind!r} carries a member"
+        return self.member
 
 
 def resolve_target(handle: ManifestHandle, tokens: tuple[str, ...]) -> Target:

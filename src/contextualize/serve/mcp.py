@@ -210,6 +210,8 @@ def _handle_message(
     if method == "tools/call":
         tool_name = params.get("name")
         arguments = params.get("arguments") or {}
+        if not isinstance(tool_name, str):
+            return respond(_tool_result({"error": "tools/call requires a string 'name'"}, is_error=True))
         try:
             payload = dispatch_tool(
                 tool_name, arguments, cwd=cwd, registry_path=registry_path, status_path=status_path

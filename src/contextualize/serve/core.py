@@ -316,12 +316,12 @@ def show(
         return result
 
     if target.kind == "member":
-        key, position, entry = target.member
-        result["node"] = _render_member(target.node, key, position, entry)
+        key, position, entry = target.require_member()
+        result["node"] = _render_member(target.require_node(), key, position, entry)
         result.update(state="ok", detail=None, next_steps=[])
         return result
 
-    result["node"] = _render_node(target.node, target.dotted_path, handle, depth)
+    result["node"] = _render_node(target.require_node(), target.dotted_path, handle, depth)
     state, detail = result["node"]["state"], result["node"].get("detail")
     result.update(state=state, detail=detail, next_steps=NEXT_STEPS.get(state, []))
     return result
@@ -437,7 +437,7 @@ def _adjacency_for_span(
 
 def _no_specs_state(target: Target) -> tuple[str, str]:
     if target.kind == "group":
-        state, detail = _group_state(target.node.get("children", []))
+        state, detail = _group_state(target.require_node().get("children", []))
         if state != "ok":
             return state, detail or ""
         return (
@@ -487,19 +487,21 @@ def cat_selector(
         result.update(node=None, state="not-found", detail=target.detail, next_steps=NEXT_STEPS["not-found-node"])
         return result
 
-    result["node"] = {"path": ".".join(target.dotted_path), "kind": target.node["kind"], "name": target.node.get("name")}
+    node = target.require_node()
+    result["node"] = {"path": ".".join(target.dotted_path), "kind": node["kind"], "name": node.get("name")}
 
     if target.kind == "disabled":
         result.update(state="disabled", detail=target.detail, next_steps=NEXT_STEPS["disabled"])
         return result
 
     if target.kind == "group":
-        members, specs, payload, span = _gather_group(target.node, target.dotted_path, handle)
+        members, specs, payload, span = _gather_group(node, target.dotted_path, handle)
     elif target.kind == "member":
-        key, position, entry = target.member
-        members, specs, payload, span = _one_member(target.node, key, position, entry, handle)
+        key, position, entry = target.require_member()
+        members, specs, payload, span = _one_member(node, key, position, entry, handle)
     else:
-        members, specs, payload, span = _gather_leaf(target.node, target.dotted_path, target.comp, handle)
+        assert target.comp is not None, f"kind={target.kind!r} carries a comp"
+        members, specs, payload, span = _gather_leaf(node, target.dotted_path, target.comp, handle)
 
     result["members"] = members
     result["specs"] = specs
@@ -719,6 +721,7 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
         )
         return result
 
+    assert handle.context_dir is not None, "a hydrated handle has a context dir"
     index_path = handle.context_dir / "index.json"
     index_mtime: float | None
     try:
