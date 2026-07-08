@@ -142,9 +142,13 @@ def test_cat_and_links_and_status_tools_match_core(tmp_path: Path) -> None:
     )
 
     cat_payload = responses[0]["result"]["structuredContent"]
-    assert cat_payload == core.cat_selector(
-        "manifest.yaml:alpha", around=1, registry_path=str(registry_path), cwd=str(drive)
+    assert cat_payload == core.draw_substance(
+        core.cat_selector(
+            "manifest.yaml:alpha", around=1, registry_path=str(registry_path), cwd=str(drive)
+        )
     )
+    assert "alpha content" in cat_payload["content"]
+    assert "beta content" in cat_payload["content"]
 
     links_payload = responses[1]["result"]["structuredContent"]
     assert links_payload == core.links("manifest.yaml", registry_path=str(registry_path), cwd=str(drive))
@@ -153,6 +157,31 @@ def test_cat_and_links_and_status_tools_match_core(tmp_path: Path) -> None:
     assert status_payload == core.status(
         "manifest.yaml", registry_path=str(registry_path), cwd=str(drive)
     )
+
+
+def test_cat_designed_state_carries_no_content(tmp_path: Path) -> None:
+    drive = tmp_path / "drive"
+    _write_manifest(drive)
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({"version": 1, "contexts": {}}), encoding="utf-8")
+
+    responses = _run(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "cat", "arguments": {"selector": "manifest.yaml:nowhere"}},
+            }
+        ],
+        cwd=str(drive),
+        registry_path=str(registry_path),
+    )
+    result = responses[0]["result"]
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload["state"] == "not-found"
+    assert "content" not in payload
 
 
 def test_designed_states_are_not_protocol_errors(tmp_path: Path) -> None:

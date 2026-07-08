@@ -2668,6 +2668,13 @@ def cat_cmd(
                 continue
             selector_cat_results.append(selector_result)
             if selector_result["state"] != "ok":
+                if json_output:
+                    click.echo(
+                        json.dumps(
+                            {"content": None, "selectors": selector_cat_results}, indent=2
+                        )
+                    )
+                    ctx.exit(1)
                 detail = selector_result.get("detail") or selector_result["state"]
                 raise click.ClickException(f"{p}: {detail}")
             spliced_paths.extend(selector_result["specs"])

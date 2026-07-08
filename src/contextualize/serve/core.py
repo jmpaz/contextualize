@@ -528,6 +528,17 @@ def cat_selector(
     return result
 
 
+def draw_substance(result: dict[str, Any]) -> dict[str, Any]:
+    """Non-ok results pass through untouched: a designed state is already the
+    complete answer, and inventing content for it would be fabrication."""
+    if result.get("state") != "ok":
+        return result
+    from ..references.factory import create_file_references
+
+    drawn = create_file_references(list(result["specs"]))
+    return {**result, "content": drawn["concatenated"]}
+
+
 def _resolved(path: Path | str) -> str:
     return str(Path(path).resolve(strict=False))
 

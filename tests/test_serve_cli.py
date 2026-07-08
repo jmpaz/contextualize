@@ -161,6 +161,23 @@ def test_cat_selector_failure_is_a_clean_error(tmp_path: Path) -> None:
     assert "nosuch" in str(result.output) + str(result.exception)
 
 
+def test_cat_json_keeps_structured_state_on_failure(tmp_path: Path) -> None:
+    drive = tmp_path / "drive"
+    _write_manifest(drive)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli.cli,
+        ["cat", f"{drive / 'manifest.yaml'}:nosuch", "--json"],
+        env=_isolated_env(tmp_path),
+    )
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["content"] is None
+    assert payload["selectors"][0]["state"] == "not-found"
+    assert payload["selectors"][0]["next_steps"]
+
+
 def test_cat_leaves_non_selector_colon_args_untouched(tmp_path: Path) -> None:
     drive = tmp_path / "drive"
     _write_manifest(drive)

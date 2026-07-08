@@ -117,11 +117,13 @@ def dispatch_tool(
             cwd=cwd,
         )
     if name == "cat":
-        return core.cat_selector(
-            _require_str(arguments, "selector"),
-            around=arguments.get("around"),
-            registry_path=registry_path,
-            cwd=cwd,
+        return core.draw_substance(
+            core.cat_selector(
+                _require_str(arguments, "selector"),
+                around=arguments.get("around"),
+                registry_path=registry_path,
+                cwd=cwd,
+            )
         )
     if name == "links":
         return core.links(
