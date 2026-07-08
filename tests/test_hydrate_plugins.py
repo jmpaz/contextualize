@@ -1604,6 +1604,99 @@ components:
     assert set(index_json["components"].keys()) == {"notes"}
 
 
+def test_hydrate_set_fuses_members_into_one_addressable_file(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    (tmp_path / "a.md").write_text("alpha body", encoding="utf-8")
+    (tmp_path / "b.md").write_text("beta body", encoding="utf-8")
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    path-strategy: by-component
+
+components:
+  - set: jul-7 run
+    files:
+      - a.md  # first note
+      - b.md
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_hydration_plan(
+        str(manifest_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    fused_path = context_dir / "jul-7 run.md"
+    assert fused_path.exists()
+    fused = fused_path.read_text(encoding="utf-8")
+    assert fused.index("alpha body") < fused.index("beta body")
+    assert "--- a.md · first note ---" in fused
+    assert "--- b.md ---" in fused
+
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    set_entries = index_json["components"]["jul-7 run"]
+    assert len(set_entries) == 1
+    assert set_entries[0]["kind"] == "set"
+    assert set_entries[0]["context_path"] == "jul-7 run.md"
+    parts = set_entries[0]["parts"]
+    assert [part["key"] for part in parts] == ["a.md", "b.md"]
+    assert parts[0]["title"] == "first note"
+    assert parts[0]["line_start"] == 1
+    assert parts[1]["line_start"] > parts[0]["line_end"]
+
+    outline_set_node = index_json["outline"][0]
+    assert outline_set_node["kind"] == "set"
+    assert outline_set_node["name"] == "jul-7 run"
+    assert outline_set_node["set"]["context_path"] == "jul-7 run.md"
+    assert outline_set_node["set"]["parts"] == parts
+
+
+def test_hydrate_group_may_contain_set_alongside_plain_component(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    (tmp_path / "a.md").write_text("alpha", encoding="utf-8")
+    (tmp_path / "p.md").write_text("plain", encoding="utf-8")
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    path-strategy: by-component
+
+components:
+  - group: g
+    components:
+      - set: fused
+        files:
+          - a.md
+      - name: plain
+        files:
+          - p.md
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_hydration_plan(
+        str(manifest_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    assert (context_dir / "g" / "fused.md").exists()
+    assert (context_dir / "g" / "plain" / "p.md").exists()
+
+
 def test_hydrate_data_manifest_omits_manifest_source(tmp_path: Path) -> None:
     context_dir = tmp_path / "ctx"
     plan = build_hydration_plan_data(

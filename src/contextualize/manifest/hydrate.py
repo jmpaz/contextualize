@@ -39,10 +39,16 @@ from ..utils import brace_expand, extract_ranges
 from .manifest import (
     GROUP_BASE_KEY,
     GROUP_PATH_KEY,
+    SET_KEY,
     coerce_file_spec,
     normalize_components,
 )
-from .source import ManifestFormat, ManifestSlice, load_manifest_source
+from .source import (
+    ManifestFormat,
+    ManifestSlice,
+    iter_active_leaves,
+    load_manifest_source,
+)
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _SOURCE_IGNORE_PATTERNS = [
@@ -510,9 +516,20 @@ def build_hydration_plan_data(
             context_cfg["agents_text"],
         )
 
+    active_outline_nodes: list[dict[str, Any]] = (
+        list(iter_active_leaves(manifest_format.outline))
+        if manifest_format is not None
+        else []
+    )
+
     log_progress("hydrate", "component", "total", count=len(components))
-    for comp in components:
+    for comp_index, comp in enumerate(components):
         comp_name = comp["name"]
+        outline_node = (
+            active_outline_nodes[comp_index]
+            if comp_index < len(active_outline_nodes)
+            else None
+        )
         log_progress("hydrate", "component", "start", target=comp_name)
         comp_files = comp.get("files")
         comp_repos = comp.get("repos")
@@ -778,44 +795,120 @@ def build_hydration_plan_data(
                 effective_strip_prefix = global_strip_prefix
                 skip_external_root = False
 
-            for (
-                item,
-                content,
-                suffix,
-                ranges,
-                symbols,
-                range_spec,
-                spec_comment,
-                file_opts,
-                spec_root,
-            ) in resolved_items:
-                rel_path, should_write = _resolve_context_path(
-                    comp_name,
-                    item,
-                    suffix,
+            if comp.get(SET_KEY):
+                set_rel_path = _dedupe_path(
+                    _build_set_output_path(
+                        comp_name,
+                        comp.get(GROUP_PATH_KEY),
+                        comp.get(GROUP_BASE_KEY),
+                    ),
                     used_paths,
-                    identity_paths,
-                    context_cfg["path_strategy"],
+                )
+                _ensure_relative(set_rel_path)
+                fused_text, parts = _build_set_fusion(resolved_items, outline_node)
+                files_to_write.append((context_dir / set_rel_path, fused_text))
+                index_components.setdefault(comp_name, []).append(
+                    _build_set_index_entry(set_rel_path, fused_text, parts)
+                )
+                if outline_node is not None:
+                    outline_node["set"] = {
+                        "context_path": set_rel_path.as_posix(),
+                        "parts": parts,
+                    }
+                normalized_files.extend(
+                    _build_manifest_file_entry(
+                        item, range_spec, symbols, spec_comment, file_opts
+                    )
+                    for (
+                        item,
+                        _content,
+                        _suffix,
+                        _ranges,
+                        symbols,
+                        range_spec,
+                        spec_comment,
+                        file_opts,
+                        _spec_root,
+                    ) in resolved_items
+                )
+            else:
+                for (
+                    item,
+                    content,
+                    suffix,
                     ranges,
                     symbols,
-                    component_root=component_root,
-                    use_external_root=use_external_root,
-                    strip_prefix=effective_strip_prefix,
-                    skip_external_root=skip_external_root,
-                    external_root_prefix=spec_root,
-                )
-                plugin_identity = _plugin_pending_key(item, ranges, symbols)
-                if plugin_identity is not None:
-                    plugin_pending.setdefault(plugin_identity, []).append(
-                        _PluginPendingWrite(
-                            rel_path=rel_path,
-                            content=content,
-                            should_write=should_write,
-                            item=item,
-                            encounter_index=plugin_seen_counter,
-                        )
+                    range_spec,
+                    spec_comment,
+                    file_opts,
+                    spec_root,
+                ) in resolved_items:
+                    rel_path, should_write = _resolve_context_path(
+                        comp_name,
+                        item,
+                        suffix,
+                        used_paths,
+                        identity_paths,
+                        context_cfg["path_strategy"],
+                        ranges,
+                        symbols,
+                        component_root=component_root,
+                        use_external_root=use_external_root,
+                        strip_prefix=effective_strip_prefix,
+                        skip_external_root=skip_external_root,
+                        external_root_prefix=spec_root,
                     )
-                    plugin_seen_counter += 1
+                    plugin_identity = _plugin_pending_key(item, ranges, symbols)
+                    if plugin_identity is not None:
+                        plugin_pending.setdefault(plugin_identity, []).append(
+                            _PluginPendingWrite(
+                                rel_path=rel_path,
+                                content=content,
+                                should_write=should_write,
+                                item=item,
+                                encounter_index=plugin_seen_counter,
+                            )
+                        )
+                        plugin_seen_counter += 1
+                        index_components.setdefault(comp_name, []).append(
+                            _build_index_entry(
+                                rel_path,
+                                item,
+                                ranges,
+                                symbols,
+                                content,
+                            )
+                        )
+                        normalized_files.append(
+                            _build_manifest_file_entry(
+                                item,
+                                range_spec,
+                                symbols,
+                                spec_comment,
+                                file_opts,
+                            )
+                        )
+                        continue
+                    if should_write:
+                        _queue_hydrated_file(
+                            context_dir / rel_path,
+                            item,
+                            content,
+                            copy_files=context_cfg["copy"],
+                            ranges=ranges,
+                            symbols=symbols,
+                            files_to_write=files_to_write,
+                            files_to_copy=files_to_copy,
+                            files_to_symlink=files_to_symlink,
+                        )
+                        file_ts = _item_file_ts(item)
+                        if file_ts:
+                            file_timestamps[context_dir / rel_path] = file_ts
+                        dir_ts = _item_dir_ts(item)
+                        if dir_ts:
+                            file_timestamps.setdefault(
+                                (context_dir / rel_path).parent, dir_ts
+                            )
                     index_components.setdefault(comp_name, []).append(
                         _build_index_entry(
                             rel_path,
@@ -834,45 +927,6 @@ def build_hydration_plan_data(
                             file_opts,
                         )
                     )
-                    continue
-                if should_write:
-                    _queue_hydrated_file(
-                        context_dir / rel_path,
-                        item,
-                        content,
-                        copy_files=context_cfg["copy"],
-                        ranges=ranges,
-                        symbols=symbols,
-                        files_to_write=files_to_write,
-                        files_to_copy=files_to_copy,
-                        files_to_symlink=files_to_symlink,
-                    )
-                    file_ts = _item_file_ts(item)
-                    if file_ts:
-                        file_timestamps[context_dir / rel_path] = file_ts
-                    dir_ts = _item_dir_ts(item)
-                    if dir_ts:
-                        file_timestamps.setdefault(
-                            (context_dir / rel_path).parent, dir_ts
-                        )
-                index_components.setdefault(comp_name, []).append(
-                    _build_index_entry(
-                        rel_path,
-                        item,
-                        ranges,
-                        symbols,
-                        content,
-                    )
-                )
-                normalized_files.append(
-                    _build_manifest_file_entry(
-                        item,
-                        range_spec,
-                        symbols,
-                        spec_comment,
-                        file_opts,
-                    )
-                )
 
         if comp_manifests:
             from .contexts import ensure_manifest_link_hydrated
@@ -1389,10 +1443,14 @@ def _build_normalized_component(comp: dict[str, Any], name: str) -> dict[str, An
     normalized = {
         k: v
         for k, v in comp.items()
-        if k not in {"files", "repos", "name", GROUP_PATH_KEY, GROUP_BASE_KEY}
+        if k
+        not in {"files", "repos", "name", GROUP_PATH_KEY, GROUP_BASE_KEY, SET_KEY}
         and v is not None
     }
-    normalized["name"] = name
+    if comp.get(SET_KEY):
+        normalized["set"] = name
+    else:
+        normalized["name"] = name
     return normalized
 
 
@@ -2377,6 +2435,93 @@ def _build_component_root(
         name = base_name if isinstance(base_name, str) and base_name else component_name
         return Path(*parts, name)
     return Path(component_name)
+
+
+def _build_set_output_path(
+    component_name: str,
+    group_path: Any | None,
+    base_name: Any | None,
+) -> Path:
+    if group_path:
+        parts = [group_path] if isinstance(group_path, str) else list(group_path)
+        name = base_name if isinstance(base_name, str) and base_name else component_name
+        return Path(*parts, f"{name}.md")
+    return Path(f"{component_name}.md")
+
+
+def _format_set_part_header(item: ResolvedItem, title: str | None) -> str:
+    bits = [item.manifest_spec]
+    if title:
+        bits.append(title)
+    timestamp = item.source_modified or item.source_created
+    if timestamp:
+        bits.append(timestamp)
+    return f"--- {' · '.join(bits)} ---"
+
+
+def _set_member_titles(outline_node: dict[str, Any] | None) -> list[str | None]:
+    if outline_node is None:
+        return []
+    files = outline_node.get("members", {}).get("files", [])
+    return [member["inline_comment"] for member in files if not member["disabled"]]
+
+
+def _build_set_fusion(
+    resolved_items: list[
+        tuple[
+            ResolvedItem,
+            str,
+            str | None,
+            list[tuple[int, int]] | None,
+            list[str] | None,
+            list[tuple[int, int]] | None,
+            str | None,
+            dict[str, Any],
+            str | None,
+        ]
+    ],
+    outline_node: dict[str, Any] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    member_titles = _set_member_titles(outline_node)
+    parts: list[dict[str, Any]] = []
+    blocks: list[str] = []
+    line_cursor = 1
+    for order, (item, content, *_rest) in enumerate(resolved_items):
+        spec_comment = _rest[4]
+        title = spec_comment or (
+            member_titles[order] if order < len(member_titles) else None
+        )
+        header = _format_set_part_header(item, title)
+        body = content if content.endswith("\n") else f"{content}\n"
+        block = f"{header}\n\n{body}"
+        line_start = line_cursor
+        line_end = line_start + block.count("\n") - 1
+        line_cursor = line_end + 2
+        blocks.append(block)
+        parts.append(
+            {
+                "order": order,
+                "key": item.manifest_spec,
+                "title": title,
+                "source_created": item.source_created,
+                "source_modified": item.source_modified,
+                "line_start": line_start,
+                "line_end": line_end,
+            }
+        )
+    return "\n".join(blocks), parts
+
+
+def _build_set_index_entry(
+    rel_path: Path, fused_text: str, parts: list[dict[str, Any]]
+) -> dict[str, Any]:
+    digest = hashlib.sha256(fused_text.encode("utf-8")).hexdigest()
+    return {
+        "context_path": rel_path.as_posix(),
+        "kind": "set",
+        "hash": f"sha256:{digest}",
+        "parts": parts,
+    }
 
 
 def _resolve_context_path(
