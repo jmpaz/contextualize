@@ -24,6 +24,7 @@ from ..plugins import (
 from ..plugins.reference import PluginReference
 from ..progress import log_progress
 from ..references import URLReference, create_file_references
+from ..references.address import split_mark_address
 from ..runtime import get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
@@ -41,6 +42,7 @@ from .manifest import (
     GROUP_PATH_KEY,
     SET_KEY,
     coerce_file_spec,
+    coerce_mark_spec,
     normalize_components,
 )
 from .source import (
@@ -624,6 +626,7 @@ def build_hydration_plan_data(
                     dict[str, Any],
                     str | None,
                     bool,
+                    dict[str, Any] | None,
                 ]
             ] = []
             spec_jobs = get_payload_spec_jobs()
@@ -638,6 +641,8 @@ def build_hydration_plan_data(
                     bool,
                 ],
             ] = {}
+            files_count = len(comp_files) if comp_files else 0
+            outline_file_members = _enabled_outline_file_members(outline_node)
 
             for spec_index, (file_spec, force_git, spec_root) in enumerate(
                 all_specs, 1
@@ -646,8 +651,10 @@ def build_hydration_plan_data(
                 spec_comment = _parse_comment(file_opts.pop("comment", None))
                 range_value = file_opts.pop("range", None)
                 symbols_value = file_opts.pop("symbols", None)
+                marks_value = file_opts.pop("marks", None)
                 range_spec = _parse_range_value(range_value)
                 symbols_spec = _parse_symbols_value(symbols_value)
+                marks_spec = _parse_marks_value(marks_value)
                 raw_spec, path_symbols = split_spec_symbols(raw_spec)
                 if path_symbols:
                     symbols_spec = _merge_symbols(symbols_spec, path_symbols)
@@ -666,6 +673,11 @@ def build_hydration_plan_data(
                 _reject_removed_embedded_traversal_keys(
                     file_opts, f"Component '{comp_name}' file[{spec_index}]"
                 )
+                if marks_value is not None:
+                    # popped above so plugin-config parsing never reads
+                    # "marks" as a plugin name; restored for the
+                    # normalized-manifest extras
+                    file_opts["marks"] = marks_value
                 file_embedded_resolution = _normalize_bool(
                     file_opts.get("embedded-resolution", comp_embedded_resolution),
                     label=f"Component '{comp_name}' file[{spec_index}] embedded-resolution",
@@ -693,12 +705,35 @@ def build_hydration_plan_data(
                         file_embedded_resolution,
                     )
 
+                marks_plan = None
+                if marks_spec:
+                    files_index = spec_index - 1
+                    outline_member = (
+                        outline_file_members[files_index]
+                        if files_index < files_count
+                        and files_index < len(outline_file_members)
+                        else None
+                    )
+                    marks_plan = _prepare_member_marks(
+                        marks_spec,
+                        raw_spec=raw_spec,
+                        outline_member=outline_member,
+                        force_git=force_git,
+                        gitignore=comp_gitignore,
+                        plugin_overrides_key=plugin_overrides_key,
+                        effective_plugin_overrides=effective_plugin_overrides,
+                        embedded_resolution=file_embedded_resolution,
+                        pending_by_key=pending_by_key,
+                        resolved_spec_cache=resolved_spec_cache,
+                    )
+
                 prepared_specs.append(
                     {
                         "spec_cache_key": spec_cache_key,
                         "spec_comment": spec_comment,
                         "range_spec": range_spec,
                         "symbols_spec": symbols_spec,
+                        "marks_plan": marks_plan,
                         "file_opts": file_opts,
                         "spec_root": spec_root,
                     }
@@ -747,8 +782,10 @@ def build_hydration_plan_data(
                 spec_comment = prepared["spec_comment"]
                 range_spec = prepared["range_spec"]
                 symbols_spec = prepared["symbols_spec"]
+                marks_plan = prepared["marks_plan"]
                 file_opts = prepared["file_opts"]
                 spec_root = prepared["spec_root"]
+                marks_attached = False
 
                 cached_items = resolved_spec_cache[spec_cache_key]
                 for item in cached_items:
@@ -780,6 +817,13 @@ def build_hydration_plan_data(
                     )
                     suffix = _build_suffix(ranges, symbols)
                     from_files = not spec_cache_key[1]
+                    marks_context = None
+                    if marks_plan is not None and not marks_attached:
+                        marks_context = {
+                            **marks_plan,
+                            "multi_doc": len(cached_items) > 1,
+                        }
+                        marks_attached = True
                     resolved_items.append(
                         (
                             item,
@@ -792,6 +836,7 @@ def build_hydration_plan_data(
                             file_opts,
                             spec_root,
                             from_files,
+                            marks_context,
                         )
                     )
 
@@ -844,6 +889,7 @@ def build_hydration_plan_data(
                         file_opts,
                         _spec_root,
                         _from_files,
+                        _marks_context,
                     ) in resolved_items
                 )
             else:
@@ -858,6 +904,7 @@ def build_hydration_plan_data(
                     file_opts,
                     spec_root,
                     from_files,
+                    marks_context,
                 ) in resolved_items:
                     rel_path, should_write = _resolve_context_path(
                         comp_name,
@@ -915,6 +962,20 @@ def build_hydration_plan_data(
                                 file_opts,
                             )
                         )
+                        if marks_context is not None:
+                            _emit_marks_unit(
+                                marks_context,
+                                component_name=comp_name,
+                                item=item,
+                                member_rel_path=rel_path,
+                                context_dir=context_dir,
+                                used_paths=used_paths,
+                                files_to_write=files_to_write,
+                                index_components=index_components,
+                                reference_edges=reference_edges,
+                                resolved_spec_cache=resolved_spec_cache,
+                                base_dir=base_dir,
+                            )
                         continue
                     if should_write:
                         _queue_hydrated_file(
@@ -954,6 +1015,20 @@ def build_hydration_plan_data(
                             file_opts,
                         )
                     )
+                    if marks_context is not None:
+                        _emit_marks_unit(
+                            marks_context,
+                            component_name=comp_name,
+                            item=item,
+                            member_rel_path=rel_path,
+                            context_dir=context_dir,
+                            used_paths=used_paths,
+                            files_to_write=files_to_write,
+                            index_components=index_components,
+                            reference_edges=reference_edges,
+                            resolved_spec_cache=resolved_spec_cache,
+                            base_dir=base_dir,
+                        )
 
         if comp_manifests:
             from .contexts import ensure_manifest_link_hydrated
@@ -1859,6 +1934,16 @@ def _parse_symbols_value(value: Any) -> list[str] | None:
     raise ValueError("Symbols must be a string or list")
 
 
+def _parse_marks_value(value: Any) -> list[dict[str, Any]] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return [coerce_mark_spec(value)]
+    if isinstance(value, (list, tuple)):
+        return [coerce_mark_spec(item) for item in value] or None
+    raise ValueError("Marks must be a list of mappings")
+
+
 def _merge_symbols(primary: list[str] | None, extra: list[str]) -> list[str] | None:
     merged = list(primary or [])
     for item in extra:
@@ -2606,6 +2691,7 @@ def _build_set_fusion(
             dict[str, Any],
             str | None,
             bool,
+            dict[str, Any] | None,
         ]
     ],
     outline_node: dict[str, Any] | None = None,
@@ -2650,6 +2736,337 @@ def _build_set_index_entry(
         "hash": f"sha256:{digest}",
         "parts": parts,
     }
+
+
+def _enabled_outline_file_members(
+    outline_node: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if outline_node is None:
+        return []
+    members = outline_node.get("members", {}).get("files", [])
+    return [member for member in members if not member.get("disabled")]
+
+
+def _prepare_member_marks(
+    marks_spec: list[dict[str, Any]],
+    *,
+    raw_spec: str,
+    outline_member: dict[str, Any] | None,
+    force_git: bool,
+    gitignore: bool,
+    plugin_overrides_key: Any,
+    effective_plugin_overrides: dict[str, Any] | None,
+    embedded_resolution: bool,
+    pending_by_key: dict[tuple[Any, ...], tuple[Any, ...]],
+    resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]],
+) -> dict[str, Any]:
+    spec_text = os.path.expanduser(raw_spec)
+    target = parse_target_spec(spec_text).get("target", spec_text)
+    if not isinstance(target, str):
+        target = spec_text
+    base_spec, _ = split_mark_address(target)
+    plugin_route = (
+        not force_git
+        and not is_http_url(base_spec)
+        and parse_git_target(base_spec) is None
+        and _has_explicit_scheme(base_spec)
+    )
+    addresses: list[str | None] = []
+    keys: list[tuple[Any, ...] | None] = []
+    for record in marks_spec:
+        if record["start_seconds"] is None:
+            addresses.append(None)
+            keys.append(None)
+            continue
+        address = f"{base_spec}@{record['authored']}"
+        addresses.append(address)
+        if not plugin_route:
+            keys.append(None)
+            continue
+        key = (
+            address,
+            force_git,
+            gitignore,
+            None,
+            plugin_overrides_key,
+            embedded_resolution,
+        )
+        if key not in resolved_spec_cache and key not in pending_by_key:
+            pending_by_key[key] = (
+                address,
+                None,
+                force_git,
+                effective_plugin_overrides,
+                embedded_resolution,
+            )
+        keys.append(key)
+    outline_marks: list[dict[str, Any]] = []
+    if outline_member is not None:
+        outline_marks = [
+            mark
+            for mark in outline_member.get("marks") or []
+            if not mark.get("disabled")
+        ]
+    return {
+        "records": marks_spec,
+        "outline_marks": outline_marks,
+        "member_spec": base_spec,
+        "addresses": addresses,
+        "keys": keys,
+    }
+
+
+def _marks_unit_path(member_rel_path: Path) -> Path:
+    if member_rel_path.suffix == ".md":
+        return member_rel_path.with_name(f"{member_rel_path.stem}.marks.md")
+    return member_rel_path.with_name(f"{member_rel_path.name}.marks.md")
+
+
+def _emit_marks_unit(
+    marks_context: dict[str, Any],
+    *,
+    component_name: str,
+    item: ResolvedItem,
+    member_rel_path: Path,
+    context_dir: Path,
+    used_paths: set[str],
+    files_to_write: list[tuple[Path, str]],
+    index_components: dict[str, list[dict[str, Any]]],
+    reference_edges: list[dict[str, Any]],
+    resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]],
+    base_dir: str,
+) -> None:
+    unit_rel = _dedupe_path(_marks_unit_path(member_rel_path), used_paths)
+    unit_text, mark_records = _build_marks_unit(
+        marks_context, item, resolved_spec_cache
+    )
+    files_to_write.append((context_dir / unit_rel, unit_text))
+    digest = hashlib.sha256(unit_text.encode("utf-8")).hexdigest()
+    index_components.setdefault(component_name, []).append(
+        {
+            "context_path": unit_rel.as_posix(),
+            "kind": "marks",
+            "member_context_path": member_rel_path.as_posix(),
+            "target": item.manifest_spec,
+            "hash": f"sha256:{digest}",
+            "marks": mark_records,
+        }
+    )
+    for record in mark_records:
+        for ref in record["refs"]:
+            reference_edges.append(
+                _mark_reference_edge(
+                    component_name=component_name,
+                    ref=ref,
+                    mark_address=record["address"],
+                    context_path=unit_rel,
+                    base_dir=base_dir,
+                )
+            )
+
+
+def _build_marks_unit(
+    marks_context: dict[str, Any],
+    member_item: ResolvedItem,
+    resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]],
+) -> tuple[str, list[dict[str, Any]]]:
+    records = marks_context["records"]
+    outline_marks = marks_context["outline_marks"]
+    addresses = marks_context["addresses"]
+    keys = marks_context["keys"]
+    member_spec = marks_context["member_spec"]
+    multi_doc = marks_context["multi_doc"]
+
+    blocks: list[str] = []
+    mark_records: list[dict[str, Any]] = []
+    line_cursor = 1
+    for order, record in enumerate(records):
+        outline_mark = (
+            outline_marks[order] if order < len(outline_marks) else None
+        )
+        comment = outline_mark.get("comment") if outline_mark else None
+        comment_text = comment["text"] if isinstance(comment, dict) else None
+        inline_comment = (
+            outline_mark.get("inline_comment") if outline_mark else None
+        )
+
+        mark_item = _resolved_mark_item(keys[order], resolved_spec_cache)
+        state, detail = _mark_state(
+            record, mark_item, member_item, multi_doc, member_spec
+        )
+        address = _mark_address_text(addresses[order], mark_item)
+
+        mark_meta: dict[str, Any] = {}
+        capture = None
+        if mark_item is not None:
+            metadata = mark_item.plugin_metadata or {}
+            if isinstance(metadata.get("mark"), dict):
+                mark_meta = metadata["mark"]
+            if isinstance(metadata.get("capture"), dict):
+                capture = metadata["capture"]
+
+        header_bits = [address or member_spec]
+        if inline_comment:
+            header_bits.append(inline_comment)
+        lines = [f"--- {' · '.join(header_bits)} ---", ""]
+        if comment_text:
+            lines.extend(comment_text.splitlines())
+            lines.append("")
+        asr_text = None
+        if state == "ok":
+            asr_value = (mark_item.plugin_metadata or {}).get("asr")
+            asr_text = (
+                asr_value if isinstance(asr_value, str) else mark_item.content
+            )
+            lines.append("asr:")
+            lines.extend(asr_text.splitlines())
+            if record["quote"]:
+                lines.append("")
+                lines.append("quote:")
+                lines.extend(record["quote"].rstrip("\n").splitlines())
+        else:
+            lines.append(f"state: {state}")
+            if detail:
+                lines.append(detail)
+        if record["refs"]:
+            lines.append("")
+            lines.append("refs:")
+            lines.extend(f"- {ref}" for ref in record["refs"])
+        block = "\n".join(lines) + "\n"
+        line_start = line_cursor
+        line_end = line_start + block.count("\n") - 1
+        line_cursor = line_end + 2
+        blocks.append(block)
+        mark_records.append(
+            {
+                "order": order,
+                "address": address,
+                "authored": record["authored"],
+                "start_s": record["start_seconds"],
+                "end_s": record["end_seconds"],
+                "covered_start_s": mark_meta.get("covered_start_s"),
+                "covered_end_s": mark_meta.get("covered_end_s"),
+                "asr": asr_text,
+                "capture": capture,
+                "quote": bool(record["quote"]),
+                "refs": list(record["refs"]),
+                "comment": comment_text,
+                "inline_comment": inline_comment,
+                "line_start": line_start,
+                "line_end": line_end,
+                "state": state,
+            }
+        )
+    return "\n".join(blocks), mark_records
+
+
+def _resolved_mark_item(
+    key: tuple[Any, ...] | None,
+    resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]],
+) -> ResolvedItem | None:
+    if key is None:
+        return None
+    items = resolved_spec_cache.get(key)
+    if not items or len(items) != 1:
+        return None
+    return items[0]
+
+
+def _mark_state(
+    record: dict[str, Any],
+    mark_item: ResolvedItem | None,
+    member_item: ResolvedItem,
+    multi_doc: bool,
+    member_spec: str,
+) -> tuple[str, str | None]:
+    if record["problem"]:
+        return record["problem"], _mark_problem_line(record)
+    if multi_doc:
+        return (
+            "marks-require-single-document",
+            f"Marks require a single document; {member_spec} resolved to multiple files.",
+        )
+    untimed = (
+        "marks-on-untimed-target",
+        f"Marks need timed media; {member_spec} is a {member_item.source_type} target.",
+    )
+    if member_item.plugin_metadata is None or mark_item is None:
+        return untimed
+    metadata = mark_item.plugin_metadata or {}
+    mark_state = metadata.get("mark_state")
+    if isinstance(mark_state, str) and mark_state:
+        return mark_state, mark_item.content.strip() or None
+    if not isinstance(metadata.get("mark"), dict):
+        return untimed
+    return "ok", None
+
+
+def _mark_problem_line(record: dict[str, Any]) -> str:
+    problem = record["problem"]
+    authored = record["authored"]
+    if problem == "mark-quote-requires-range":
+        return f"A quote needs a range; add an end time to {authored}."
+    if problem == "mark-at-and-span":
+        return "Use at: or span:, not both."
+    if problem == "mark-missing-time":
+        return "A mark needs at: or span:."
+    if problem == "mark-invalid-time":
+        return f"Unrecognized time {authored}; use M:SS, MM:SS, or H:MM:SS."
+    return "A mark must be a mapping with at: or span:."
+
+
+def _mark_address_text(
+    composed: str | None, mark_item: ResolvedItem | None
+) -> str | None:
+    if mark_item is not None:
+        metadata = mark_item.plugin_metadata or {}
+        trace = metadata.get("trace_path")
+        if (
+            isinstance(metadata.get("mark"), dict)
+            and isinstance(trace, str)
+            and trace
+        ):
+            return trace
+    return composed
+
+
+def _mark_reference_edge(
+    *,
+    component_name: str,
+    ref: str,
+    mark_address: str | None,
+    context_path: Path,
+    base_dir: str,
+) -> dict[str, Any]:
+    edge = {
+        "component": component_name,
+        "form": "mark",
+        "spec": ref,
+        "detected_via": "marks-key",
+        "payload": "edge",
+        "mark_address": mark_address,
+        "context_path": context_path.as_posix(),
+    }
+    local = _mark_ref_local_path(ref, base_dir)
+    if local is not None:
+        edge["target_path"] = str(local)
+    else:
+        edge["target"] = ref
+    return edge
+
+
+def _mark_ref_local_path(ref: str, base_dir: str) -> Path | None:
+    if is_http_url(ref) or _has_explicit_scheme(ref):
+        return None
+    candidate = Path(os.path.expanduser(ref))
+    if not candidate.is_absolute():
+        candidate = Path(base_dir) / candidate
+    try:
+        if candidate.is_file():
+            return candidate.resolve()
+    except OSError:
+        pass
+    return None
 
 
 def _resolve_context_path(
