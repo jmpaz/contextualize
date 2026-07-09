@@ -3,6 +3,7 @@ from .manifest import (
     GROUP_DELIMITER,
     GROUP_PATH_KEY,
     coerce_file_spec,
+    coerce_mark_spec,
     component_selectors,
     normalize_components,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "GROUP_DELIMITER",
     "GROUP_PATH_KEY",
     "coerce_file_spec",
+    "coerce_mark_spec",
     "component_selectors",
     "normalize_components",
     "PayloadResult",

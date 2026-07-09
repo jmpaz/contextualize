@@ -7,6 +7,7 @@ belongs to the target.
 
 import pytest
 
+from contextualize.manifest import coerce_mark_spec
 from contextualize.references.address import (
     format_clock_time,
     parse_clock_time,
@@ -170,3 +171,96 @@ def test_format_clock_time(seconds, text):
 @pytest.mark.parametrize("seconds", [0.0, 59.0, 252.5, 3723.25, 5999.0])
 def test_format_round_trips_through_parse(seconds):
     assert parse_clock_time(format_clock_time(seconds)) == seconds
+
+
+def test_coerce_point_mark():
+    record = coerce_mark_spec({"at": "4:12"})
+    assert record == {
+        "authored": "4:12",
+        "start_seconds": 252.0,
+        "end_seconds": None,
+        "quote": None,
+        "refs": [],
+        "problem": None,
+    }
+
+
+def test_coerce_span_alias():
+    record = coerce_mark_spec({"span": "12:04-13:26"})
+    assert record["start_seconds"] == 724.0
+    assert record["end_seconds"] == 806.0
+    assert record["authored"] == "12:04-13:26"
+    assert record["problem"] is None
+
+
+def test_coerce_preserves_authored_string_verbatim():
+    assert coerce_mark_spec({"at": "04:12"})["authored"] == "04:12"
+    assert coerce_mark_spec({"at": " 0:59 "})["authored"] == "0:59"
+
+
+def test_coerce_sexagesimal_int_renders_authored_form():
+    record = coerce_mark_spec({"at": 252})
+    assert record["start_seconds"] == 252.0
+    assert record["authored"] == "4:12"
+    assert record["problem"] is None
+
+
+def test_coerce_sexagesimal_float_keeps_decimals():
+    record = coerce_mark_spec({"at": 252.5})
+    assert record["start_seconds"] == 252.5
+    assert record["authored"] == "4:12.5"
+
+
+def test_coerce_quote_with_range():
+    record = coerce_mark_spec(
+        {"at": "12:04-13:26", "quote": "Two prompts.\n", "refs": ["notes/op9f.md"]}
+    )
+    assert record["problem"] is None
+    assert record["quote"] == "Two prompts.\n"
+    assert record["refs"] == ["notes/op9f.md"]
+
+
+def test_coerce_quote_on_point_is_a_problem_not_a_raise():
+    record = coerce_mark_spec({"at": "4:12", "quote": "solo"})
+    assert record["problem"] == "mark-quote-requires-range"
+    assert record["start_seconds"] == 252.0
+    assert record["quote"] == "solo"
+
+
+def test_coerce_at_and_span_together():
+    record = coerce_mark_spec({"at": "4:12", "span": "5:00-6:00", "quote": "kept"})
+    assert record["problem"] == "mark-at-and-span"
+    assert record["quote"] == "kept"
+
+
+def test_coerce_missing_time():
+    assert coerce_mark_spec({})["problem"] == "mark-missing-time"
+    assert coerce_mark_spec({"at": None})["problem"] == "mark-missing-time"
+    assert coerce_mark_spec({"quote": "x"})["problem"] == "mark-missing-time"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["banana", "4:12-", True, -30, ["4:12"], "13:26-12:04"],
+)
+def test_coerce_unusable_time_values(value):
+    record = coerce_mark_spec({"at": value})
+    assert record["problem"] == "mark-invalid-time"
+    assert record["start_seconds"] is None
+
+
+def test_coerce_non_mapping_mark():
+    record = coerce_mark_spec("4:12")
+    assert record["problem"] == "mark-invalid"
+    assert record["authored"] == "4:12"
+
+
+def test_coerce_refs_forms():
+    assert coerce_mark_spec({"at": "4:12", "refs": "dev/mood-kit"})["refs"] == [
+        "dev/mood-kit"
+    ]
+    assert coerce_mark_spec({"at": "4:12", "refs": ["a", "", " b "]})["refs"] == [
+        "a",
+        "b",
+    ]
+    assert coerce_mark_spec({"at": "4:12"})["refs"] == []

@@ -160,6 +160,89 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def coerce_mark_spec(mark: Any) -> dict[str, Any]:
+    """Coerce one `marks:` entry into a record.
+
+    Authored mistakes land in `problem`, never a raise (designed states,
+    marks spec §4.3). YAML 1.1 reads unquoted `at: 4:12` as the sexagesimal
+    int 252, so int/float arrivals re-render their authored form from
+    canonical seconds.
+    """
+    from ..references.address import format_clock_time, parse_time_range
+
+    record: dict[str, Any] = {
+        "authored": None,
+        "start_seconds": None,
+        "end_seconds": None,
+        "quote": None,
+        "refs": [],
+        "problem": None,
+    }
+    if not isinstance(mark, dict):
+        record["authored"] = str(mark) if mark is not None else None
+        record["problem"] = "mark-invalid"
+        return record
+
+    record["quote"] = _coerce_mark_quote(mark.get("quote"))
+    record["refs"] = _coerce_mark_refs(mark.get("refs"))
+
+    has_at = mark.get("at") is not None
+    has_span = mark.get("span") is not None
+    if has_at and has_span:
+        record["problem"] = "mark-at-and-span"
+        return record
+    if not has_at and not has_span:
+        record["problem"] = "mark-missing-time"
+        return record
+
+    value = mark["at"] if has_at else mark["span"]
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        record["authored"] = str(value)
+        record["problem"] = "mark-invalid-time"
+        return record
+    if isinstance(value, (int, float)):
+        if value < 0:
+            record["authored"] = str(value)
+            record["problem"] = "mark-invalid-time"
+            return record
+        record["authored"] = format_clock_time(value)
+        record["start_seconds"] = float(value)
+    else:
+        authored = value.strip()
+        record["authored"] = authored
+        span = parse_time_range(authored)
+        if span is None:
+            record["problem"] = "mark-invalid-time"
+            return record
+        start_seconds, end_seconds = span
+        if end_seconds is not None and end_seconds < start_seconds:
+            record["problem"] = "mark-invalid-time"
+            return record
+        record["start_seconds"] = start_seconds
+        record["end_seconds"] = end_seconds
+
+    if record["quote"] is not None and record["end_seconds"] is None:
+        record["problem"] = "mark-quote-requires-range"
+    return record
+
+
+def _coerce_mark_quote(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value if isinstance(value, str) else str(value)
+
+
+def _coerce_mark_refs(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        ref = value.strip()
+        return [ref] if ref else []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
 def coerce_file_spec(spec: Any) -> tuple[str, dict[str, Any]]:
     if isinstance(spec, dict):
         raw = spec.get("path") or spec.get("target") or spec.get("url")
