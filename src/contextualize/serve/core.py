@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..manifest.manifest import coerce_mark_spec, normalize_components
+from ..manifest.manifest import coerce_mark_spec, mark_spec_items, normalize_components
 from ..manifest.source import MEMBER_KEYS
 from ..manifest.contexts import (
     ContextEntry,
@@ -216,7 +216,7 @@ def _marks_records_by_member(
         return {}
     records: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for key, position, entry in component_members(comp):
-        raw_marks = entry.get("marks") if isinstance(entry, dict) else None
+        raw_marks = mark_spec_items(entry.get("marks")) if isinstance(entry, dict) else []
         if not raw_marks or not remaining:
             continue
         spec = spec_text(entry)
@@ -330,7 +330,9 @@ def _render_members(
                     entry["spec"] = spec_text(raw_entry)
                     entry["alias"] = spec_alias(raw_entry)
                     raw_marks = (
-                        raw_entry.get("marks") if isinstance(raw_entry, dict) else None
+                        mark_spec_items(raw_entry.get("marks"))
+                        if isinstance(raw_entry, dict)
+                        else []
                     )
                     outline_marks = item.get("marks")
                     if raw_marks or outline_marks:
@@ -441,7 +443,7 @@ def _render_member(
         "state": "ok",
         "detail": None,
     }
-    raw_marks = entry.get("marks") if isinstance(entry, dict) else None
+    raw_marks = mark_spec_items(entry.get("marks")) if isinstance(entry, dict) else []
     outline_marks = item.get("marks") if item else None
     if raw_marks or outline_marks:
         rendered["marks"] = _mark_entries(
@@ -1048,8 +1050,8 @@ def _note_mark_edges(
         if not isinstance(files, list):
             continue
         for entry in files:
-            raw_marks = entry.get("marks") if isinstance(entry, dict) else None
-            if not isinstance(raw_marks, list) or not raw_marks:
+            raw_marks = mark_spec_items(entry.get("marks")) if isinstance(entry, dict) else []
+            if not raw_marks:
                 continue
             base = _mark_base_spec(spec_text(entry))
             if base != qbase:

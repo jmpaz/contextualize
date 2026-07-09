@@ -120,6 +120,31 @@ def test_show_member_carries_marks(fake_store, tmp_path, empty_registry):
     ]
 
 
+def test_show_accepts_mapping_form_marks(fake_store, tmp_path, empty_registry):
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}"\n'
+        '        marks: {at: "0:04"}\n',
+    )
+    result = show(f"{manifest}:reckoning", registry_path=empty_registry)
+    assert result["state"] == "ok"
+    marks = result["node"]["members"]["files"][0]["marks"]
+    assert [m["at"] for m in marks] == ["0:04"]
+    assert marks[0]["state"] == "ok"
+    assert marks[0]["address"] == f"{STORE_TARGET}@0:04"
+
+    member = show(f"{manifest}:reckoning.1", registry_path=empty_registry)
+    assert member["node"]["marks"][0]["at"] == "0:04"
+
+    marked = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+    assert marked["state"] == "ok"
+    assert marked["node"]["kind"] == "mark"
+
+    _hydrate(manifest)
+    hydrated = show(f"{manifest}:reckoning", registry_path=empty_registry)
+    assert hydrated["node"]["members"]["files"][0]["marks"][0]["state"] == "ok"
+
+
 def test_show_mark_state_reflects_index_records(fake_store, tmp_path, empty_registry):
     manifest = _write_mini(
         tmp_path,

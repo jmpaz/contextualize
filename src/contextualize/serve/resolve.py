@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..manifest.contexts import ContextEntry, load_context_registry
-from ..manifest.manifest import coerce_mark_spec, normalize_components
+from ..manifest.manifest import coerce_mark_spec, mark_spec_items, normalize_components
 from ..manifest.source import MEMBER_KEYS, ManifestSource, load_manifest_source
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
@@ -421,8 +421,8 @@ def _resolve_mark(
             detail=f"'{'.'.join(remainder[2:])}' cannot narrow a mark.",
         )
     _key, _position, entry = member
-    raw_marks = entry.get("marks") if isinstance(entry, dict) else None
-    if not isinstance(raw_marks, list) or not raw_marks:
+    raw_marks = mark_spec_items(entry.get("marks")) if isinstance(entry, dict) else []
+    if not raw_marks:
         return Target(
             kind="not-found",
             node=node,

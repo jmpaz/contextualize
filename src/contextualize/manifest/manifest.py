@@ -160,6 +160,18 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def mark_spec_items(value: Any) -> list[Any]:
+    """The authored `marks:` value as a list of raw items. Hydrate accepts a
+    single mapping as a one-mark list; every reader must see the same shape."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
 def coerce_mark_spec(mark: Any) -> dict[str, Any]:
     """Coerce one `marks:` entry into a record.
 

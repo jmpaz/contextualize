@@ -5,6 +5,7 @@ from .manifest import (
     coerce_file_spec,
     coerce_mark_spec,
     component_selectors,
+    mark_spec_items,
     normalize_components,
 )
 from .payload import (
@@ -44,6 +45,7 @@ __all__ = [
     "coerce_file_spec",
     "coerce_mark_spec",
     "component_selectors",
+    "mark_spec_items",
     "normalize_components",
     "PayloadResult",
     "build_payload",

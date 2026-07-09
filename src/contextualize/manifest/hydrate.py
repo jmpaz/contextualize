@@ -43,6 +43,7 @@ from .manifest import (
     SET_KEY,
     coerce_file_spec,
     coerce_mark_spec,
+    mark_spec_items,
     normalize_components,
 )
 from .source import (
@@ -1937,11 +1938,9 @@ def _parse_symbols_value(value: Any) -> list[str] | None:
 def _parse_marks_value(value: Any) -> list[dict[str, Any]] | None:
     if value is None:
         return None
-    if isinstance(value, dict):
-        return [coerce_mark_spec(value)]
-    if isinstance(value, (list, tuple)):
-        return [coerce_mark_spec(item) for item in value] or None
-    raise ValueError("Marks must be a list of mappings")
+    if not isinstance(value, (dict, list, tuple)):
+        raise ValueError("Marks must be a list of mappings")
+    return [coerce_mark_spec(item) for item in mark_spec_items(value)] or None
 
 
 def _merge_symbols(primary: list[str] | None, extra: list[str]) -> list[str] | None:
