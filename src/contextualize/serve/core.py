@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..manifest.manifest import coerce_mark_spec
+from ..manifest.manifest import coerce_mark_spec, normalize_components
 from ..manifest.source import MEMBER_KEYS
 from ..manifest.contexts import (
     ContextEntry,
@@ -979,6 +979,215 @@ def _member_source_identities(handle: ManifestHandle) -> dict[str, list[str]]:
     return identities
 
 
+def _spans_overlap(
+    a_start: float, a_end: float | None, b_start: float, b_end: float | None
+) -> bool:
+    a_close = a_start if a_end is None else a_end
+    b_close = b_start if b_end is None else b_end
+    return a_start <= b_close and b_start <= a_close
+
+
+def _mark_edge_for_target(
+    record: Any, qbase: str, qmark: Any, entry_target: Any
+) -> dict[str, Any] | None:
+    if not isinstance(record, dict):
+        return None
+    start_s = record.get("start_s")
+    if not isinstance(start_s, (int, float)):
+        return None
+    address = record.get("address")
+    record_base = split_mark_address(str(address))[0] if address else None
+    if record_base != qbase and entry_target != qbase:
+        return None
+    end_s = record.get("end_s")
+    if qmark is not None and not _spans_overlap(
+        qmark.start_seconds,
+        qmark.end_seconds,
+        float(start_s),
+        float(end_s) if isinstance(end_s, (int, float)) else None,
+    ):
+        return None
+    return {
+        "kind": "mark",
+        "address": address,
+        "authored": record.get("authored"),
+        "start_s": record.get("start_s"),
+        "end_s": record.get("end_s"),
+        "quote": record.get("quote"),
+        "comment": record.get("comment"),
+        "inline_comment": record.get("inline_comment"),
+        "refs": record.get("refs"),
+        "state": record.get("state"),
+    }
+
+
+def _note_mark_edges(
+    source: Any, qbase: str, qmark: Any, *, note_path: str
+) -> list[dict[str, Any]]:
+    data = source.data if isinstance(source.data, dict) else {}
+    raw_components = data.get("components")
+    if not isinstance(raw_components, list):
+        return []
+    try:
+        comps = normalize_components(raw_components)
+    except ValueError:
+        return []
+    edges: list[dict[str, Any]] = []
+    for comp in comps:
+        files = comp.get("files")
+        if not isinstance(files, list):
+            continue
+        for entry in files:
+            raw_marks = entry.get("marks") if isinstance(entry, dict) else None
+            if not isinstance(raw_marks, list) or not raw_marks:
+                continue
+            base = _mark_base_spec(spec_text(entry))
+            if base != qbase:
+                continue
+            for raw_mark in raw_marks:
+                record = coerce_mark_spec(raw_mark)
+                if record["start_seconds"] is None:
+                    continue
+                if qmark is not None and not _spans_overlap(
+                    qmark.start_seconds,
+                    qmark.end_seconds,
+                    record["start_seconds"],
+                    record["end_seconds"],
+                ):
+                    continue
+                edges.append(
+                    {
+                        "kind": "mark",
+                        "source_note": note_path,
+                        "component": comp.get("name"),
+                        "address": f"{base}@{record['authored']}",
+                        "authored": record["authored"],
+                        "start_s": record["start_seconds"],
+                        "end_s": record["end_seconds"],
+                        "quote": record["quote"] is not None,
+                        "refs": list(record["refs"]),
+                        "state": record["problem"] or "ok",
+                    }
+                )
+    return edges
+
+
+def _tag_discovered_mark_edges(
+    qbase: str, qmark: Any, registered_sources: set[str]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    from ..manifest.contexts import discover_tagged_notes, links_discovery_config
+    from ..manifest.source import frontmatter_has_manifest_tag, load_manifest_source
+
+    discovery = links_discovery_config()
+    tags = discovery["tags"]
+    root = discovery["root"]
+    scope: dict[str, Any] = {
+        "tags": tags,
+        "root": str(root) if root else None,
+        "notes_scanned": 0,
+        "notes_with_manifest": 0,
+    }
+    if root is None:
+        scope["skipped"] = "no links.discovery root configured"
+        return scope, []
+    try:
+        notes = discover_tagged_notes(root=root, tags=tags)
+    except ValueError as exc:
+        scope["skipped"] = str(exc)
+        return scope, []
+    edges: list[dict[str, Any]] = []
+    for path in notes:
+        if _resolved(path) in registered_sources:
+            continue
+        scope["notes_scanned"] += 1
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not frontmatter_has_manifest_tag(text, tag=tags):
+            continue
+        try:
+            source = load_manifest_source(str(path))
+        except (OSError, ValueError):
+            continue
+        scope["notes_with_manifest"] += 1
+        edges.extend(_note_mark_edges(source, qbase, qmark, note_path=str(path)))
+    return scope, edges
+
+
+def _links_target(
+    raw: str,
+    selector_text: str,
+    *,
+    registry: dict[str, ContextEntry],
+    registry_path: str | None,
+    cwd: str | None,
+) -> dict[str, Any]:
+    target = parse_target_spec(raw).get("target", raw)
+    if not isinstance(target, str):
+        target = raw
+    base, query_mark = split_mark_address(target)
+
+    coverage: dict[str, Any] = {
+        "registry_total": len(registry),
+        "scanned": 0,
+        "skipped_unhydrated": [],
+    }
+    in_edges: list[dict[str, Any]] = []
+    registered_sources: set[str] = set()
+    for name in sorted(registry):
+        handle = load_manifest_handle(
+            name, registry=registry, registry_path=registry_path, cwd=cwd
+        )
+        if handle is None:
+            continue
+        if handle.manifest_path is not None:
+            registered_sources.add(_resolved(handle.manifest_path))
+        if not handle.hydrated:
+            coverage["skipped_unhydrated"].append(name)
+            continue
+        coverage["scanned"] += 1
+        components = handle.index.get("components") if handle.index else None
+        if not isinstance(components, dict):
+            continue
+        for dotted, entries in components.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("kind") != "marks":
+                    continue
+                for record in entry.get("marks") or []:
+                    edge = _mark_edge_for_target(
+                        record, base, query_mark, entry.get("target")
+                    )
+                    if edge is not None:
+                        edge["source_context"] = name
+                        edge["component"] = dotted
+                        in_edges.append(edge)
+
+    tag_scope, note_edges = _tag_discovered_mark_edges(base, query_mark, registered_sources)
+    in_edges.extend(note_edges)
+    coverage["tag_scope"] = tag_scope
+
+    return {
+        "selector": selector_text,
+        "origin": _target_origin(raw),
+        "target": {
+            "base": base,
+            "authored": query_mark.authored if query_mark else None,
+            "start_s": query_mark.start_seconds if query_mark else None,
+            "end_s": query_mark.end_seconds if query_mark else None,
+        },
+        "out": None,
+        "in": in_edges,
+        "shared": None,
+        "coverage": coverage,
+        "state": "ok",
+        "detail": None if in_edges else "No marks address this target.",
+        "next_steps": [],
+    }
+
+
 def links(
     selector_text: str,
     *,
@@ -993,6 +1202,12 @@ def links(
         registry = load_context_registry(registry_path)
     except (OSError, ValueError):
         registry = {}
+
+    raw = selector_text.strip()
+    if is_external_target(raw):
+        return _links_target(
+            raw, selector_text, registry=registry, registry_path=registry_path, cwd=cwd
+        )
 
     selector = parse_selector(selector_text, cwd=cwd)
     handle = load_manifest_handle(selector.origin, registry=registry, registry_path=registry_path, cwd=cwd)

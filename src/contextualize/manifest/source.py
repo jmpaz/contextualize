@@ -8,7 +8,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 import yaml
 
@@ -147,8 +147,13 @@ def path_contains_manifest(path: str | os.PathLike[str]) -> bool:
     return True
 
 
-def frontmatter_has_manifest_tag(text: str, *, tag: str = "ctx/manifest") -> bool:
-    """Recognition tier for §3.4: a `ctx/manifest` tag in YAML frontmatter."""
+def frontmatter_has_manifest_tag(
+    text: str, *, tag: str | Sequence[str] = "ctx/manifest"
+) -> bool:
+    """Recognition tier for §3.4: a `ctx/manifest` tag in YAML frontmatter.
+    A tag also matches its subtags (`ctx/manifest/voice`); this is the one
+    place that prefix rule lives."""
+    wanted = (tag,) if isinstance(tag, str) else tuple(tag)
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return False
@@ -167,7 +172,14 @@ def frontmatter_has_manifest_tag(text: str, *, tag: str = "ctx/manifest") -> boo
     tags = frontmatter.get("tags")
     if not isinstance(tags, list):
         return False
-    return any(isinstance(candidate, str) and candidate.strip() == tag for candidate in tags)
+    return any(
+        isinstance(candidate, str) and _tag_matches(candidate.strip(), wanted)
+        for candidate in tags
+    )
+
+
+def _tag_matches(candidate: str, wanted: tuple[str, ...]) -> bool:
+    return any(candidate == tag or candidate.startswith(f"{tag}/") for tag in wanted)
 
 
 def _load_nix_manifest_source(path: Path, cwd: str) -> dict[str, Any]:

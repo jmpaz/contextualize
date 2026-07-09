@@ -373,3 +373,149 @@ def test_cli_cat_mark_state_exits_with_the_detail(fake_store, tmp_path):
     result = runner.invoke(cli.cli, ["cat", f"{manifest}:reckoning.1.1"])
     assert result.exit_code != 0
     assert "beyond" in result.output
+
+
+def _registered_marked_context(tmp_path: Path) -> tuple[str, Path]:
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    manifest = drive / "manifest.yaml"
+    manifest.write_text(
+        MARKED_MANIFEST.format(ctx=drive / ".context" / "annot", target=STORE_TARGET),
+        encoding="utf-8",
+    )
+    _hydrate(manifest)
+    registry = _registry(
+        tmp_path / "registry.json",
+        {"annot": {"targetDir": str(drive), "manifest": {"source": "manifest.yaml"}}},
+    )
+    return registry, manifest
+
+
+def test_links_target_aggregates_registered_marks(fake_store, tmp_path):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    result = links(STORE_TARGET, registry_path=registry, cwd=str(tmp_path))
+
+    assert result["state"] == "ok"
+    assert result["origin"]["kind"] == "target"
+    assert result["target"]["base"] == STORE_TARGET
+    assert result["out"] is None and result["shared"] is None
+
+    edges = result["in"]
+    assert [e["authored"] for e in edges] == ["0:04", "0:25-1:00"]
+    assert all(e["source_context"] == "annot" for e in edges)
+    assert all(e["component"] == "reckoning" for e in edges)
+    assert edges[0]["address"] == f"{STORE_TARGET}@0:04"
+    assert edges[0]["inline_comment"] == "opening"
+
+    scope = result["coverage"]["tag_scope"]
+    assert scope["tags"] == ["ctx/manifest"]
+    assert scope["skipped"] == "no links.discovery root configured"
+
+
+def test_links_target_span_query_filters_overlap(fake_store, tmp_path):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    result = links(f"{STORE_TARGET}@0:20-0:30", registry_path=registry, cwd=str(tmp_path))
+    assert result["target"]["start_s"] == 20.0
+    assert [e["authored"] for e in result["in"]] == ["0:25-1:00"]
+
+
+def test_links_target_names_the_empty_answer(fake_store, tmp_path, empty_registry):
+    result = links(UNTIMED_TARGET, registry_path=empty_registry, cwd=str(tmp_path))
+    assert result["state"] == "ok"
+    assert result["in"] == []
+    assert result["detail"] == "No marks address this target."
+
+
+def _write_discovery_config(tmp_path: Path, root: Path) -> None:
+    config_dir = tmp_path / "xdg-config" / "contextualize"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        f"links:\n  discovery:\n    root: {root}\n    tags:\n      - ctx/manifest\n",
+        encoding="utf-8",
+    )
+
+
+def _mock_zk(monkeypatch, notes: list[Path]) -> None:
+    import subprocess
+
+    def _run(args, **kwargs):
+        assert args == ["zk", "list", "--tag", "ctx/manifest*", "--format", "json", "--quiet"]
+        payload = [{"absPath": str(path), "path": path.name} for path in notes]
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("contextualize.manifest.contexts.subprocess.run", _run)
+
+
+def test_links_tag_scope_discovers_marked_notes(fake_store, monkeypatch, tmp_path):
+    registry, registered_manifest = _registered_marked_context(tmp_path)
+    notes_root = tmp_path / "notes"
+    notes_root.mkdir()
+
+    note_sub = notes_root / "annotated.md"
+    note_sub.write_text(
+        "---\ntags:\n  - ctx/manifest/voice\n---\n\n"
+        "```yaml\ncomponents:\n  - name: pulls\n    files:\n"
+        f'      - path: "{STORE_TARGET}"\n'
+        "        marks:\n"
+        "          - at: 0:30-0:45\n```\n",
+        encoding="utf-8",
+    )
+    note_bare = notes_root / "bare.md"
+    note_bare.write_text(
+        "---\ntags:\n  - ctx/manifest\n---\n\nprose only\n", encoding="utf-8"
+    )
+
+    _write_discovery_config(tmp_path, notes_root)
+    _mock_zk(monkeypatch, [note_sub, note_bare, registered_manifest])
+
+    result = links(STORE_TARGET, registry_path=registry, cwd=str(tmp_path))
+
+    note_edges = [e for e in result["in"] if e.get("source_note")]
+    assert len(note_edges) == 1
+    assert note_edges[0]["source_note"] == str(note_sub)
+    assert note_edges[0]["component"] == "pulls"
+    assert note_edges[0]["authored"] == "0:30-0:45"
+
+    registered_edges = [e for e in result["in"] if e.get("source_context") == "annot"]
+    assert len(registered_edges) == 2
+
+    scope = result["coverage"]["tag_scope"]
+    assert scope["root"] == str(notes_root)
+    assert scope["notes_scanned"] == 2
+    assert scope["notes_with_manifest"] == 1
+    assert "skipped" not in scope
+
+
+def test_links_tag_scope_degrades_without_zk(fake_store, monkeypatch, tmp_path):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    notes_root = tmp_path / "notes"
+    notes_root.mkdir()
+    _write_discovery_config(tmp_path, notes_root)
+
+    def _run(args, **kwargs):
+        raise FileNotFoundError("zk")
+
+    monkeypatch.setattr("contextualize.manifest.contexts.subprocess.run", _run)
+
+    result = links(STORE_TARGET, registry_path=registry, cwd=str(tmp_path))
+    assert result["state"] == "ok"
+    assert "zk" in result["coverage"]["tag_scope"]["skipped"]
+    assert [e["source_context"] for e in result["in"]] == ["annot", "annot"]
+
+
+def test_manifest_tag_matches_subtags_once():
+    from contextualize.manifest.source import frontmatter_has_manifest_tag
+
+    sub = "---\ntags:\n  - ctx/manifest/voice\n---\nbody\n"
+    assert frontmatter_has_manifest_tag(sub) is True
+    assert frontmatter_has_manifest_tag(sub, tag=["ctx/manifest"]) is True
+    festo = "---\ntags:\n  - ctx/manifesto\n---\nbody\n"
+    assert frontmatter_has_manifest_tag(festo) is False
+
+
+def test_links_out_carries_mark_ref_edges(fake_store, tmp_path):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    result = links("annot", registry_path=registry, direction="out", cwd=str(tmp_path))
+    mark_edges = [e for e in result["out"] if e.get("form") == "mark"]
+    assert [e["spec"] for e in mark_edges] == ["notes/op9f.md"]
+    assert mark_edges[0]["mark_address"] == f"{STORE_TARGET}@0:25-1:00"

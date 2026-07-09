@@ -199,6 +199,9 @@ def render_links(result: dict[str, Any]) -> str:
     if result.get("in") is not None:
         lines.append(f"\n  in ({len(result['in'])})")
         for edge in result["in"]:
+            if edge.get("kind") == "mark":
+                lines.append(_mark_edge_line(edge))
+                continue
             lines.append(
                 f"    {edge.get('source_context')}  ({edge.get('form')}, {edge.get('payload')})"
             )
@@ -219,7 +222,36 @@ def render_links(result: dict[str, Any]) -> str:
         lines.append(
             f"\n  coverage: scanned {coverage['scanned']}/{coverage['registry_total']} registered contexts{note}"
         )
+        tag_scope = coverage.get("tag_scope")
+        if tag_scope:
+            lines.append(_tag_scope_line(tag_scope))
     return "\n".join(lines)
+
+
+def _mark_edge_line(edge: dict[str, Any]) -> str:
+    who = edge.get("source_context") or edge.get("source_note")
+    line = f"    {edge.get('address')}  ({who}"
+    if edge.get("component"):
+        line += f", {edge['component']}"
+    line += ")"
+    state = edge.get("state")
+    if state and state != "ok":
+        line += f"  [{state}]"
+    inline = edge.get("inline_comment")
+    if inline:
+        line += f"  # {inline}"
+    return line
+
+
+def _tag_scope_line(tag_scope: dict[str, Any]) -> str:
+    tags = ", ".join(tag_scope.get("tags") or [])
+    if tag_scope.get("skipped"):
+        return f"  tag scope: {tags} - skipped: {tag_scope['skipped']}"
+    return (
+        f"  tag scope: {tags} @ {tag_scope.get('root')}"
+        f" - {tag_scope.get('notes_with_manifest', 0)}/{tag_scope.get('notes_scanned', 0)}"
+        " note(s) with manifests"
+    )
 
 
 def _render_drift(drift: dict[str, Any]) -> list[str]:
