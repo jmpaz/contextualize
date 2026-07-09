@@ -711,7 +711,7 @@ def test_status_counts_mark_drift(fake_store, monkeypatch, tmp_path):
         f"{STORE_TARGET}@0:04",
         f"{STORE_TARGET}@0:25-1:00",
     ]
-    assert "superseded by fake-asr-2" in marks[0]["reason"]
+    assert marks[0]["reason"] == "pinned transcription fake-asr-1 superseded by fake-asr-2"
     assert "2 mark(s) drifted" in drifted["detail"]
 
 

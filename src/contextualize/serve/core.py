@@ -1403,11 +1403,11 @@ def _capture_drift_reason(
     pinned: dict[str, Any], current: dict[str, Any] | None
 ) -> str | None:
     if current is None:
-        return "no capture recorded in the store"
+        return "no transcription recorded in the store"
     if any(pinned.get(field) != current.get(field) for field in ("id", "model", "captured_at")):
         pinned_label = pinned.get("model") or pinned.get("id")
         current_label = current.get("model") or current.get("id")
-        return f"pinned capture {pinned_label} superseded by {current_label}"
+        return f"pinned transcription {pinned_label} superseded by {current_label}"
     return None
 
 
