@@ -875,24 +875,38 @@ def build_hydration_plan_data(
                         "context_path": set_rel_path.as_posix(),
                         "parts": parts,
                     }
-                normalized_files.extend(
-                    _build_manifest_file_entry(
-                        item, range_spec, symbols, spec_comment, file_opts
+                for (
+                    item,
+                    _content,
+                    _suffix,
+                    _ranges,
+                    symbols,
+                    range_spec,
+                    spec_comment,
+                    file_opts,
+                    _spec_root,
+                    _from_files,
+                    marks_context,
+                ) in resolved_items:
+                    normalized_files.append(
+                        _build_manifest_file_entry(
+                            item, range_spec, symbols, spec_comment, file_opts
+                        )
                     )
-                    for (
-                        item,
-                        _content,
-                        _suffix,
-                        _ranges,
-                        symbols,
-                        range_spec,
-                        spec_comment,
-                        file_opts,
-                        _spec_root,
-                        _from_files,
-                        _marks_context,
-                    ) in resolved_items
-                )
+                    if marks_context is not None:
+                        _emit_marks_unit(
+                            marks_context,
+                            component_name=comp_name,
+                            item=item,
+                            member_rel_path=set_rel_path,
+                            context_dir=context_dir,
+                            used_paths=used_paths,
+                            files_to_write=files_to_write,
+                            index_components=index_components,
+                            reference_edges=reference_edges,
+                            resolved_spec_cache=resolved_spec_cache,
+                            base_dir=base_dir,
+                        )
             else:
                 for (
                     item,

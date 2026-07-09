@@ -436,6 +436,44 @@ def test_bare_address_beyond_duration_is_a_state_member(fake_store, tmp_path):
     assert "beyond this recording" in content
 
 
+def test_set_member_marks_hydrate(fake_store, tmp_path):
+    manifest_text = (
+        "config:\n"
+        f"  context:\n    dir: {tmp_path / 'ctx'}\n    include-meta: true\n"
+        "components:\n"
+        "  - set: threads\n"
+        "    files:\n"
+        f'      - path: "{STORE_TARGET}"\n'
+        "        marks:\n"
+        "          - at: 0:25-0:40\n"
+        "            quote: |\n"
+        "              ...treat this as a case study.\n"
+        "            refs:\n"
+        "              - notes/op9f.md\n"
+    )
+    context_dir = _hydrate(tmp_path, manifest_text)
+    entries = _entries(context_dir, "threads")
+    assert [entry.get("kind") for entry in entries] == ["set", "marks"]
+
+    marks_entry = entries[1]
+    assert marks_entry["member_context_path"] == entries[0]["context_path"]
+    assert marks_entry["target"] == STORE_TARGET
+    record = marks_entry["marks"][0]
+    assert record["state"] == "ok"
+    assert record["address"] == f"{STORE_TARGET}@0:25-0:40"
+    assert record["asr"] == "treat this as a case study for the work itself"
+
+    unit_text = (context_dir / marks_entry["context_path"]).read_text(encoding="utf-8")
+    assert "asr:\ntreat this as a case study for the work itself" in unit_text
+    assert "quote:\n...treat this as a case study." in unit_text
+
+    edges = [
+        e for e in _index(context_dir)["references"]["out"] if e.get("form") == "mark"
+    ]
+    assert [e["spec"] for e in edges] == ["notes/op9f.md"]
+    assert edges[0]["mark_address"] == f"{STORE_TARGET}@0:25-0:40"
+
+
 def test_bare_addresses_fuse_into_set(fake_store, tmp_path):
     range_address = f"{STORE_TARGET}@0:25-1:00"
     point_address = f"{STORE_TARGET}@0:04"
