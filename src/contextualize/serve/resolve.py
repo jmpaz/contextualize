@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..manifest.contexts import ContextEntry, load_context_registry
-from ..manifest.manifest import normalize_components
+from ..manifest.manifest import coerce_mark_spec, normalize_components
 from ..manifest.source import MEMBER_KEYS, ManifestSource, load_manifest_source
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
@@ -291,13 +291,14 @@ class Target:
     path plus an optional trailing member token both settle here, so the two
     verbs cannot drift apart on what a selector means."""
 
-    kind: str  # "root" | "group" | "leaf" | "member" | "disabled" | "not-found"
+    kind: str  # "root" | "group" | "leaf" | "member" | "mark" | "disabled" | "not-found"
     node: dict[str, Any] | None
     dotted_path: tuple[str, ...]
     comp: dict[str, Any] | None
     member: tuple[str, int, Any] | None
     detail: str | None = None
     disabled_member: tuple[str, dict[str, Any]] | None = None
+    mark: tuple[int, dict[str, Any]] | None = None
 
     def require_node(self) -> dict[str, Any]:
         assert self.node is not None, f"kind={self.kind!r} resolves to a node"
@@ -306,6 +307,10 @@ class Target:
     def require_member(self) -> tuple[str, int, Any]:
         assert self.member is not None, f"kind={self.kind!r} carries a member"
         return self.member
+
+    def require_mark(self) -> tuple[int, dict[str, Any]]:
+        assert self.mark is not None, f"kind={self.kind!r} carries a mark"
+        return self.mark
 
 
 def resolve_target(handle: ManifestHandle, tokens: tuple[str, ...]) -> Target:
@@ -389,9 +394,86 @@ def resolve_target(handle: ManifestHandle, tokens: tuple[str, ...]) -> Target:
             member=None,
             detail=f"No member '{token}' on '{'.'.join(dotted)}'.{hint}",
         )
+    if len(lookup.remainder) > 1:
+        return _resolve_mark(node, dotted, comp, match, lookup.remainder, ambiguity)
     return Target(
         kind="member", node=node, dotted_path=dotted, comp=comp, member=match, detail=ambiguity
     )
+
+
+def _resolve_mark(
+    node: dict[str, Any],
+    dotted: tuple[str, ...],
+    comp: dict[str, Any],
+    member: tuple[str, int, Any],
+    remainder: tuple[str, ...],
+    member_ambiguity: str | None,
+) -> Target:
+    member_token = remainder[0]
+    token = remainder[1]
+    if len(remainder) > 2:
+        return Target(
+            kind="not-found",
+            node=node,
+            dotted_path=dotted,
+            comp=comp,
+            member=None,
+            detail=f"'{'.'.join(remainder[2:])}' cannot narrow a mark.",
+        )
+    _key, _position, entry = member
+    raw_marks = entry.get("marks") if isinstance(entry, dict) else None
+    if not isinstance(raw_marks, list) or not raw_marks:
+        return Target(
+            kind="not-found",
+            node=node,
+            dotted_path=dotted,
+            comp=comp,
+            member=None,
+            detail=f"No marks on '{'.'.join(dotted)}.{member_token}'.",
+        )
+    match, ambiguity = match_mark(raw_marks, token)
+    if match is None:
+        return Target(
+            kind="not-found",
+            node=node,
+            dotted_path=dotted,
+            comp=comp,
+            member=None,
+            detail=(
+                f"No mark '{token}' on '{'.'.join(dotted)}.{member_token}'."
+                f" Mark tokens: authored time or ordinal 1-{len(raw_marks)}."
+            ),
+        )
+    return Target(
+        kind="mark",
+        node=node,
+        dotted_path=dotted,
+        comp=comp,
+        member=member,
+        mark=match,
+        detail=member_ambiguity or ambiguity,
+    )
+
+
+def match_mark(
+    raw_marks: list[Any], token: str
+) -> tuple[tuple[int, dict[str, Any]] | None, str | None]:
+    records = [coerce_mark_spec(raw) for raw in raw_marks]
+    hits = [index for index, record in enumerate(records) if record["authored"] == token]
+    if hits:
+        ambiguity = None
+        if len(hits) > 1:
+            ambiguity = (
+                f"'{token}' matches {len(hits)} marks; resolved to the first "
+                f"(ordinal {hits[0] + 1}). "
+                f"Ordinals 1-{len(records)} address marks uniquely."
+            )
+        return (hits[0], records[hits[0]]), ambiguity
+    if token.isdigit():
+        ordinal = int(token)
+        if 1 <= ordinal <= len(records):
+            return (ordinal - 1, records[ordinal - 1]), None
+    return None, None
 
 
 def spec_text(entry: Any) -> str:

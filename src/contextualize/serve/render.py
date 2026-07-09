@@ -20,6 +20,15 @@ STATE_LABELS = {
     "stale-cache": "stale",
     "hydrate-failed": "hydrate failed",
     "dangling-reference": "dangling reference",
+    "mark-quote-requires-range": "quote needs a range",
+    "mark-invalid-time": "invalid mark time",
+    "mark-at-and-span": "at and span",
+    "mark-missing-time": "missing mark time",
+    "mark-beyond-duration": "beyond duration",
+    "marks-on-untimed-target": "untimed target",
+    "marks-require-single-document": "multi-document target",
+    "mark-params-unsupported": "params with mark",
+    "transcript-drift": "transcript drift",
 }
 
 DISABLED_MARK = "⊘"
@@ -65,6 +74,30 @@ def _member_line(item: dict[str, Any], pad: str) -> str:
     return f"{pad}- {label}"
 
 
+def _mark_line(mark: dict[str, Any], pad: str) -> str:
+    if mark.get("disabled"):
+        raw = (mark.get("raw") or "").splitlines()[0] if mark.get("raw") else ""
+        return f"{pad}{DISABLED_MARK} {raw}"
+    label = f"@ {mark.get('at')}"
+    if mark.get("quote"):
+        label += "  (quote)"
+    state = mark.get("state", "ok")
+    if state != "ok":
+        label += f"  [{state}]"
+    inline = mark.get("inline_comment")
+    if inline:
+        label += f"  # {inline}"
+    return f"{pad}{label}"
+
+
+def _mark_block_lines(item: dict[str, Any], pad: str) -> list[str]:
+    lines: list[str] = []
+    for mark in item.get("marks") or []:
+        lines.extend(_comment_lines(mark.get("comment"), pad))
+        lines.append(_mark_line(mark, pad))
+    return lines
+
+
 def _render_component(node: dict[str, Any], indent: int, ordinal: int | None) -> list[str]:
     pad = "  " * indent
     lines = _comment_lines(node.get("comment"), pad)
@@ -98,6 +131,7 @@ def _render_component(node: dict[str, Any], indent: int, ordinal: int | None) ->
     for items in node.get("members", {}).values():
         for item in items:
             lines.append(_member_line(item, pad + "    "))
+            lines.extend(_mark_block_lines(item, pad + "      "))
     return lines
 
 
@@ -115,7 +149,21 @@ def _render_node(node: dict[str, Any] | None) -> list[str]:
         if node.get("disabled"):
             raw_first = (node.get("raw") or "").splitlines()[0]
             return [f"  {DISABLED_MARK} {raw_first}"]
-        return [_member_line(node, "  ")]
+        return [_member_line(node, "  ")] + _mark_block_lines(node, "    ")
+    if node["kind"] == "mark":
+        lines = [f"  on {node['member_spec']}"] if node.get("member_spec") else []
+        lines.extend(_comment_lines(node.get("comment"), "  "))
+        lines.append(_mark_line(node, "  "))
+        if node.get("address"):
+            lines.append(f"    {node['address']}")
+        if node.get("quote"):
+            lines.append("    quote:")
+            lines.extend(
+                f"      {line}" for line in str(node["quote"]).rstrip("\n").splitlines()
+            )
+        for ref in node.get("refs") or []:
+            lines.append(f"    ref: {ref}")
+        return lines
     return _render_component(node, 1, None)
 
 

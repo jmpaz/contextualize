@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..manifest.manifest import coerce_mark_spec
 from ..manifest.source import MEMBER_KEYS
 from ..manifest.contexts import (
     ContextEntry,
@@ -17,11 +18,14 @@ from ..manifest.contexts import (
     load_context_registry,
     manifest_source_label,
 )
+from ..references.address import format_clock_time, split_mark_address
+from ..references.helpers import parse_target_spec
 from .resolve import (
     ManifestHandle,
     Target,
     component_for_node,
     component_members,
+    is_external_target,
     load_manifest_handle,
     parse_selector,
     resolve_live_spec,
@@ -62,6 +66,33 @@ NEXT_STEPS = {
     ],
     "hydrate-failed": [
         "Address the recorded failure reason, then re-run `contextualize contexts hydrate <name>`.",
+    ],
+    "mark-quote-requires-range": [
+        "Give the mark a range (at: start-end) or drop the quote.",
+    ],
+    "mark-invalid-time": [
+        "Write times as M:SS, MM:SS, or H:MM:SS, with an optional -end.",
+    ],
+    "mark-at-and-span": [
+        "Keep either at: or span: on the mark; they are aliases of one key.",
+    ],
+    "mark-missing-time": [
+        "Give the mark a time: at: M:SS, optionally with -end for a range.",
+    ],
+    "mark-beyond-duration": [
+        "Bring the mark's time within the recording's duration.",
+    ],
+    "marks-on-untimed-target": [
+        "Move the marks to timed media, or remove them from this member.",
+    ],
+    "marks-require-single-document": [
+        "Narrow the member to a single document before marking it.",
+    ],
+    "mark-params-unsupported": [
+        "Drop the query params or the mark; they do not compose on one target.",
+    ],
+    "transcript-drift": [
+        "Run `contextualize contexts hydrate <name>` to re-pin marks against the current transcript.",
     ],
 }
 
@@ -130,12 +161,15 @@ def _unresolvable_source(handle: ManifestHandle) -> dict[str, Any]:
     }
 
 
-def _next_steps(state: str, handle: ManifestHandle) -> list[str]:
-    name = handle.registry_name or handle.origin
+def _next_steps_for(state: str, name: str, origin: str) -> list[str]:
     return [
-        step.replace("<name>", name).replace("<origin>", handle.origin)
+        step.replace("<name>", name).replace("<origin>", origin)
         for step in NEXT_STEPS.get(state, NEXT_STEPS["not-found-node"])
     ]
+
+
+def _next_steps(state: str, handle: ManifestHandle) -> list[str]:
+    return _next_steps_for(state, handle.registry_name or handle.origin, handle.origin)
 
 
 def _node_path_segment(node: dict[str, Any]) -> str:
@@ -160,8 +194,111 @@ def _leaf_state(members: dict[str, list[dict[str, Any]]]) -> tuple[str, str | No
     return "ok", None
 
 
+def _mark_base_spec(spec: str) -> str:
+    target = parse_target_spec(spec).get("target", spec)
+    if not isinstance(target, str):
+        target = spec
+    base, _mark = split_mark_address(target)
+    return base
+
+
+def _marks_records_by_member(
+    handle: ManifestHandle, dotted_path: tuple[str, ...], comp: dict[str, Any] | None
+) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    if comp is None:
+        return {}
+    entries = _index_entries_for(handle, dotted_path) or []
+    remaining = [
+        entry for entry in entries if isinstance(entry, dict) and entry.get("kind") == "marks"
+    ]
+    if not remaining:
+        return {}
+    records: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for key, position, entry in component_members(comp):
+        raw_marks = entry.get("marks") if isinstance(entry, dict) else None
+        if not raw_marks or not remaining:
+            continue
+        spec = spec_text(entry)
+        chosen = next((item for item in remaining if item.get("target") == spec), remaining[0])
+        remaining.remove(chosen)
+        recorded = chosen.get("marks")
+        records[(key, position)] = recorded if isinstance(recorded, list) else []
+    return records
+
+
+def _fill_mark_entry(
+    entry: dict[str, Any],
+    raw_marks: list[Any] | None,
+    pinned_records: list[dict[str, Any]] | None,
+    enabled_index: int,
+    member_spec: str | None,
+) -> None:
+    record = (
+        coerce_mark_spec(raw_marks[enabled_index])
+        if raw_marks and enabled_index < len(raw_marks)
+        else None
+    )
+    pinned = (
+        pinned_records[enabled_index]
+        if pinned_records and enabled_index < len(pinned_records)
+        else None
+    )
+    state = "ok"
+    if record is not None:
+        entry["at"] = record["authored"]
+        entry["quote"] = record["quote"] is not None
+        entry["refs"] = list(record["refs"])
+        if record["problem"]:
+            state = record["problem"]
+        if record["start_seconds"] is not None and member_spec:
+            entry["address"] = f"{_mark_base_spec(member_spec)}@{record['authored']}"
+    if pinned is not None:
+        recorded_state = pinned.get("state")
+        if isinstance(recorded_state, str) and recorded_state:
+            state = recorded_state
+        if pinned.get("address"):
+            entry["address"] = pinned["address"]
+    entry["state"] = state
+
+
+def _mark_entries(
+    outline_marks: list[dict[str, Any]] | None,
+    raw_marks: list[Any] | None,
+    pinned_records: list[dict[str, Any]] | None,
+    member_spec: str | None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    enabled_index = 0
+    for item in outline_marks or []:
+        entry = {
+            "order": item.get("order"),
+            "disabled": item.get("disabled", False),
+            "comment": item.get("comment"),
+            "inline_comment": item.get("inline_comment"),
+        }
+        if entry["disabled"]:
+            entry["raw"] = item.get("raw")
+        else:
+            _fill_mark_entry(entry, raw_marks, pinned_records, enabled_index, member_spec)
+            enabled_index += 1
+        entries.append(entry)
+    while raw_marks and enabled_index < len(raw_marks):
+        entry = {
+            "order": len(entries),
+            "disabled": False,
+            "comment": None,
+            "inline_comment": None,
+        }
+        _fill_mark_entry(entry, raw_marks, pinned_records, enabled_index, member_spec)
+        enabled_index += 1
+        entries.append(entry)
+    return entries
+
+
 def _render_members(
-    node: dict[str, Any], comp: dict[str, Any] | None
+    node: dict[str, Any],
+    comp: dict[str, Any] | None,
+    marks_by_member: dict[tuple[str, int], list[dict[str, Any]]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     rendered: dict[str, list[dict[str, Any]]] = {}
     node_members = node.get("members", {})
@@ -187,6 +324,15 @@ def _render_members(
                     raw_entry = raw_list[enabled_index]
                     entry["spec"] = spec_text(raw_entry)
                     entry["alias"] = spec_alias(raw_entry)
+                    raw_marks = (
+                        raw_entry.get("marks") if isinstance(raw_entry, dict) else None
+                    )
+                    outline_marks = item.get("marks")
+                    if raw_marks or outline_marks:
+                        pinned = (marks_by_member or {}).get((key, enabled_index))
+                        entry["marks"] = _mark_entries(
+                            outline_marks, raw_marks, pinned, entry["spec"]
+                        )
                 enabled_index += 1
             entries.append(entry)
         rendered[key] = entries
@@ -230,7 +376,7 @@ def _render_node(
         return base
 
     comp = component_for_node(handle, dotted_path)
-    members = _render_members(node, comp)
+    members = _render_members(node, comp, _marks_records_by_member(handle, dotted_path, comp))
     base["members"] = members
     inline_keys = [key for key in ("text", "prefix", "suffix") if comp and comp.get(key)]
     if inline_keys:
@@ -270,9 +416,15 @@ def _render_disabled_member(key: str, item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _render_member(node: dict[str, Any], key: str, position: int, entry: Any) -> dict[str, Any]:
+def _render_member(
+    node: dict[str, Any],
+    key: str,
+    position: int,
+    entry: Any,
+    marks_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     item = _member_outline_item(node, key, position)
-    return {
+    rendered = {
         "kind": "member",
         "key": key,
         "spec": spec_text(entry),
@@ -284,6 +436,89 @@ def _render_member(node: dict[str, Any], key: str, position: int, entry: Any) ->
         "state": "ok",
         "detail": None,
     }
+    raw_marks = entry.get("marks") if isinstance(entry, dict) else None
+    outline_marks = item.get("marks") if item else None
+    if raw_marks or outline_marks:
+        rendered["marks"] = _mark_entries(
+            outline_marks, raw_marks, marks_records, rendered["spec"]
+        )
+    return rendered
+
+
+def _mark_state_detail(
+    state: str, view: dict[str, Any], pinned: dict[str, Any] | None
+) -> str:
+    authored = view.get("at")
+    if state == "mark-quote-requires-range":
+        suggestion = ""
+        boundary = (pinned or {}).get("covered_end_s")
+        if isinstance(boundary, (int, float)):
+            suggestion = f" The containing segment ends at {format_clock_time(boundary)}."
+        return f"A quote needs a range; add an end time to {authored}.{suggestion}"
+    if state == "mark-invalid-time":
+        return f"Unrecognized time {authored}; use M:SS, MM:SS, or H:MM:SS."
+    if state == "mark-at-and-span":
+        return "Use at: or span:, not both."
+    if state == "mark-missing-time":
+        return "A mark needs at: or span:."
+    if state == "mark-beyond-duration":
+        return f"Mark {authored} lies beyond the end of this recording."
+    if state == "marks-on-untimed-target":
+        return f"Marks need timed media; {view.get('member_spec')} has no timed transcript."
+    if state == "marks-require-single-document":
+        return (
+            f"Marks require a single document; {view.get('member_spec')} "
+            "resolves to more than one."
+        )
+    return f"Recorded mark state: {state}."
+
+
+def _mark_view(
+    handle: ManifestHandle, target: Target
+) -> tuple[dict[str, Any], tuple[int, int] | None]:
+    key, position, entry = target.require_member()
+    mark_position, record = target.require_mark()
+    node = target.require_node()
+    spec = spec_text(entry)
+    outline_item = _member_outline_item(node, key, position)
+    outline_marks = [
+        item
+        for item in (outline_item or {}).get("marks") or []
+        if not item.get("disabled")
+    ]
+    outline_mark = outline_marks[mark_position] if mark_position < len(outline_marks) else None
+    comment = outline_mark.get("comment") if outline_mark else None
+    records = _marks_records_by_member(handle, target.dotted_path, target.comp).get(
+        (key, position)
+    )
+    pinned = records[mark_position] if records and mark_position < len(records) else None
+    state = record["problem"] or "ok"
+    if pinned is not None and isinstance(pinned.get("state"), str) and pinned["state"]:
+        state = pinned["state"]
+    address = pinned.get("address") if pinned else None
+    if not address and record["start_seconds"] is not None:
+        address = f"{_mark_base_spec(spec)}@{record['authored']}"
+    view = {
+        "kind": "mark",
+        "key": key,
+        "member_spec": spec,
+        "at": record["authored"],
+        "address": address,
+        "start_s": record["start_seconds"],
+        "end_s": record["end_seconds"],
+        "quote": record["quote"],
+        "refs": list(record["refs"]),
+        "comment": comment["text"] if isinstance(comment, dict) else None,
+        "inline_comment": outline_mark.get("inline_comment") if outline_mark else None,
+        "asr": pinned.get("asr") if pinned else None,
+        "capture": pinned.get("capture") if pinned else None,
+        "state": state,
+    }
+    view["detail"] = None if state == "ok" else _mark_state_detail(state, view, pinned)
+    span = (
+        (outline_mark["line_start"], outline_mark["line_end"]) if outline_mark else None
+    )
+    return view, span
 
 
 def show(
@@ -333,8 +568,24 @@ def show(
 
     if target.kind == "member":
         key, position, entry = target.require_member()
-        result["node"] = _render_member(target.require_node(), key, position, entry)
+        records = _marks_records_by_member(handle, target.dotted_path, target.comp).get(
+            (key, position)
+        )
+        result["node"] = _render_member(target.require_node(), key, position, entry, records)
         result.update(state="ok", detail=target.detail, next_steps=[])
+        return result
+
+    if target.kind == "mark":
+        view, _span = _mark_view(handle, target)
+        result["node"] = view
+        if view["state"] == "ok":
+            result.update(state="ok", detail=target.detail, next_steps=[])
+        else:
+            result.update(
+                state=view["state"],
+                detail=view["detail"],
+                next_steps=_next_steps(view["state"], handle),
+            )
         return result
 
     result["node"] = _render_node(target.require_node(), target.dotted_path, handle, depth)
