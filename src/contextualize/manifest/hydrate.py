@@ -24,7 +24,7 @@ from ..plugins import (
 from ..plugins.reference import PluginReference
 from ..progress import log_progress
 from ..references import URLReference, create_file_references
-from ..references.address import split_mark_address
+from ..references.address import format_clock_time, split_mark_address
 from ..runtime import get_payload_spec_jobs
 from ..references.helpers import (
     fetch_gist_files,
@@ -2955,6 +2955,7 @@ def _build_marks_unit(
                 "line_start": line_start,
                 "line_end": line_end,
                 "state": state,
+                "detail": detail,
             }
         )
     return "\n".join(blocks), mark_records
@@ -2980,7 +2981,7 @@ def _mark_state(
     member_spec: str,
 ) -> tuple[str, str | None]:
     if record["problem"]:
-        return record["problem"], _mark_problem_line(record)
+        return record["problem"], _mark_problem_line(record, mark_item)
     if multi_doc:
         return (
             "marks-require-single-document",
@@ -3001,11 +3002,21 @@ def _mark_state(
     return "ok", None
 
 
-def _mark_problem_line(record: dict[str, Any]) -> str:
+def _mark_problem_line(
+    record: dict[str, Any], mark_item: ResolvedItem | None = None
+) -> str:
     problem = record["problem"]
     authored = record["authored"]
     if problem == "mark-quote-requires-range":
-        return f"A quote needs a range; add an end time to {authored}."
+        line = f"A quote needs a range; add an end time to {authored}."
+        metadata = mark_item.plugin_metadata if mark_item is not None else None
+        mark_meta = (metadata or {}).get("mark")
+        boundary = (
+            mark_meta.get("covered_end_s") if isinstance(mark_meta, dict) else None
+        )
+        if isinstance(boundary, (int, float)):
+            line += f" The containing segment ends at {format_clock_time(boundary)}."
+        return line
     if problem == "mark-at-and-span":
         return "Use at: or span:, not both."
     if problem == "mark-missing-time":
@@ -3375,6 +3386,8 @@ def _lifted_mark_entry(item: ResolvedItem) -> dict[str, Any] | None:
     if isinstance(capture, dict):
         entry["capture"] = capture
     entry["state"] = mark_state if isinstance(mark_state, str) else "ok"
+    if isinstance(mark_state, str):
+        entry["detail"] = item.content.strip() or None
     return entry
 
 

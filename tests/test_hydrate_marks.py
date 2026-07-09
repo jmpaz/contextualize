@@ -233,6 +233,7 @@ def test_mark_beyond_duration_carries_plugin_state(fake_store, tmp_path):
     record = _marks_entry(context_dir)["marks"][0]
     assert record["state"] == "mark-beyond-duration"
     assert record["authored"] == "50:00"
+    assert "duration 1:21" in record["detail"]
     unit_text = (
         context_dir / _marks_entry(context_dir)["context_path"]
     ).read_text(encoding="utf-8")

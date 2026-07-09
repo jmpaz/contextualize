@@ -85,7 +85,7 @@ def _mark_line(mark: dict[str, Any], pad: str) -> str:
         label += "  (quote)"
     state = mark.get("state", "ok")
     if state != "ok":
-        label += f"  [{state}]"
+        label += f"  [{STATE_LABELS.get(state, state)}]"
     inline = mark.get("inline_comment")
     if inline:
         label += f"  # {inline}"

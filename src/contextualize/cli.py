@@ -2665,8 +2665,16 @@ def cat_cmd(
                     )
                 )
                 ctx.exit(1)
-            detail = selector_result.get("detail") or selector_result["state"]
-            raise click.ClickException(f"{p}: {detail}")
+            from .serve.render import STATE_LABELS
+
+            state = selector_result["state"]
+            label = STATE_LABELS.get(state, state)
+            detail = selector_result.get("detail") or state
+            lines = [f"{p}: [{label}] {detail}"]
+            lines.extend(
+                f"-> {step}" for step in selector_result.get("next_steps") or []
+            )
+            raise click.ClickException("\n".join(lines))
 
         spliced_paths = []
         for p in expanded_all_paths:

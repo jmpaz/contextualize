@@ -260,6 +260,10 @@ def _fill_mark_entry(
         if pinned.get("address"):
             entry["address"] = pinned["address"]
     entry["state"] = state
+    if state != "ok":
+        entry["detail"] = (pinned or {}).get("detail") or _mark_state_detail(
+            state, {"at": entry.get("at"), "member_spec": member_spec}, pinned
+        )
 
 
 def _mark_entries(
@@ -516,7 +520,12 @@ def _mark_view(
         "capture": pinned.get("capture") if pinned else None,
         "state": state,
     }
-    view["detail"] = None if state == "ok" else _mark_state_detail(state, view, pinned)
+    if state == "ok":
+        view["detail"] = None
+    else:
+        view["detail"] = (pinned or {}).get("detail") or _mark_state_detail(
+            state, view, pinned
+        )
     span = (
         (outline_mark["line_start"], outline_mark["line_end"]) if outline_mark else None
     )

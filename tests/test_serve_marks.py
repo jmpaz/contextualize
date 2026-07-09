@@ -132,7 +132,9 @@ def test_show_mark_state_reflects_index_records(fake_store, tmp_path, empty_regi
     result = show(f"{manifest}:reckoning", registry_path=empty_registry)
     marks = result["node"]["members"]["files"][0]["marks"]
     assert marks[0]["state"] == "ok"
+    assert "detail" not in marks[0]
     assert marks[1]["state"] == "mark-beyond-duration"
+    assert "duration 1:21" in marks[1]["detail"]
 
 
 def test_show_addresses_one_mark(fake_store, tmp_path, empty_registry):
