@@ -47,6 +47,7 @@ ALL_STATES = {
     "dangling-reference",
     "hydrate-failed",
     "mark-quote-requires-range",
+    "mark-invalid",
     "mark-invalid-time",
     "mark-at-and-span",
     "mark-missing-time",

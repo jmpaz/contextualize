@@ -71,6 +71,9 @@ NEXT_STEPS = {
     "mark-quote-requires-range": [
         "Give the mark a range (at: start-end) or drop the quote.",
     ],
+    "mark-invalid": [
+        "Write the mark as a mapping with at: or span:.",
+    ],
     "mark-invalid-time": [
         "Write times as M:SS, MM:SS, or H:MM:SS, with an optional -end.",
     ],
@@ -462,6 +465,8 @@ def _mark_state_detail(
         if isinstance(boundary, (int, float)):
             suggestion = f" The containing segment ends at {format_clock_time(boundary)}."
         return f"A quote needs a range; add an end time to {authored}.{suggestion}"
+    if state == "mark-invalid":
+        return "A mark must be a mapping with at: or span:."
     if state == "mark-invalid-time":
         return f"Unrecognized time {authored}; use M:SS, MM:SS, or H:MM:SS."
     if state == "mark-at-and-span":

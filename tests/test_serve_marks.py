@@ -373,6 +373,47 @@ def test_cat_mark_invalid_time_is_legible(fake_store, tmp_path, empty_registry):
     _assert_legible(result)
 
 
+def test_mark_invalid_item_is_legible(fake_store, tmp_path, empty_registry):
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}"\n'
+        "        marks:\n"
+        "          - 4:12\n",
+    )
+    result = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+    assert result["state"] == "mark-invalid"
+    _assert_legible(result)
+    assert "mapping" in result["detail"]
+    assert "mapping" in result["next_steps"][0]
+
+    catted = cat_selector(
+        f"{manifest}:reckoning.1.1", registry_path=empty_registry, cwd=str(tmp_path)
+    )
+    assert catted["state"] == "mark-invalid"
+    _assert_legible(catted)
+    assert "content" not in draw_substance(catted)
+
+    _hydrate(manifest)
+    shown = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+    assert shown["state"] == "mark-invalid"
+    _assert_legible(shown)
+
+
+def test_scalar_marks_value_degrades_to_one_invalid_mark(
+    fake_store, tmp_path, empty_registry
+):
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}"\n'
+        '        marks: "0:04"\n',
+    )
+    result = show(f"{manifest}:reckoning", registry_path=empty_registry)
+    marks = result["node"]["members"]["files"][0]["marks"]
+    assert [m["state"] for m in marks] == ["mark-invalid"]
+    assert marks[0]["at"] == "0:04"
+    assert marks[0]["detail"]
+
+
 def test_cat_accepts_bare_target_addresses(fake_store, tmp_path, empty_registry):
     address = f"{STORE_TARGET}@0:25-1:00"
     result = cat_selector(address, registry_path=empty_registry, cwd=str(tmp_path))

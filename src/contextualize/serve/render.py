@@ -21,6 +21,7 @@ STATE_LABELS = {
     "hydrate-failed": "hydrate failed",
     "dangling-reference": "dangling reference",
     "mark-quote-requires-range": "quote needs a range",
+    "mark-invalid": "invalid mark",
     "mark-invalid-time": "invalid mark time",
     "mark-at-and-span": "at and span",
     "mark-missing-time": "missing mark time",
