@@ -120,6 +120,38 @@ def test_show_member_carries_marks(fake_store, tmp_path, empty_registry):
     ]
 
 
+def test_marks_pair_by_enabled_index_past_a_leading_disabled_mark(
+    fake_store, tmp_path, empty_registry
+):
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}"\n'
+        "        marks:\n"
+        "          # - at: 0:09\n"
+        "          - at: 0:04  # salient\n",
+    )
+    result = show(f"{manifest}:reckoning", registry_path=empty_registry)
+    marks = result["node"]["members"]["files"][0]["marks"]
+    assert [m["disabled"] for m in marks] == [True, False]
+    assert marks[0]["raw"] == "- at: 0:09"
+    live = marks[1]
+    assert live["at"] == "0:04"
+    assert live["inline_comment"] == "salient"
+    assert live["state"] == "ok"
+    assert live["address"] == f"{STORE_TARGET}@0:04"
+
+    addressed = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+    assert addressed["node"]["at"] == "0:04"
+    assert addressed["node"]["inline_comment"] == "salient"
+
+    _hydrate(manifest)
+    hydrated = show(f"{manifest}:reckoning", registry_path=empty_registry)
+    pinned = hydrated["node"]["members"]["files"][0]["marks"][1]
+    assert pinned["at"] == "0:04"
+    assert pinned["state"] == "ok"
+    assert pinned["address"] == f"{STORE_TARGET}@0:04"
+
+
 def test_show_accepts_mapping_form_marks(fake_store, tmp_path, empty_registry):
     manifest = _write_mini(
         tmp_path,
