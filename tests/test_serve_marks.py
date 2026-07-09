@@ -180,3 +180,196 @@ def test_ambiguous_mark_time_resolves_first_and_says_so(
     result = show(f"{manifest}:reckoning.1.0:04", registry_path=empty_registry)
     assert result["state"] == "ok"
     assert "matches 2 marks" in result["detail"]
+
+
+def test_cat_draws_pinned_mark_when_hydrated(fake_store, tmp_path, empty_registry):
+    manifest = _write_marked(tmp_path)
+    _hydrate(manifest)
+    result = cat_selector(
+        f"{manifest}:reckoning.1.2", registry_path=empty_registry, cwd=str(tmp_path)
+    )
+    assert result["state"] == "ok"
+    assert result["payload"] == "copy"
+    assert result["specs"] == [f"{STORE_TARGET}@0:25-1:00"]
+
+    drawn = draw_substance(result)
+    content = drawn["content"]
+    assert f"--- {STORE_TARGET}@0:25-1:00 ---" in content
+    assert "asr:\ntreat this as a case study for the work itself" in content
+    assert "quote:\n...treat this as a case study." in content
+    assert "refs:\n- notes/op9f.md" in content
+
+
+def test_cat_draws_mark_live_when_unhydrated(fake_store, tmp_path, empty_registry):
+    manifest = _write_marked(tmp_path)
+    result = cat_selector(
+        f"{manifest}:reckoning.1.1", registry_path=empty_registry, cwd=str(tmp_path)
+    )
+    assert result["state"] == "ok"
+    assert result["payload"] == "pointer"
+
+    drawn = draw_substance(result)
+    assert "asr:\nso the reckoning note starts here" in drawn["content"]
+    assert "opening" in drawn["content"]
+    assert (STORE_TARGET, "0:04") in fake_store.resolve_calls
+
+
+def test_cat_mark_adjacency_covers_the_authored_lines(
+    fake_store, tmp_path, empty_registry
+):
+    manifest = _write_marked(tmp_path)
+    result = cat_selector(
+        f"{manifest}:reckoning.1.2",
+        around=1,
+        registry_path=empty_registry,
+        cwd=str(tmp_path),
+    )
+    assert result["state"] == "ok"
+    assert "0:25-1:00" in result["adjacency"]["text"]
+
+
+def _assert_legible(result: dict) -> None:
+    assert result.get("detail"), "designed state must name the condition"
+    assert result.get("next_steps"), "designed state must name a path out"
+
+
+def test_cat_quote_without_range_suggests_the_segment_boundary(
+    fake_store, tmp_path, empty_registry
+):
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}"\n'
+        "        marks:\n"
+        "          - at: 0:04\n"
+        "            quote: |\n"
+        "              solo\n",
+    )
+    _hydrate(manifest)
+    result = cat_selector(
+        f"{manifest}:reckoning.1.1", registry_path=empty_registry, cwd=str(tmp_path)
+    )
+    assert result["state"] == "mark-quote-requires-range"
+    _assert_legible(result)
+    assert "The containing segment ends at 0:20." in result["detail"]
+    assert "content" not in draw_substance(result)
+
+    shown = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+    assert shown["state"] == "mark-quote-requires-range"
+    _assert_legible(shown)
+
+
+def test_cat_mark_beyond_duration_from_index_and_live(
+    fake_store, tmp_path, empty_registry
+):
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}"\n'
+        "        marks:\n"
+        "          - at: 50:00\n",
+    )
+    live = draw_substance(
+        cat_selector(
+            f"{manifest}:reckoning.1.1", registry_path=empty_registry, cwd=str(tmp_path)
+        )
+    )
+    assert live["state"] == "mark-beyond-duration"
+    _assert_legible(live)
+    assert "content" not in live
+
+    _hydrate(manifest)
+    pinned = cat_selector(
+        f"{manifest}:reckoning.1.1", registry_path=empty_registry, cwd=str(tmp_path)
+    )
+    assert pinned["state"] == "mark-beyond-duration"
+    _assert_legible(pinned)
+
+
+def test_cat_marks_on_untimed_targets(fake_store, tmp_path, empty_registry):
+    (tmp_path / "plain.md").write_text("prose\n", encoding="utf-8")
+    for member_lines in (
+        '      - path: plain.md\n        marks:\n          - at: 0:04\n',
+        f'      - path: "{UNTIMED_TARGET}"\n        marks:\n          - at: 0:04\n',
+    ):
+        manifest = _write_mini(tmp_path, member_lines)
+        result = draw_substance(
+            cat_selector(
+                f"{manifest}:reckoning.1.1",
+                registry_path=empty_registry,
+                cwd=str(tmp_path),
+            )
+        )
+        assert result["state"] == "marks-on-untimed-target"
+        _assert_legible(result)
+        assert "content" not in result
+
+
+def test_cat_marks_require_single_document(fake_store, tmp_path, empty_registry):
+    manifest = _write_mini(
+        tmp_path,
+        '      - path: "store:all"\n        marks:\n          - at: 0:04\n',
+    )
+    result = draw_substance(
+        cat_selector(
+            f"{manifest}:reckoning.1.1", registry_path=empty_registry, cwd=str(tmp_path)
+        )
+    )
+    assert result["state"] == "marks-require-single-document"
+    _assert_legible(result)
+    assert "content" not in result
+
+
+def test_cat_mark_invalid_time_is_legible(fake_store, tmp_path, empty_registry):
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}"\n'
+        "        marks:\n"
+        "          - at: nonsense\n",
+    )
+    result = cat_selector(
+        f"{manifest}:reckoning.1.1", registry_path=empty_registry, cwd=str(tmp_path)
+    )
+    assert result["state"] == "mark-invalid-time"
+    _assert_legible(result)
+
+
+def test_cat_accepts_bare_target_addresses(fake_store, tmp_path, empty_registry):
+    address = f"{STORE_TARGET}@0:25-1:00"
+    result = cat_selector(address, registry_path=empty_registry, cwd=str(tmp_path))
+    assert result["state"] == "ok"
+    assert result["origin"]["kind"] == "target"
+    assert result["specs"] == [address]
+
+    drawn = draw_substance(result)
+    assert "treat this as a case study for the work itself" in drawn["content"]
+    assert "mood kit day begins" not in drawn["content"]
+
+
+def test_cli_cat_draws_a_mark_selector(fake_store, tmp_path):
+    from click.testing import CliRunner
+
+    from contextualize import cli
+
+    manifest = _write_marked(tmp_path)
+    _hydrate(manifest)
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["cat", f"{manifest}:reckoning.1.2"])
+    assert result.exit_code == 0, result.output
+    assert "quote:\n...treat this as a case study." in result.output
+    assert "refs:\n- notes/op9f.md" in result.output
+
+
+def test_cli_cat_mark_state_exits_with_the_detail(fake_store, tmp_path):
+    from click.testing import CliRunner
+
+    from contextualize import cli
+
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}"\n'
+        "        marks:\n"
+        "          - at: 50:00\n",
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli.cli, ["cat", f"{manifest}:reckoning.1.1"])
+    assert result.exit_code != 0
+    assert "beyond" in result.output

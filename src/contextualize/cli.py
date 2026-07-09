@@ -2652,8 +2652,21 @@ def cat_cmd(
             expanded_all_paths.append(p)
 
     selector_cat_results: list[dict] = []
+    selector_mark_blocks: list[str] = []
     if any(":" in p for p in expanded_all_paths):
         from .serve.core import cat_selector as _cat_selector
+        from .serve.core import draw_substance as _draw_substance
+
+        def _selector_state_exit(p: str, selector_result: dict) -> None:
+            if json_output:
+                click.echo(
+                    json.dumps(
+                        {"content": None, "selectors": selector_cat_results}, indent=2
+                    )
+                )
+                ctx.exit(1)
+            detail = selector_result.get("detail") or selector_result["state"]
+            raise click.ClickException(f"{p}: {detail}")
 
         spliced_paths = []
         for p in expanded_all_paths:
@@ -2668,15 +2681,14 @@ def cat_cmd(
                 continue
             selector_cat_results.append(selector_result)
             if selector_result["state"] != "ok":
-                if json_output:
-                    click.echo(
-                        json.dumps(
-                            {"content": None, "selectors": selector_cat_results}, indent=2
-                        )
-                    )
-                    ctx.exit(1)
-                detail = selector_result.get("detail") or selector_result["state"]
-                raise click.ClickException(f"{p}: {detail}")
+                _selector_state_exit(p, selector_result)
+            if selector_result.get("mark") is not None:
+                drawn = _draw_substance(selector_result)
+                selector_cat_results[-1] = drawn
+                if drawn["state"] != "ok":
+                    _selector_state_exit(p, drawn)
+                selector_mark_blocks.append(drawn["content"])
+                continue
             spliced_paths.extend(selector_result["specs"])
         expanded_all_paths = spliced_paths
 
@@ -2901,6 +2913,10 @@ def cat_cmd(
                 )
 
     result = concat_refs(refs)
+
+    if selector_mark_blocks:
+        blocks = "\n\n".join(block.rstrip("\n") for block in selector_mark_blocks)
+        result = f"{result}\n\n{blocks}" if result else blocks
 
     if trace:
         stdin_data = ctx.obj.get("stdin_data", "")

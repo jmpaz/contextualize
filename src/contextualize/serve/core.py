@@ -497,7 +497,8 @@ def _mark_view(
         state = pinned["state"]
     address = pinned.get("address") if pinned else None
     if not address and record["start_seconds"] is not None:
-        address = f"{_mark_base_spec(spec)}@{record['authored']}"
+        live_base = resolve_live_spec(handle, _mark_base_spec(spec))
+        address = f"{live_base}@{record['authored']}"
     view = {
         "kind": "mark",
         "key": key,
@@ -728,6 +729,16 @@ def _no_specs_state(target: Target) -> tuple[str, str]:
     )
 
 
+def _target_origin(raw: str) -> dict[str, Any]:
+    return {
+        "kind": "target",
+        "name": raw,
+        "manifest_path": None,
+        "context_dir": None,
+        "hydrated": False,
+    }
+
+
 def cat_selector(
     selector_text: str,
     *,
@@ -735,6 +746,21 @@ def cat_selector(
     registry_path: str | None = None,
     cwd: str | None = None,
 ) -> dict[str, Any]:
+    raw = selector_text.strip()
+    if is_external_target(raw):
+        return {
+            "selector": selector_text,
+            "origin": _target_origin(raw),
+            "node": None,
+            "members": [{"key": "target", "spec": raw, "alias": None, "payload": "pointer"}],
+            "specs": [raw],
+            "payload": "pointer",
+            "adjacency": None,
+            "state": "ok",
+            "detail": None,
+            "next_steps": [],
+        }
+
     selector = parse_selector(selector_text, cwd=cwd)
     handle = load_manifest_handle(selector.origin, registry_path=registry_path, cwd=cwd)
     if handle is None:
@@ -767,6 +793,9 @@ def cat_selector(
         result.update(state="disabled", detail=target.detail, next_steps=_next_steps("disabled", handle))
         return result
 
+    if target.kind == "mark":
+        return _cat_mark(result, handle, target, around)
+
     if target.kind == "group":
         members, specs, payload, span = _gather_group(node, target.dotted_path, handle)
     elif target.kind == "member":
@@ -795,15 +824,124 @@ def cat_selector(
     return result
 
 
+def _cat_mark(
+    result: dict[str, Any],
+    handle: ManifestHandle,
+    target: Target,
+    around: int | None,
+) -> dict[str, Any]:
+    view, span = _mark_view(handle, target)
+    result["mark"] = view
+    if around is not None and span is not None:
+        adjacency = _adjacency_for_span(handle, span[0], span[1], around)
+        result["adjacency"] = adjacency
+        if adjacency is None:
+            result["adjacency_note"] = (
+                handle.source_error or "Authored source unavailable for adjacency."
+            )
+    if view["state"] != "ok":
+        result.update(
+            state=view["state"],
+            detail=view["detail"],
+            next_steps=_next_steps(view["state"], handle),
+        )
+        return result
+    payload = "copy" if view["asr"] is not None else "pointer"
+    address = view["address"]
+    result["members"] = [
+        {
+            "key": "mark",
+            "spec": address or view["member_spec"],
+            "alias": None,
+            "payload": payload,
+        }
+    ]
+    result["specs"] = [address] if address else []
+    result["payload"] = payload
+    result.update(state="ok", detail=target.detail, next_steps=[])
+    return result
+
+
 def draw_substance(result: dict[str, Any]) -> dict[str, Any]:
     """Non-ok results pass through untouched: a designed state is already the
     complete answer, and inventing content for it would be fabrication."""
     if result.get("state") != "ok":
         return result
+    if result.get("mark") is not None:
+        return _draw_mark_substance(result)
     from ..references.factory import create_file_references
 
     drawn = create_file_references(list(result["specs"]))
     return {**result, "content": drawn["concatenated"]}
+
+
+def _draw_mark_substance(result: dict[str, Any]) -> dict[str, Any]:
+    mark = result["mark"]
+    asr = mark.get("asr")
+    if asr is None:
+        asr, live_state = _live_mark_slice(mark.get("address"))
+        if live_state is not None:
+            state, detail = live_state
+            origin = result.get("origin") or {}
+            name = str(origin.get("name") or result.get("selector") or "")
+            return {
+                **result,
+                "mark": {**mark, "state": state, "detail": detail},
+                "members": [],
+                "specs": [],
+                "payload": None,
+                "state": state,
+                "detail": detail,
+                "next_steps": _next_steps_for(state, name, name),
+            }
+    return {**result, "content": _mark_content(mark, asr)}
+
+
+def _live_mark_slice(
+    address: str | None,
+) -> tuple[str | None, tuple[str, str] | None]:
+    if not address:
+        return None, ("marks-on-untimed-target", "The mark has no resolvable address.")
+    from ..references.factory import create_file_references
+
+    try:
+        refs = create_file_references([address])["refs"]
+    except ValueError as exc:
+        return None, ("marks-on-untimed-target", str(exc))
+    doc = next((ref.document for ref in refs if hasattr(ref, "document")), None)
+    if doc is None:
+        return None, (
+            "marks-on-untimed-target",
+            f"{address} did not resolve to a timed transcript.",
+        )
+    metadata = doc.metadata or {}
+    live_state = metadata.get("mark_state")
+    if isinstance(live_state, str) and live_state:
+        detail = doc.content.strip() or f"Recorded mark state: {live_state}."
+        return None, (live_state, detail)
+    value = metadata.get("asr")
+    return value if isinstance(value, str) else doc.content, None
+
+
+def _mark_content(mark: dict[str, Any], asr: str) -> str:
+    header_bits = [str(mark.get("address") or mark.get("at"))]
+    if mark.get("inline_comment"):
+        header_bits.append(str(mark["inline_comment"]))
+    lines = [f"--- {' · '.join(header_bits)} ---", ""]
+    if mark.get("comment"):
+        lines.extend(str(mark["comment"]).splitlines())
+        lines.append("")
+    lines.append("asr:")
+    lines.extend(asr.splitlines())
+    if mark.get("quote"):
+        lines.append("")
+        lines.append("quote:")
+        lines.extend(str(mark["quote"]).rstrip("\n").splitlines())
+    if mark.get("refs"):
+        lines.append("")
+        lines.append("refs:")
+        lines.extend(f"- {ref}" for ref in mark["refs"])
+    return "\n".join(lines) + "\n"
 
 
 def _resolved(path: Path | str) -> str:
