@@ -238,7 +238,7 @@ def _mark_edge_line(edge: dict[str, Any]) -> str:
     line += ")"
     state = edge.get("state")
     if state and state != "ok":
-        line += f"  [{state}]"
+        line += f"  [{STATE_LABELS.get(state, state)}]"
     inline = edge.get("inline_comment")
     if inline:
         line += f"  # {inline}"
