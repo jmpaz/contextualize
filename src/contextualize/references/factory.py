@@ -35,6 +35,7 @@ from .helpers import (
     parse_target_spec,
     split_spec_symbols,
 )
+from .address import split_mark_address
 from .url import URLReference
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
@@ -330,6 +331,7 @@ def create_file_references(
     for raw_path in expanded_all_paths:
         spec_opts = parse_target_spec(raw_path)
         target = spec_opts.get("target", raw_path)
+        target, mark = split_mark_address(target)
         path, symbols = split_spec_symbols(target)
         plugin_refs, plugin_claimed = resolve_plugin_references(
             target,
@@ -345,6 +347,7 @@ def create_file_references(
             cache_ttl=cache_ttl,
             refresh_cache=refresh_cache,
             overrides=effective_plugin_overrides,
+            span=mark.as_span() if mark is not None else None,
         )
         if plugin_refs:
             file_references.extend(plugin_refs)

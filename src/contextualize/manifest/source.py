@@ -8,7 +8,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 import yaml
 
@@ -147,8 +147,13 @@ def path_contains_manifest(path: str | os.PathLike[str]) -> bool:
     return True
 
 
-def frontmatter_has_manifest_tag(text: str, *, tag: str = "ctx/manifest") -> bool:
-    """Recognition tier for §3.4: a `ctx/manifest` tag in YAML frontmatter."""
+def frontmatter_has_manifest_tag(
+    text: str, *, tag: str | Sequence[str] = "ctx/manifest"
+) -> bool:
+    """Recognition tier for §3.4: a `ctx/manifest` tag in YAML frontmatter.
+    A tag also matches its subtags (`ctx/manifest/voice`); this is the one
+    place that prefix rule lives."""
+    wanted = (tag,) if isinstance(tag, str) else tuple(tag)
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return False
@@ -167,7 +172,14 @@ def frontmatter_has_manifest_tag(text: str, *, tag: str = "ctx/manifest") -> boo
     tags = frontmatter.get("tags")
     if not isinstance(tags, list):
         return False
-    return any(isinstance(candidate, str) and candidate.strip() == tag for candidate in tags)
+    return any(
+        isinstance(candidate, str) and _tag_matches(candidate.strip(), wanted)
+        for candidate in tags
+    )
+
+
+def _tag_matches(candidate: str, wanted: tuple[str, ...]) -> bool:
+    return any(candidate == tag or candidate.startswith(f"{tag}/") for tag in wanted)
 
 
 def _load_nix_manifest_source(path: Path, cwd: str) -> dict[str, Any]:
@@ -771,20 +783,79 @@ def _parse_member_items(
         _, inline_comment = _split_inline_comment(raw)
         comment = _reduce_pending(pending)
         pending = []
-        items.append(
-            {
-                "order": order,
-                "disabled": False,
-                "line_start": start_line + index,
-                "line_end": start_line + item_end - 1,
-                "comment": comment,
-                "inline_comment": inline_comment,
-            }
-        )
+        item = {
+            "order": order,
+            "disabled": False,
+            "line_start": start_line + index,
+            "line_end": start_line + item_end - 1,
+            "comment": comment,
+            "inline_comment": inline_comment,
+        }
+        marks = _parse_nested_marks(lines, index, item_end, start_line)
+        if marks is not None:
+            item["marks"] = marks
+        items.append(item)
         order += 1
         index = item_end
 
     return items
+
+
+def _parse_nested_marks(
+    lines: list[str],
+    item_start: int,
+    item_end: int,
+    start_line: int,
+) -> list[dict[str, Any]] | None:
+    key_indent = _member_key_indent(lines, item_start + 1, item_end)
+    if key_indent is None:
+        return None
+    list_range = _find_exact_key_list_range(
+        lines, item_start + 1, item_end, "marks", key_indent
+    )
+    if list_range is None:
+        return None
+    list_start, list_end = list_range
+    mark_indent = _first_item_indent(lines, list_start, list_end)
+    if mark_indent is None:
+        return None
+    marks = _parse_member_items(lines, list_start, list_end, mark_indent, start_line)
+    for mark in marks:
+        if not mark["disabled"]:
+            code, _ = _split_inline_comment(
+                lines[mark["line_start"] - start_line].rstrip("\n")
+            )
+            mark["raw"] = code.strip()
+    return marks or None
+
+
+def _member_key_indent(lines: list[str], start: int, end: int) -> int | None:
+    for index in range(start, end):
+        line = lines[index].rstrip("\n")
+        bare = line.strip()
+        if not bare or bare.startswith("#"):
+            continue
+        return len(line) - len(line.lstrip(" "))
+    return None
+
+
+def _find_exact_key_list_range(
+    lines: list[str],
+    start: int,
+    end: int,
+    key: str,
+    key_indent: int,
+) -> tuple[int, int] | None:
+    """Like `_find_named_list_range`, but only at the member's own key
+    indent -- block-scalar content (a `quote: |` body) is always deeper,
+    so an embedded line reading `marks:` never shadows the real key."""
+    pattern = re.compile(rf"^(?P<indent> *){key}\s*:\s*(?:#.*)?$")
+    for index in range(start, end):
+        match = pattern.match(lines[index].rstrip("\n"))
+        if not match or len(match.group("indent")) != key_indent:
+            continue
+        return index + 1, _find_key_block_end(lines, index + 1, end, key_indent)
+    return None
 
 
 def _split_inline_comment(line: str) -> tuple[str, str | None]:

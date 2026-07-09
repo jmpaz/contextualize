@@ -206,6 +206,153 @@ def test_designed_states_are_not_protocol_errors(tmp_path: Path) -> None:
     assert result["structuredContent"]["next_steps"]
 
 
+def _write_marked_manifest(drive: Path, target: str) -> Path:
+    drive.mkdir(parents=True, exist_ok=True)
+    manifest = drive / "manifest.yaml"
+    manifest.write_text(
+        "config:\n"
+        "  context:\n"
+        f"    dir: {drive / '.context' / 'annot'}\n"
+        "    include-meta: true\n"
+        "components:\n"
+        "  - name: reckoning\n"
+        "    files:\n"
+        f'      - path: "{target}"\n'
+        "        marks:\n"
+        "          - at: 0:04  # opening\n"
+        "          - at: 0:04\n"
+        "            quote: |\n"
+        "              solo\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def test_cat_of_bare_address_matches_core(fake_store, tmp_path: Path) -> None:
+    from conftest import STORE_TARGET
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({"version": 1, "contexts": {}}), encoding="utf-8")
+    address = f"{STORE_TARGET}@0:25-1:00"
+
+    responses = _run(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "cat", "arguments": {"selector": address}},
+            }
+        ],
+        cwd=str(tmp_path),
+        registry_path=str(registry_path),
+    )
+    result = responses[0]["result"]
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload == core.draw_substance(
+        core.cat_selector(address, registry_path=str(registry_path), cwd=str(tmp_path))
+    )
+    assert payload["state"] == "ok"
+    assert "treat this as a case study for the work itself" in payload["content"]
+    assert "mood kit day begins" not in payload["content"]
+
+
+def test_cat_of_a_mark_selector_matches_core(fake_store, tmp_path: Path) -> None:
+    from conftest import STORE_TARGET
+
+    manifest = _write_marked_manifest(tmp_path / "drive", STORE_TARGET)
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({"version": 1, "contexts": {}}), encoding="utf-8")
+    selector = f"{manifest}:reckoning.1.1"
+
+    responses = _run(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "cat", "arguments": {"selector": selector}},
+            }
+        ],
+        cwd=str(tmp_path),
+        registry_path=str(registry_path),
+    )
+    result = responses[0]["result"]
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload == core.draw_substance(
+        core.cat_selector(selector, registry_path=str(registry_path), cwd=str(tmp_path))
+    )
+    assert "asr:\nso the reckoning note starts here" in payload["content"]
+
+
+def test_cat_mark_designed_state_carries_no_content(fake_store, tmp_path: Path) -> None:
+    from conftest import STORE_TARGET
+
+    manifest = _write_marked_manifest(tmp_path / "drive", STORE_TARGET)
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({"version": 1, "contexts": {}}), encoding="utf-8")
+
+    responses = _run(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "cat", "arguments": {"selector": f"{manifest}:reckoning.1.2"}},
+            }
+        ],
+        cwd=str(tmp_path),
+        registry_path=str(registry_path),
+    )
+    result = responses[0]["result"]
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload["state"] == "mark-quote-requires-range"
+    assert payload["next_steps"]
+    assert "content" not in payload
+
+
+def test_links_target_mode_matches_core(fake_store, tmp_path: Path) -> None:
+    from conftest import STORE_TARGET
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({"version": 1, "contexts": {}}), encoding="utf-8")
+
+    responses = _run(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "links", "arguments": {"selector": STORE_TARGET}},
+            }
+        ],
+        cwd=str(tmp_path),
+        registry_path=str(registry_path),
+    )
+    result = responses[0]["result"]
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload == core.links(
+        STORE_TARGET, registry_path=str(registry_path), cwd=str(tmp_path)
+    )
+    assert payload["origin"]["kind"] == "target"
+    assert payload["coverage"]["tag_scope"]["tags"] == ["ctx/manifest"]
+
+
+def test_tool_descriptions_name_the_mark_surfaces(tmp_path: Path) -> None:
+    responses = _run(
+        [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}],
+        cwd=str(tmp_path),
+    )
+    tools = {tool["name"]: tool for tool in responses[0]["result"]["tools"]}
+    assert "target/@ address" in tools["cat"]["description"]
+    assert "mark" in tools["cat"]["inputSchema"]["properties"]["selector"]["description"]
+    assert "aggregate every mark" in tools["links"]["description"]
+
+
 def test_malformed_tool_call_is_a_protocol_error(tmp_path: Path) -> None:
     responses = _run(
         [{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "cat", "arguments": {}}}],

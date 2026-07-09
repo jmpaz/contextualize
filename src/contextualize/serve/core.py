@@ -5,10 +5,12 @@ least one path out; none falls through as a raw error."""
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any
 
+from ..manifest.manifest import coerce_mark_spec, mark_spec_items, normalize_components
 from ..manifest.source import MEMBER_KEYS
 from ..manifest.contexts import (
     ContextEntry,
@@ -17,11 +19,14 @@ from ..manifest.contexts import (
     load_context_registry,
     manifest_source_label,
 )
+from ..references.address import format_clock_time, split_mark_address
+from ..references.helpers import parse_target_spec
 from .resolve import (
     ManifestHandle,
     Target,
     component_for_node,
     component_members,
+    is_external_target,
     load_manifest_handle,
     parse_selector,
     resolve_live_spec,
@@ -62,6 +67,36 @@ NEXT_STEPS = {
     ],
     "hydrate-failed": [
         "Address the recorded failure reason, then re-run `contextualize contexts hydrate <name>`.",
+    ],
+    "mark-quote-requires-range": [
+        "Give the mark a range (at: start-end) or drop the quote.",
+    ],
+    "mark-invalid": [
+        "Write the mark as a mapping with at: or span:.",
+    ],
+    "mark-invalid-time": [
+        "Write times as M:SS, MM:SS, or H:MM:SS, with an optional -end.",
+    ],
+    "mark-at-and-span": [
+        "Keep either at: or span: on the mark; they are aliases of one key.",
+    ],
+    "mark-missing-time": [
+        "Give the mark a time: at: M:SS, optionally with -end for a range.",
+    ],
+    "mark-beyond-duration": [
+        "Bring the mark's time within the recording's duration.",
+    ],
+    "marks-on-untimed-target": [
+        "Move the marks to timed media, or remove them from this member.",
+    ],
+    "marks-require-single-document": [
+        "Narrow the member to a single document before marking it.",
+    ],
+    "mark-params-unsupported": [
+        "Drop the query params or the mark; they do not compose on one target.",
+    ],
+    "transcript-drift": [
+        "Run `contextualize contexts hydrate <name>` to re-pin marks against the current transcript.",
     ],
 }
 
@@ -130,12 +165,15 @@ def _unresolvable_source(handle: ManifestHandle) -> dict[str, Any]:
     }
 
 
-def _next_steps(state: str, handle: ManifestHandle) -> list[str]:
-    name = handle.registry_name or handle.origin
+def _next_steps_for(state: str, name: str, origin: str) -> list[str]:
     return [
-        step.replace("<name>", name).replace("<origin>", handle.origin)
+        step.replace("<name>", name).replace("<origin>", origin)
         for step in NEXT_STEPS.get(state, NEXT_STEPS["not-found-node"])
     ]
+
+
+def _next_steps(state: str, handle: ManifestHandle) -> list[str]:
+    return _next_steps_for(state, handle.registry_name or handle.origin, handle.origin)
 
 
 def _node_path_segment(node: dict[str, Any]) -> str:
@@ -160,8 +198,115 @@ def _leaf_state(members: dict[str, list[dict[str, Any]]]) -> tuple[str, str | No
     return "ok", None
 
 
+def _mark_base_spec(spec: str) -> str:
+    target = parse_target_spec(spec).get("target", spec)
+    if not isinstance(target, str):
+        target = spec
+    base, _mark = split_mark_address(target)
+    return base
+
+
+def _marks_records_by_member(
+    handle: ManifestHandle, dotted_path: tuple[str, ...], comp: dict[str, Any] | None
+) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    if comp is None:
+        return {}
+    entries = _index_entries_for(handle, dotted_path) or []
+    remaining = [
+        entry for entry in entries if isinstance(entry, dict) and entry.get("kind") == "marks"
+    ]
+    if not remaining:
+        return {}
+    records: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for key, position, entry in component_members(comp):
+        raw_marks = mark_spec_items(entry.get("marks")) if isinstance(entry, dict) else []
+        if not raw_marks or not remaining:
+            continue
+        spec = spec_text(entry)
+        chosen = next((item for item in remaining if item.get("target") == spec), remaining[0])
+        remaining.remove(chosen)
+        recorded = chosen.get("marks")
+        records[(key, position)] = recorded if isinstance(recorded, list) else []
+    return records
+
+
+def _fill_mark_entry(
+    entry: dict[str, Any],
+    raw_marks: list[Any] | None,
+    pinned_records: list[dict[str, Any]] | None,
+    enabled_index: int,
+    member_spec: str | None,
+) -> None:
+    record = (
+        coerce_mark_spec(raw_marks[enabled_index])
+        if raw_marks and enabled_index < len(raw_marks)
+        else None
+    )
+    pinned = (
+        pinned_records[enabled_index]
+        if pinned_records and enabled_index < len(pinned_records)
+        else None
+    )
+    state = "ok"
+    if record is not None:
+        entry["at"] = record["authored"]
+        entry["quote"] = record["quote"] is not None
+        entry["refs"] = list(record["refs"])
+        if record["problem"]:
+            state = record["problem"]
+        if record["start_seconds"] is not None and member_spec:
+            entry["address"] = f"{_mark_base_spec(member_spec)}@{record['authored']}"
+    if pinned is not None:
+        recorded_state = pinned.get("state")
+        if isinstance(recorded_state, str) and recorded_state:
+            state = recorded_state
+        if pinned.get("address"):
+            entry["address"] = pinned["address"]
+    entry["state"] = state
+    if state != "ok":
+        entry["detail"] = (pinned or {}).get("detail") or _mark_state_detail(
+            state, {"at": entry.get("at"), "member_spec": member_spec}, pinned
+        )
+
+
+def _mark_entries(
+    outline_marks: list[dict[str, Any]] | None,
+    raw_marks: list[Any] | None,
+    pinned_records: list[dict[str, Any]] | None,
+    member_spec: str | None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    enabled_index = 0
+    for item in outline_marks or []:
+        entry = {
+            "order": item.get("order"),
+            "disabled": item.get("disabled", False),
+            "comment": item.get("comment"),
+            "inline_comment": item.get("inline_comment"),
+        }
+        if entry["disabled"]:
+            entry["raw"] = item.get("raw")
+        else:
+            _fill_mark_entry(entry, raw_marks, pinned_records, enabled_index, member_spec)
+            enabled_index += 1
+        entries.append(entry)
+    while raw_marks and enabled_index < len(raw_marks):
+        entry = {
+            "order": len(entries),
+            "disabled": False,
+            "comment": None,
+            "inline_comment": None,
+        }
+        _fill_mark_entry(entry, raw_marks, pinned_records, enabled_index, member_spec)
+        enabled_index += 1
+        entries.append(entry)
+    return entries
+
+
 def _render_members(
-    node: dict[str, Any], comp: dict[str, Any] | None
+    node: dict[str, Any],
+    comp: dict[str, Any] | None,
+    marks_by_member: dict[tuple[str, int], list[dict[str, Any]]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     rendered: dict[str, list[dict[str, Any]]] = {}
     node_members = node.get("members", {})
@@ -187,6 +332,17 @@ def _render_members(
                     raw_entry = raw_list[enabled_index]
                     entry["spec"] = spec_text(raw_entry)
                     entry["alias"] = spec_alias(raw_entry)
+                    raw_marks = (
+                        mark_spec_items(raw_entry.get("marks"))
+                        if isinstance(raw_entry, dict)
+                        else []
+                    )
+                    outline_marks = item.get("marks")
+                    if raw_marks or outline_marks:
+                        pinned = (marks_by_member or {}).get((key, enabled_index))
+                        entry["marks"] = _mark_entries(
+                            outline_marks, raw_marks, pinned, entry["spec"]
+                        )
                 enabled_index += 1
             entries.append(entry)
         rendered[key] = entries
@@ -230,7 +386,7 @@ def _render_node(
         return base
 
     comp = component_for_node(handle, dotted_path)
-    members = _render_members(node, comp)
+    members = _render_members(node, comp, _marks_records_by_member(handle, dotted_path, comp))
     base["members"] = members
     inline_keys = [key for key in ("text", "prefix", "suffix") if comp and comp.get(key)]
     if inline_keys:
@@ -270,9 +426,15 @@ def _render_disabled_member(key: str, item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _render_member(node: dict[str, Any], key: str, position: int, entry: Any) -> dict[str, Any]:
+def _render_member(
+    node: dict[str, Any],
+    key: str,
+    position: int,
+    entry: Any,
+    marks_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     item = _member_outline_item(node, key, position)
-    return {
+    rendered = {
         "kind": "member",
         "key": key,
         "spec": spec_text(entry),
@@ -284,6 +446,97 @@ def _render_member(node: dict[str, Any], key: str, position: int, entry: Any) ->
         "state": "ok",
         "detail": None,
     }
+    raw_marks = mark_spec_items(entry.get("marks")) if isinstance(entry, dict) else []
+    outline_marks = item.get("marks") if item else None
+    if raw_marks or outline_marks:
+        rendered["marks"] = _mark_entries(
+            outline_marks, raw_marks, marks_records, rendered["spec"]
+        )
+    return rendered
+
+
+def _mark_state_detail(
+    state: str, view: dict[str, Any], pinned: dict[str, Any] | None
+) -> str:
+    authored = view.get("at")
+    if state == "mark-quote-requires-range":
+        suggestion = ""
+        boundary = (pinned or {}).get("covered_end_s")
+        if isinstance(boundary, (int, float)):
+            suggestion = f" The containing segment ends at {format_clock_time(boundary)}."
+        return f"A quote needs a range; add an end time to {authored}.{suggestion}"
+    if state == "mark-invalid":
+        return "A mark must be a mapping with at: or span:."
+    if state == "mark-invalid-time":
+        return f"Unrecognized time {authored}; use M:SS, MM:SS, or H:MM:SS."
+    if state == "mark-at-and-span":
+        return "Use at: or span:, not both."
+    if state == "mark-missing-time":
+        return "A mark needs at: or span:."
+    if state == "mark-beyond-duration":
+        return f"Mark {authored} lies beyond the end of this recording."
+    if state == "marks-on-untimed-target":
+        return f"Marks need timed media; {view.get('member_spec')} has no timed transcript."
+    if state == "marks-require-single-document":
+        return (
+            f"Marks require a single document; {view.get('member_spec')} "
+            "resolves to more than one."
+        )
+    return f"Recorded mark state: {state}."
+
+
+def _mark_view(
+    handle: ManifestHandle, target: Target
+) -> tuple[dict[str, Any], tuple[int, int] | None]:
+    key, position, entry = target.require_member()
+    mark_position, record = target.require_mark()
+    node = target.require_node()
+    spec = spec_text(entry)
+    outline_item = _member_outline_item(node, key, position)
+    outline_marks = [
+        item
+        for item in (outline_item or {}).get("marks") or []
+        if not item.get("disabled")
+    ]
+    outline_mark = outline_marks[mark_position] if mark_position < len(outline_marks) else None
+    comment = outline_mark.get("comment") if outline_mark else None
+    records = _marks_records_by_member(handle, target.dotted_path, target.comp).get(
+        (key, position)
+    )
+    pinned = records[mark_position] if records and mark_position < len(records) else None
+    state = record["problem"] or "ok"
+    if pinned is not None and isinstance(pinned.get("state"), str) and pinned["state"]:
+        state = pinned["state"]
+    address = pinned.get("address") if pinned else None
+    if not address and record["start_seconds"] is not None:
+        live_base = resolve_live_spec(handle, _mark_base_spec(spec))
+        address = f"{live_base}@{record['authored']}"
+    view = {
+        "kind": "mark",
+        "key": key,
+        "member_spec": spec,
+        "at": record["authored"],
+        "address": address,
+        "start_s": record["start_seconds"],
+        "end_s": record["end_seconds"],
+        "quote": record["quote"],
+        "refs": list(record["refs"]),
+        "comment": comment["text"] if isinstance(comment, dict) else None,
+        "inline_comment": outline_mark.get("inline_comment") if outline_mark else None,
+        "asr": pinned.get("asr") if pinned else None,
+        "capture": pinned.get("capture") if pinned else None,
+        "state": state,
+    }
+    if state == "ok":
+        view["detail"] = None
+    else:
+        view["detail"] = (pinned or {}).get("detail") or _mark_state_detail(
+            state, view, pinned
+        )
+    span = (
+        (outline_mark["line_start"], outline_mark["line_end"]) if outline_mark else None
+    )
+    return view, span
 
 
 def show(
@@ -333,8 +586,24 @@ def show(
 
     if target.kind == "member":
         key, position, entry = target.require_member()
-        result["node"] = _render_member(target.require_node(), key, position, entry)
+        records = _marks_records_by_member(handle, target.dotted_path, target.comp).get(
+            (key, position)
+        )
+        result["node"] = _render_member(target.require_node(), key, position, entry, records)
         result.update(state="ok", detail=target.detail, next_steps=[])
+        return result
+
+    if target.kind == "mark":
+        view, _span = _mark_view(handle, target)
+        result["node"] = view
+        if view["state"] == "ok":
+            result.update(state="ok", detail=target.detail, next_steps=[])
+        else:
+            result.update(
+                state=view["state"],
+                detail=view["detail"],
+                next_steps=_next_steps(view["state"], handle),
+            )
         return result
 
     result["node"] = _render_node(target.require_node(), target.dotted_path, handle, depth)
@@ -477,6 +746,16 @@ def _no_specs_state(target: Target) -> tuple[str, str]:
     )
 
 
+def _target_origin(raw: str) -> dict[str, Any]:
+    return {
+        "kind": "target",
+        "name": raw,
+        "manifest_path": None,
+        "context_dir": None,
+        "hydrated": False,
+    }
+
+
 def cat_selector(
     selector_text: str,
     *,
@@ -484,6 +763,21 @@ def cat_selector(
     registry_path: str | None = None,
     cwd: str | None = None,
 ) -> dict[str, Any]:
+    raw = selector_text.strip()
+    if is_external_target(raw):
+        return {
+            "selector": selector_text,
+            "origin": _target_origin(raw),
+            "node": None,
+            "members": [{"key": "target", "spec": raw, "alias": None, "payload": "pointer"}],
+            "specs": [raw],
+            "payload": "pointer",
+            "adjacency": None,
+            "state": "ok",
+            "detail": None,
+            "next_steps": [],
+        }
+
     selector = parse_selector(selector_text, cwd=cwd)
     handle = load_manifest_handle(selector.origin, registry_path=registry_path, cwd=cwd)
     if handle is None:
@@ -516,6 +810,9 @@ def cat_selector(
         result.update(state="disabled", detail=target.detail, next_steps=_next_steps("disabled", handle))
         return result
 
+    if target.kind == "mark":
+        return _cat_mark(result, handle, target, around)
+
     if target.kind == "group":
         members, specs, payload, span = _gather_group(node, target.dotted_path, handle)
     elif target.kind == "member":
@@ -544,15 +841,124 @@ def cat_selector(
     return result
 
 
+def _cat_mark(
+    result: dict[str, Any],
+    handle: ManifestHandle,
+    target: Target,
+    around: int | None,
+) -> dict[str, Any]:
+    view, span = _mark_view(handle, target)
+    result["mark"] = view
+    if around is not None and span is not None:
+        adjacency = _adjacency_for_span(handle, span[0], span[1], around)
+        result["adjacency"] = adjacency
+        if adjacency is None:
+            result["adjacency_note"] = (
+                handle.source_error or "Authored source unavailable for adjacency."
+            )
+    if view["state"] != "ok":
+        result.update(
+            state=view["state"],
+            detail=view["detail"],
+            next_steps=_next_steps(view["state"], handle),
+        )
+        return result
+    payload = "copy" if view["asr"] is not None else "pointer"
+    address = view["address"]
+    result["members"] = [
+        {
+            "key": "mark",
+            "spec": address or view["member_spec"],
+            "alias": None,
+            "payload": payload,
+        }
+    ]
+    result["specs"] = [address] if address else []
+    result["payload"] = payload
+    result.update(state="ok", detail=target.detail, next_steps=[])
+    return result
+
+
 def draw_substance(result: dict[str, Any]) -> dict[str, Any]:
     """Non-ok results pass through untouched: a designed state is already the
     complete answer, and inventing content for it would be fabrication."""
     if result.get("state") != "ok":
         return result
+    if result.get("mark") is not None:
+        return _draw_mark_substance(result)
     from ..references.factory import create_file_references
 
     drawn = create_file_references(list(result["specs"]))
     return {**result, "content": drawn["concatenated"]}
+
+
+def _draw_mark_substance(result: dict[str, Any]) -> dict[str, Any]:
+    mark = result["mark"]
+    asr = mark.get("asr")
+    if asr is None:
+        asr, live_state = _live_mark_slice(mark.get("address"))
+        if live_state is not None:
+            state, detail = live_state
+            origin = result.get("origin") or {}
+            name = str(origin.get("name") or result.get("selector") or "")
+            return {
+                **result,
+                "mark": {**mark, "state": state, "detail": detail},
+                "members": [],
+                "specs": [],
+                "payload": None,
+                "state": state,
+                "detail": detail,
+                "next_steps": _next_steps_for(state, name, name),
+            }
+    return {**result, "content": _mark_content(mark, asr)}
+
+
+def _live_mark_slice(
+    address: str | None,
+) -> tuple[str | None, tuple[str, str] | None]:
+    if not address:
+        return None, ("marks-on-untimed-target", "The mark has no resolvable address.")
+    from ..references.factory import create_file_references
+
+    try:
+        refs = create_file_references([address])["refs"]
+    except ValueError as exc:
+        return None, ("marks-on-untimed-target", str(exc))
+    doc = next((ref.document for ref in refs if hasattr(ref, "document")), None)
+    if doc is None:
+        return None, (
+            "marks-on-untimed-target",
+            f"{address} did not resolve to a timed transcript.",
+        )
+    metadata = doc.metadata or {}
+    live_state = metadata.get("mark_state")
+    if isinstance(live_state, str) and live_state:
+        detail = doc.content.strip() or f"Recorded mark state: {live_state}."
+        return None, (live_state, detail)
+    value = metadata.get("asr")
+    return value if isinstance(value, str) else doc.content, None
+
+
+def _mark_content(mark: dict[str, Any], asr: str) -> str:
+    header_bits = [str(mark.get("address") or mark.get("at"))]
+    if mark.get("inline_comment"):
+        header_bits.append(str(mark["inline_comment"]))
+    lines = [f"--- {' · '.join(header_bits)} ---", ""]
+    if mark.get("comment"):
+        lines.extend(str(mark["comment"]).splitlines())
+        lines.append("")
+    lines.append("asr:")
+    lines.extend(asr.splitlines())
+    if mark.get("quote"):
+        lines.append("")
+        lines.append("quote:")
+        lines.extend(str(mark["quote"]).rstrip("\n").splitlines())
+    if mark.get("refs"):
+        lines.append("")
+        lines.append("refs:")
+        lines.extend(f"- {ref}" for ref in mark["refs"])
+    return "\n".join(lines) + "\n"
 
 
 def _resolved(path: Path | str) -> str:
@@ -590,6 +996,215 @@ def _member_source_identities(handle: ManifestHandle) -> dict[str, list[str]]:
     return identities
 
 
+def _spans_overlap(
+    a_start: float, a_end: float | None, b_start: float, b_end: float | None
+) -> bool:
+    a_close = a_start if a_end is None else a_end
+    b_close = b_start if b_end is None else b_end
+    return a_start <= b_close and b_start <= a_close
+
+
+def _mark_edge_for_target(
+    record: Any, qbase: str, qmark: Any, entry_target: Any
+) -> dict[str, Any] | None:
+    if not isinstance(record, dict):
+        return None
+    start_s = record.get("start_s")
+    if not isinstance(start_s, (int, float)):
+        return None
+    address = record.get("address")
+    record_base = split_mark_address(str(address))[0] if address else None
+    if record_base != qbase and entry_target != qbase:
+        return None
+    end_s = record.get("end_s")
+    if qmark is not None and not _spans_overlap(
+        qmark.start_seconds,
+        qmark.end_seconds,
+        float(start_s),
+        float(end_s) if isinstance(end_s, (int, float)) else None,
+    ):
+        return None
+    return {
+        "kind": "mark",
+        "address": address,
+        "authored": record.get("authored"),
+        "start_s": record.get("start_s"),
+        "end_s": record.get("end_s"),
+        "quote": record.get("quote"),
+        "comment": record.get("comment"),
+        "inline_comment": record.get("inline_comment"),
+        "refs": record.get("refs"),
+        "state": record.get("state"),
+    }
+
+
+def _note_mark_edges(
+    source: Any, qbase: str, qmark: Any, *, note_path: str
+) -> list[dict[str, Any]]:
+    data = source.data if isinstance(source.data, dict) else {}
+    raw_components = data.get("components")
+    if not isinstance(raw_components, list):
+        return []
+    try:
+        comps = normalize_components(raw_components)
+    except ValueError:
+        return []
+    edges: list[dict[str, Any]] = []
+    for comp in comps:
+        files = comp.get("files")
+        if not isinstance(files, list):
+            continue
+        for entry in files:
+            raw_marks = mark_spec_items(entry.get("marks")) if isinstance(entry, dict) else []
+            if not raw_marks:
+                continue
+            base = _mark_base_spec(spec_text(entry))
+            if base != qbase:
+                continue
+            for raw_mark in raw_marks:
+                record = coerce_mark_spec(raw_mark)
+                if record["start_seconds"] is None:
+                    continue
+                if qmark is not None and not _spans_overlap(
+                    qmark.start_seconds,
+                    qmark.end_seconds,
+                    record["start_seconds"],
+                    record["end_seconds"],
+                ):
+                    continue
+                edges.append(
+                    {
+                        "kind": "mark",
+                        "source_note": note_path,
+                        "component": comp.get("name"),
+                        "address": f"{base}@{record['authored']}",
+                        "authored": record["authored"],
+                        "start_s": record["start_seconds"],
+                        "end_s": record["end_seconds"],
+                        "quote": record["quote"] is not None,
+                        "refs": list(record["refs"]),
+                        "state": record["problem"] or "ok",
+                    }
+                )
+    return edges
+
+
+def _tag_discovered_mark_edges(
+    qbase: str, qmark: Any, registered_sources: set[str]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    from ..manifest.contexts import discover_tagged_notes, links_discovery_config
+    from ..manifest.source import frontmatter_has_manifest_tag, load_manifest_source
+
+    discovery = links_discovery_config()
+    tags = discovery["tags"]
+    root = discovery["root"]
+    scope: dict[str, Any] = {
+        "tags": tags,
+        "root": str(root) if root else None,
+        "notes_scanned": 0,
+        "notes_with_manifest": 0,
+    }
+    if root is None:
+        scope["skipped"] = "no links.discovery root configured"
+        return scope, []
+    try:
+        notes = discover_tagged_notes(root=root, tags=tags)
+    except ValueError as exc:
+        scope["skipped"] = str(exc)
+        return scope, []
+    edges: list[dict[str, Any]] = []
+    for path in notes:
+        if _resolved(path) in registered_sources:
+            continue
+        scope["notes_scanned"] += 1
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not frontmatter_has_manifest_tag(text, tag=tags):
+            continue
+        try:
+            source = load_manifest_source(str(path))
+        except (OSError, ValueError):
+            continue
+        scope["notes_with_manifest"] += 1
+        edges.extend(_note_mark_edges(source, qbase, qmark, note_path=str(path)))
+    return scope, edges
+
+
+def _links_target(
+    raw: str,
+    selector_text: str,
+    *,
+    registry: dict[str, ContextEntry],
+    registry_path: str | None,
+    cwd: str | None,
+) -> dict[str, Any]:
+    target = parse_target_spec(raw).get("target", raw)
+    if not isinstance(target, str):
+        target = raw
+    base, query_mark = split_mark_address(target)
+
+    coverage: dict[str, Any] = {
+        "registry_total": len(registry),
+        "scanned": 0,
+        "skipped_unhydrated": [],
+    }
+    in_edges: list[dict[str, Any]] = []
+    registered_sources: set[str] = set()
+    for name in sorted(registry):
+        handle = load_manifest_handle(
+            name, registry=registry, registry_path=registry_path, cwd=cwd
+        )
+        if handle is None:
+            continue
+        if handle.manifest_path is not None:
+            registered_sources.add(_resolved(handle.manifest_path))
+        if not handle.hydrated:
+            coverage["skipped_unhydrated"].append(name)
+            continue
+        coverage["scanned"] += 1
+        components = handle.index.get("components") if handle.index else None
+        if not isinstance(components, dict):
+            continue
+        for dotted, entries in components.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("kind") != "marks":
+                    continue
+                for record in entry.get("marks") or []:
+                    edge = _mark_edge_for_target(
+                        record, base, query_mark, entry.get("target")
+                    )
+                    if edge is not None:
+                        edge["source_context"] = name
+                        edge["component"] = dotted
+                        in_edges.append(edge)
+
+    tag_scope, note_edges = _tag_discovered_mark_edges(base, query_mark, registered_sources)
+    in_edges.extend(note_edges)
+    coverage["tag_scope"] = tag_scope
+
+    return {
+        "selector": selector_text,
+        "origin": _target_origin(raw),
+        "target": {
+            "base": base,
+            "authored": query_mark.authored if query_mark else None,
+            "start_s": query_mark.start_seconds if query_mark else None,
+            "end_s": query_mark.end_seconds if query_mark else None,
+        },
+        "out": None,
+        "in": in_edges,
+        "shared": None,
+        "coverage": coverage,
+        "state": "ok",
+        "detail": None if in_edges else "No marks address this target.",
+        "next_steps": [],
+    }
+
+
 def links(
     selector_text: str,
     *,
@@ -604,6 +1219,12 @@ def links(
         registry = load_context_registry(registry_path)
     except (OSError, ValueError):
         registry = {}
+
+    raw = selector_text.strip()
+    if is_external_target(raw):
+        return _links_target(
+            raw, selector_text, registry=registry, registry_path=registry_path, cwd=cwd
+        )
 
     selector = parse_selector(selector_text, cwd=cwd)
     handle = load_manifest_handle(selector.origin, registry=registry, registry_path=registry_path, cwd=cwd)
@@ -703,6 +1324,8 @@ def _empty_drift() -> dict[str, Any]:
         "sources_changed": [],
         "members_vanished": [],
         "references_gone": [],
+        "marks_drifted": [],
+        "marks_unchecked": None,
         "hydration_stale": False,
     }
 
@@ -723,7 +1346,130 @@ def _local_entry_source_path(handle: ManifestHandle, entry: dict[str, Any]) -> P
     return None
 
 
-def _compute_drift(handle: ManifestHandle, index_mtime: float | None) -> dict[str, Any]:
+def _current_store_capture(key: str, cache: dict[str, Any]) -> tuple[str, Any]:
+    if key in cache:
+        return cache[key]
+    import json
+    import shlex
+    import subprocess
+
+    raw = os.environ.get("CONTEXTUALIZE_READER_COMMAND", "context-reader").strip()
+    command = shlex.split(raw) if raw else ["context-reader"]
+    outcome: tuple[str, Any]
+    try:
+        proc = subprocess.run(
+            [*command, "documents", "captures", key, "--json"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        outcome = ("unavailable", f"context-reader unavailable: {exc}")
+    else:
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()
+            outcome = (
+                "unavailable",
+                f"documents captures {key} failed" + (f": {detail}" if detail else ""),
+            )
+        else:
+            try:
+                payload = json.loads(proc.stdout or "null")
+            except ValueError:
+                payload = None
+            captures = (
+                [item for item in payload if isinstance(item, dict)]
+                if isinstance(payload, list)
+                else []
+            )
+            chosen = next((item for item in captures if item.get("active")), None)
+            if chosen is None and captures:
+                chosen = captures[0]
+            identity = (
+                None
+                if chosen is None
+                else {
+                    "id": chosen.get("id"),
+                    "model": chosen.get("model"),
+                    "captured_at": chosen.get("capturedAt") or chosen.get("captured_at"),
+                    "synthetic": bool(chosen.get("synthetic")),
+                }
+            )
+            outcome = ("ok", identity)
+    cache[key] = outcome
+    return outcome
+
+
+def _capture_drift_reason(
+    pinned: dict[str, Any], current: dict[str, Any] | None
+) -> str | None:
+    if current is None:
+        return "no transcription recorded in the store"
+    if any(pinned.get(field) != current.get(field) for field in ("id", "model", "captured_at")):
+        pinned_label = pinned.get("model") or pinned.get("id")
+        current_label = current.get("model") or current.get("id")
+        return f"pinned transcription {pinned_label} superseded by {current_label}"
+    return None
+
+
+def _pinned_marks_by_store_key(
+    components: dict[str, Any],
+) -> dict[str, list[tuple[str, dict[str, Any]]]]:
+    pinned: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for comp_name, entries in components.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("kind") != "marks":
+                continue
+            for record in entry.get("marks") or []:
+                if not isinstance(record, dict):
+                    continue
+                capture = record.get("capture")
+                address = record.get("address")
+                if not isinstance(capture, dict) or not address:
+                    continue
+                base = split_mark_address(str(address))[0]
+                if not base.startswith("store:"):
+                    continue
+                key = base[len("store:") :]
+                pinned.setdefault(key, []).append((comp_name, record))
+    return pinned
+
+
+def _compute_marks_drift(
+    components: dict[str, Any], captures_cache: dict[str, Any] | None
+) -> tuple[list[dict[str, Any]], str | None]:
+    pinned_by_key = _pinned_marks_by_store_key(components)
+    if not pinned_by_key:
+        return [], None
+    cache = captures_cache if captures_cache is not None else {}
+    drifted: list[dict[str, Any]] = []
+    unchecked: str | None = None
+    for key in sorted(pinned_by_key):
+        status_kind, value = _current_store_capture(key, cache)
+        if status_kind == "unavailable":
+            if unchecked is None:
+                unchecked = value
+            continue
+        for comp_name, record in pinned_by_key[key]:
+            reason = _capture_drift_reason(record["capture"], value)
+            if reason is not None:
+                drifted.append(
+                    {
+                        "component": comp_name,
+                        "address": record.get("address"),
+                        "reason": reason,
+                    }
+                )
+    return drifted, unchecked
+
+
+def _compute_drift(
+    handle: ManifestHandle,
+    index_mtime: float | None,
+    *,
+    captures_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     sources_changed = []
     members_vanished = []
     references_gone = []
@@ -736,34 +1482,45 @@ def _compute_drift(handle: ManifestHandle, index_mtime: float | None) -> dict[st
             pass
 
     components = handle.index.get("components", {}) if handle.index else {}
-    if isinstance(components, dict):
-        for comp_name, entries in components.items():
-            if not isinstance(entries, list):
+    if not isinstance(components, dict):
+        components = {}
+    for comp_name, entries in components.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("source_type") != "local":
                 continue
-            for entry in entries:
-                if not isinstance(entry, dict) or entry.get("source_type") != "local":
-                    continue
-                absolute = _local_entry_source_path(handle, entry)
-                if absolute is None:
-                    continue
-                try:
-                    mtime = absolute.stat().st_mtime
-                except OSError:
-                    members_vanished.append({"component": comp_name, "path": str(absolute)})
-                    continue
-                if index_mtime is not None and mtime > index_mtime:
-                    sources_changed.append({"component": comp_name, "path": str(absolute)})
+            absolute = _local_entry_source_path(handle, entry)
+            if absolute is None:
+                continue
+            try:
+                mtime = absolute.stat().st_mtime
+            except OSError:
+                members_vanished.append({"component": comp_name, "path": str(absolute)})
+                continue
+            if index_mtime is not None and mtime > index_mtime:
+                sources_changed.append({"component": comp_name, "path": str(absolute)})
 
     for edge in handle.references_out:
         target = edge.get("target_path")
         if target and not Path(target).exists():
             references_gone.append(edge)
 
+    marks_drifted, marks_unchecked = _compute_marks_drift(components, captures_cache)
+
     return {
-        "any": bool(sources_changed or members_vanished or references_gone or hydration_stale),
+        "any": bool(
+            sources_changed
+            or members_vanished
+            or references_gone
+            or marks_drifted
+            or hydration_stale
+        ),
         "sources_changed": sources_changed,
         "members_vanished": members_vanished,
         "references_gone": references_gone,
+        "marks_drifted": marks_drifted,
+        "marks_unchecked": marks_unchecked,
         "hydration_stale": hydration_stale,
     }
 
@@ -778,10 +1535,19 @@ def _drift_detail(drift: dict[str, Any]) -> str:
         bits.append(f"{len(drift['members_vanished'])} member target(s) vanished")
     if drift["references_gone"]:
         bits.append(f"{len(drift['references_gone'])} referenced manifest(s) gone")
+    if drift.get("marks_drifted"):
+        bits.append(f"{len(drift['marks_drifted'])} mark(s) drifted from the store transcript")
+    if drift.get("marks_unchecked"):
+        bits.append(f"mark drift unchecked: {drift['marks_unchecked']}")
     return "; ".join(bits) or "drift detected"
 
 
-def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> dict[str, Any]:
+def _full_status(
+    handle: ManifestHandle,
+    *,
+    status_path: str | None = None,
+    captures_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     name = handle.registry_name or handle.display_name
     hydration = _latest_hydration_status(handle.registry_name, status_path)
     result: dict[str, Any] = {
@@ -819,7 +1585,7 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
     except OSError:
         index_mtime = None
 
-    drift = _compute_drift(handle, index_mtime)
+    drift = _compute_drift(handle, index_mtime, captures_cache=captures_cache)
     result["cache_age_seconds"] = (time.time() - index_mtime) if index_mtime is not None else None
     result["drift"] = drift
 
@@ -830,10 +1596,21 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
             next_steps=_next_steps("hydrate-failed", handle),
         )
     elif drift["any"]:
-        state = "stale-cache" if (drift["hydration_stale"] or drift["sources_changed"]) else "dangling-reference"
-        result.update(state=state, detail=_drift_detail(drift), next_steps=_next_steps("stale-cache", handle))
+        if drift["hydration_stale"] or drift["sources_changed"]:
+            state = "stale-cache"
+        elif drift["members_vanished"] or drift["references_gone"]:
+            state = "dangling-reference"
+        else:
+            state = "transcript-drift"
+        steps_key = "transcript-drift" if state == "transcript-drift" else "stale-cache"
+        result.update(state=state, detail=_drift_detail(drift), next_steps=_next_steps(steps_key, handle))
     else:
-        result.update(state="ok", detail=None, next_steps=[])
+        unchecked = drift.get("marks_unchecked")
+        result.update(
+            state="ok",
+            detail=f"Mark drift unchecked: {unchecked}" if unchecked else None,
+            next_steps=[],
+        )
     return result
 
 
@@ -844,6 +1621,7 @@ def _context_status(
     registry_path: str | None,
     status_path: str | None,
     cwd: str | None,
+    captures_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     handle = load_manifest_handle(name, registry=registry, registry_path=registry_path, cwd=cwd)
     if handle is None:
@@ -851,7 +1629,7 @@ def _context_status(
         return {**not_found, "name": name, "detail": "Registry entry could not be resolved."}
     if handle.source is None:
         return {**_unresolvable_source(handle), "name": name}
-    return _full_status(handle, status_path=status_path)
+    return _full_status(handle, status_path=status_path, captures_cache=captures_cache)
 
 
 def status(
@@ -872,11 +1650,22 @@ def status(
         }
 
     if selector_text is None:
+        captures_cache: dict[str, Any] = {}
         contexts = [
-            _context_status(name, registry, registry_path=registry_path, status_path=status_path, cwd=cwd)
+            _context_status(
+                name,
+                registry,
+                registry_path=registry_path,
+                status_path=status_path,
+                cwd=cwd,
+                captures_cache=captures_cache,
+            )
             for name in sorted(registry)
         ]
         drifted = sum(1 for entry in contexts if entry.get("drift", {}).get("any"))
+        marks_drifted = sum(
+            len(entry.get("drift", {}).get("marks_drifted") or []) for entry in contexts
+        )
         return {
             "state": "ok",
             "detail": None,
@@ -886,7 +1675,11 @@ def status(
                 "path": str(registry_path) if registry_path else str(default_context_registry_path()),
             },
             "contexts": contexts,
-            "drift_summary": {"drifted": drifted, "total": len(registry)},
+            "drift_summary": {
+                "drifted": drifted,
+                "total": len(registry),
+                "marks_drifted": marks_drifted,
+            },
         }
 
     selector = parse_selector(selector_text, cwd=cwd)

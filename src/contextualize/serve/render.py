@@ -20,6 +20,16 @@ STATE_LABELS = {
     "stale-cache": "stale",
     "hydrate-failed": "hydrate failed",
     "dangling-reference": "dangling reference",
+    "mark-quote-requires-range": "quote needs a range",
+    "mark-invalid": "invalid mark",
+    "mark-invalid-time": "invalid mark time",
+    "mark-at-and-span": "at and span",
+    "mark-missing-time": "missing mark time",
+    "mark-beyond-duration": "beyond duration",
+    "marks-on-untimed-target": "untimed target",
+    "marks-require-single-document": "multi-document target",
+    "mark-params-unsupported": "params with mark",
+    "transcript-drift": "transcript drift",
 }
 
 DISABLED_MARK = "⊘"
@@ -43,6 +53,8 @@ def _origin_header(result: dict[str, Any]) -> list[str]:
     header = str(name)
     if origin.get("manifest_path"):
         header += f"  ({origin['manifest_path']})"
+    if origin.get("kind") == "target":
+        return [header]
     hydrated = "hydrated" if origin.get("hydrated") else "not hydrated"
     return [header, f"  {hydrated}"]
 
@@ -63,6 +75,30 @@ def _member_line(item: dict[str, Any], pad: str) -> str:
     if inline:
         label = f"{label}  # {inline}"
     return f"{pad}- {label}"
+
+
+def _mark_line(mark: dict[str, Any], pad: str) -> str:
+    if mark.get("disabled"):
+        raw = (mark.get("raw") or "").splitlines()[0] if mark.get("raw") else ""
+        return f"{pad}{DISABLED_MARK} {raw}"
+    label = f"@ {mark.get('at')}"
+    if mark.get("quote"):
+        label += "  (quote)"
+    state = mark.get("state", "ok")
+    if state != "ok":
+        label += f"  [{STATE_LABELS.get(state, state)}]"
+    inline = mark.get("inline_comment")
+    if inline:
+        label += f"  # {inline}"
+    return f"{pad}{label}"
+
+
+def _mark_block_lines(item: dict[str, Any], pad: str) -> list[str]:
+    lines: list[str] = []
+    for mark in item.get("marks") or []:
+        lines.extend(_comment_lines(mark.get("comment"), pad))
+        lines.append(_mark_line(mark, pad))
+    return lines
 
 
 def _render_component(node: dict[str, Any], indent: int, ordinal: int | None) -> list[str]:
@@ -98,6 +134,7 @@ def _render_component(node: dict[str, Any], indent: int, ordinal: int | None) ->
     for items in node.get("members", {}).values():
         for item in items:
             lines.append(_member_line(item, pad + "    "))
+            lines.extend(_mark_block_lines(item, pad + "      "))
     return lines
 
 
@@ -115,7 +152,21 @@ def _render_node(node: dict[str, Any] | None) -> list[str]:
         if node.get("disabled"):
             raw_first = (node.get("raw") or "").splitlines()[0]
             return [f"  {DISABLED_MARK} {raw_first}"]
-        return [_member_line(node, "  ")]
+        return [_member_line(node, "  ")] + _mark_block_lines(node, "    ")
+    if node["kind"] == "mark":
+        lines = [f"  on {node['member_spec']}"] if node.get("member_spec") else []
+        lines.extend(_comment_lines(node.get("comment"), "  "))
+        lines.append(_mark_line(node, "  "))
+        if node.get("address"):
+            lines.append(f"    {node['address']}")
+        if node.get("quote"):
+            lines.append("    quote:")
+            lines.extend(
+                f"      {line}" for line in str(node["quote"]).rstrip("\n").splitlines()
+            )
+        for ref in node.get("refs") or []:
+            lines.append(f"    ref: {ref}")
+        return lines
     return _render_component(node, 1, None)
 
 
@@ -151,6 +202,9 @@ def render_links(result: dict[str, Any]) -> str:
     if result.get("in") is not None:
         lines.append(f"\n  in ({len(result['in'])})")
         for edge in result["in"]:
+            if edge.get("kind") == "mark":
+                lines.append(_mark_edge_line(edge))
+                continue
             lines.append(
                 f"    {edge.get('source_context')}  ({edge.get('form')}, {edge.get('payload')})"
             )
@@ -171,12 +225,45 @@ def render_links(result: dict[str, Any]) -> str:
         lines.append(
             f"\n  coverage: scanned {coverage['scanned']}/{coverage['registry_total']} registered contexts{note}"
         )
+        tag_scope = coverage.get("tag_scope")
+        if tag_scope:
+            lines.append(_tag_scope_line(tag_scope))
     return "\n".join(lines)
 
 
+def _mark_edge_line(edge: dict[str, Any]) -> str:
+    who = edge.get("source_context") or edge.get("source_note")
+    line = f"    {edge.get('address')}  ({who}"
+    if edge.get("component"):
+        line += f", {edge['component']}"
+    line += ")"
+    state = edge.get("state")
+    if state and state != "ok":
+        line += f"  [{STATE_LABELS.get(state, state)}]"
+    inline = edge.get("inline_comment")
+    if inline:
+        line += f"  # {inline}"
+    return line
+
+
+def _tag_scope_line(tag_scope: dict[str, Any]) -> str:
+    tags = ", ".join(tag_scope.get("tags") or [])
+    if tag_scope.get("skipped"):
+        return f"  tag scope: {tags} - skipped: {tag_scope['skipped']}"
+    return (
+        f"  tag scope: {tags} @ {tag_scope.get('root')}"
+        f" - {tag_scope.get('notes_with_manifest', 0)}/{tag_scope.get('notes_scanned', 0)}"
+        " note(s) with manifests"
+    )
+
+
 def _render_drift(drift: dict[str, Any]) -> list[str]:
+    unchecked = drift.get("marks_unchecked")
     if not drift.get("any"):
-        return ["  drift: none"]
+        lines = ["  drift: none"]
+        if unchecked:
+            lines.append(f"    (marks unchecked: {unchecked})")
+        return lines
     lines = ["  drift:"]
     if drift.get("hydration_stale"):
         lines.append("    - hydration is older than its manifest source")
@@ -186,6 +273,10 @@ def _render_drift(drift: dict[str, Any]) -> list[str]:
         lines.append(f"    - member target vanished: {item['path']}")
     for edge in drift.get("references_gone", []):
         lines.append(f"    - referenced manifest gone: {edge.get('target_path')}")
+    for item in drift.get("marks_drifted", []):
+        lines.append(f"    - mark drifted: {item.get('address')} ({item.get('reason')})")
+    if unchecked:
+        lines.append(f"    (marks unchecked: {unchecked})")
     return lines
 
 

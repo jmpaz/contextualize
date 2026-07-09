@@ -247,6 +247,48 @@ def _discover_subscription_contexts(
     return contexts
 
 
+def links_discovery_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`links.discovery` from config.yaml: the tag scope links aggregation
+    scans for manifest-bearing notes. Tags default per marks-spec ruling 10;
+    a missing root means the scan is skipped, legibly."""
+    if config is None:
+        config = read_config()
+    if not isinstance(config, dict):
+        config = {}
+    links_cfg = config.get("links")
+    discovery = links_cfg.get("discovery") if isinstance(links_cfg, dict) else None
+    tags = ["ctx/manifest"]
+    root: Path | None = None
+    if isinstance(discovery, dict):
+        raw_tags = discovery.get("tags")
+        if isinstance(raw_tags, str):
+            raw_tags = [raw_tags]
+        if isinstance(raw_tags, list):
+            cleaned = [str(item).strip() for item in raw_tags if str(item).strip()]
+            if cleaned:
+                tags = cleaned
+        raw_root = discovery.get("root")
+        if isinstance(raw_root, str) and raw_root.strip():
+            root = Path(raw_root.strip()).expanduser()
+    return {"tags": tags, "root": root}
+
+
+def discover_tagged_notes(*, root: Path, tags: list[str]) -> list[Path]:
+    """Candidate notes for links aggregation: one zk query per tag, glob
+    over-fetching (`<tag>*` matches subtags but also e.g. `ctx/manifesto`);
+    `frontmatter_has_manifest_tag` is the precise filter."""
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for tag in tags:
+        for note in _zk_subscription_notes(root=root, tag=f"{tag}*"):
+            path = _note_path(root, note)
+            if path is None or path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
 def _zk_subscription_notes(*, root: Path, tag: str) -> list[dict[str, Any]]:
     try:
         result = subprocess.run(

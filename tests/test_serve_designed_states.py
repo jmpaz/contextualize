@@ -46,6 +46,16 @@ ALL_STATES = {
     "stale-cache",
     "dangling-reference",
     "hydrate-failed",
+    "mark-quote-requires-range",
+    "mark-invalid",
+    "mark-invalid-time",
+    "mark-at-and-span",
+    "mark-missing-time",
+    "mark-beyond-duration",
+    "marks-on-untimed-target",
+    "marks-require-single-document",
+    "mark-params-unsupported",
+    "transcript-drift",
     "ok",
 }
 

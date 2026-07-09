@@ -29,7 +29,8 @@ TOOLS: list[dict[str, Any]] = [
         "name": "show",
         "description": (
             "Render a context/manifest as authored: components, groups, and sets "
-            "in order, comments as marginalia, disabled members visibly off. "
+            "in order, comments as marginalia, disabled members visibly off, "
+            "marks under their members. "
             "Works on any manifest, registered or not, hydrated or not."
         ),
         "inputSchema": {
@@ -38,8 +39,9 @@ TOOLS: list[dict[str, Any]] = [
                 "selector": {
                     "type": "string",
                     "description": (
-                        "name-or-path[:component[.member]]. A member token is its "
-                        "alias, its filename slug, or a 1-based ordinal."
+                        "name-or-path[:component[.member[.mark]]]. A member token is its "
+                        "alias, its filename slug, or a 1-based ordinal; a mark token is "
+                        "its authored time or ordinal."
                     ),
                 },
                 "depth": {
@@ -54,7 +56,9 @@ TOOLS: list[dict[str, Any]] = [
         "name": "cat",
         "description": (
             "Draw member substance into working context. selector must narrow to "
-            "a component, set, or a specific member within one."
+            "a component, set, a specific member, a mark within one, or a bare "
+            "target/@ address (e.g. store:voice/a.m4a@4:12-5:00). A drawn mark "
+            "carries the asr slice beside its authored quote, marginalia, and refs."
         ),
         "inputSchema": {
             "type": "object",
@@ -62,8 +66,9 @@ TOOLS: list[dict[str, Any]] = [
                 "selector": {
                     "type": "string",
                     "description": (
-                        "name-or-path:component[.member]. A member token is its "
-                        "alias, its filename slug, or a 1-based ordinal."
+                        "name-or-path:component[.member[.mark]], or a target/@ address. "
+                        "A member token is its alias, its filename slug, or a 1-based "
+                        "ordinal; a mark token is its authored time or ordinal."
                     ),
                 },
                 "around": {
@@ -79,12 +84,18 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "The connective tissue between contexts: who cites this one (in), what it "
             "cites (out), and which sources it holds in common with other registered "
-            "contexts (shared members)."
+            "contexts (shared members). Pass a target/@ address "
+            "(store:voice/a.m4a[@4:12]) to aggregate every mark addressing it across "
+            "registered contexts and tag-discovered notes; the scope in effect is "
+            "named in coverage.tag_scope."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "selector": {"type": "string"},
+                "selector": {
+                    "type": "string",
+                    "description": "Context name, manifest path, or target/@ address.",
+                },
                 "direction": {"type": "string", "enum": ["in", "out", "both"], "default": "both"},
             },
             "required": ["selector"],

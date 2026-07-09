@@ -158,7 +158,10 @@ def test_cat_selector_failure_is_a_clean_error(tmp_path: Path) -> None:
         cli.cli, ["cat", f"{drive / 'manifest.yaml'}:nosuch"], env=_isolated_env(tmp_path)
     )
     assert result.exit_code != 0
-    assert "nosuch" in str(result.output) + str(result.exception)
+    rendered = str(result.output) + str(result.exception)
+    assert "nosuch" in rendered
+    assert "[not found]" in rendered
+    assert "-> " in rendered
 
 
 def test_cat_json_keeps_structured_state_on_failure(tmp_path: Path) -> None:

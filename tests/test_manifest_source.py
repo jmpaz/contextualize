@@ -179,6 +179,142 @@ components:
     assert [len(leaf["members"]["files"]) for leaf in leaves] == [2, 1]
 
 
+MARKED_MANIFEST = """config:
+  context:
+    include-meta: true
+components:
+  - name: reckoning
+    files:
+      - path: "store:voice/2026-07-07/12-34-52.m4a"
+        marks:
+          # the case-study charge
+          - at: 4:12  # absentee parent
+          # - at: 9:00
+          #   quote: |
+          #     gone for now
+          - at: 12:04-13:26
+            quote: |
+              ...treat this as a case study.
+              # not a comment
+              marks:
+              Two prompts.
+            refs:
+              - notes/op9f.md
+              - dev/mood-kit
+      - plain.md  # untouched neighbor
+  - name: refs  # sibling component
+    files:
+      - c.md
+"""
+
+
+def test_outline_parses_nested_marks_with_comment_grammar(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(MARKED_MANIFEST, encoding="utf-8")
+
+    source = load_manifest_source(path)
+    assert source.source_format is not None
+    leaves = list(iter_active_leaves(source.source_format.outline))
+    members = leaves[0]["members"]["files"]
+    assert len(members) == 2
+
+    marks = members[0]["marks"]
+    assert [mark["order"] for mark in marks] == [0, 1, 2]
+
+    point = marks[0]
+    assert point["disabled"] is False
+    assert point["comment"] == {
+        "text": "the case-study charge",
+        "line_start": 9,
+        "line_end": 9,
+    }
+    assert point["inline_comment"] == "absentee parent"
+    assert point["raw"] == "- at: 4:12"
+    assert point["line_start"] == point["line_end"] == 10
+
+    disabled = marks[1]
+    assert disabled["disabled"] is True
+    assert disabled["raw"] == "- at: 9:00\n  quote: |\n    gone for now"
+    assert disabled["line_start"] == 11
+    assert disabled["line_end"] == 13
+
+    span = marks[2]
+    assert span["raw"] == "- at: 12:04-13:26"
+    assert span["line_start"] == 14
+    assert span["line_end"] == 22
+    assert "marks" not in span
+
+    assert "marks" not in members[1]
+    assert members[1]["inline_comment"] == "untouched neighbor"
+    assert leaves[1]["inline_comment"] == "sibling component"
+
+
+def test_nested_marks_pair_with_data_layer(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(MARKED_MANIFEST, encoding="utf-8")
+
+    source = load_manifest_source(path)
+    normalized = normalize_components(source.data["components"])
+    data_marks = normalized[0]["files"][0]["marks"]
+
+    # YAML 1.1 sexagesimal: unquoted `at: 4:12` arrives as int 252
+    assert data_marks[0] == {"at": 252}
+    assert data_marks[1]["at"] == "12:04-13:26"
+    assert data_marks[1]["quote"] == (
+        "...treat this as a case study.\n# not a comment\nmarks:\nTwo prompts.\n"
+    )
+    assert data_marks[1]["refs"] == ["notes/op9f.md", "dev/mood-kit"]
+
+    outline_members = list(iter_active_leaves(source.source_format.outline))[0][
+        "members"
+    ]["files"]
+    enabled_outline_marks = [
+        mark for mark in outline_members[0]["marks"] if not mark["disabled"]
+    ]
+    assert len(enabled_outline_marks) == len(data_marks)
+
+
+def test_nested_marks_zero_indent_style(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(
+        """components:
+- name: main
+  files:
+  - path: a.md
+    marks:
+    - at: 0:30  # zero-indent style
+""",
+        encoding="utf-8",
+    )
+
+    source = load_manifest_source(path)
+    member = list(iter_active_leaves(source.source_format.outline))[0]["members"][
+        "files"
+    ][0]
+    assert member["marks"][0]["inline_comment"] == "zero-indent style"
+    assert member["marks"][0]["raw"] == "- at: 0:30"
+    assert source.data["components"][0]["files"][0]["marks"] == [{"at": "0:30"}]
+
+
+def test_flow_style_marks_are_data_only(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(
+        """components:
+  - name: main
+    files:
+      - {path: a.md, marks: [{at: "4:12"}]}
+""",
+        encoding="utf-8",
+    )
+
+    source = load_manifest_source(path)
+    member = list(iter_active_leaves(source.source_format.outline))[0]["members"][
+        "files"
+    ][0]
+    assert "marks" not in member
+    assert source.data["components"][0]["files"][0]["marks"] == [{"at": "4:12"}]
+
+
 def test_outline_finds_members_on_bare_unnamed_component(tmp_path: Path) -> None:
     # `- files:` with no `name:`/`group:`/`set:` key puts the member list key
     # directly on the item's dash line rather than on its own line.

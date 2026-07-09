@@ -69,6 +69,7 @@ class PluginContext(TypedDict, total=False):
     include_containing: bool
     list_limit: int
     list_offset: int
+    span: dict[str, Any]
 
 
 class PluginTargetDescriptor(TypedDict, total=False):
