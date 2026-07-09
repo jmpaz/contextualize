@@ -255,8 +255,12 @@ def _tag_scope_line(tag_scope: dict[str, Any]) -> str:
 
 
 def _render_drift(drift: dict[str, Any]) -> list[str]:
+    unchecked = drift.get("marks_unchecked")
     if not drift.get("any"):
-        return ["  drift: none"]
+        lines = ["  drift: none"]
+        if unchecked:
+            lines.append(f"    (marks unchecked: {unchecked})")
+        return lines
     lines = ["  drift:"]
     if drift.get("hydration_stale"):
         lines.append("    - hydration is older than its manifest source")
@@ -266,6 +270,10 @@ def _render_drift(drift: dict[str, Any]) -> list[str]:
         lines.append(f"    - member target vanished: {item['path']}")
     for edge in drift.get("references_gone", []):
         lines.append(f"    - referenced manifest gone: {edge.get('target_path')}")
+    for item in drift.get("marks_drifted", []):
+        lines.append(f"    - mark drifted: {item.get('address')} ({item.get('reason')})")
+    if unchecked:
+        lines.append(f"    (marks unchecked: {unchecked})")
     return lines
 
 

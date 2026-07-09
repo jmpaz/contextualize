@@ -5,6 +5,7 @@ least one path out; none falls through as a raw error."""
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -1307,6 +1308,8 @@ def _empty_drift() -> dict[str, Any]:
         "sources_changed": [],
         "members_vanished": [],
         "references_gone": [],
+        "marks_drifted": [],
+        "marks_unchecked": None,
         "hydration_stale": False,
     }
 
@@ -1327,7 +1330,130 @@ def _local_entry_source_path(handle: ManifestHandle, entry: dict[str, Any]) -> P
     return None
 
 
-def _compute_drift(handle: ManifestHandle, index_mtime: float | None) -> dict[str, Any]:
+def _current_store_capture(key: str, cache: dict[str, Any]) -> tuple[str, Any]:
+    if key in cache:
+        return cache[key]
+    import json
+    import shlex
+    import subprocess
+
+    raw = os.environ.get("CONTEXTUALIZE_READER_COMMAND", "context-reader").strip()
+    command = shlex.split(raw) if raw else ["context-reader"]
+    outcome: tuple[str, Any]
+    try:
+        proc = subprocess.run(
+            [*command, "documents", "captures", key, "--json"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        outcome = ("unavailable", f"context-reader unavailable: {exc}")
+    else:
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()
+            outcome = (
+                "unavailable",
+                f"documents captures {key} failed" + (f": {detail}" if detail else ""),
+            )
+        else:
+            try:
+                payload = json.loads(proc.stdout or "null")
+            except ValueError:
+                payload = None
+            captures = (
+                [item for item in payload if isinstance(item, dict)]
+                if isinstance(payload, list)
+                else []
+            )
+            chosen = next((item for item in captures if item.get("active")), None)
+            if chosen is None and captures:
+                chosen = captures[0]
+            identity = (
+                None
+                if chosen is None
+                else {
+                    "id": chosen.get("id"),
+                    "model": chosen.get("model"),
+                    "captured_at": chosen.get("capturedAt") or chosen.get("captured_at"),
+                    "synthetic": bool(chosen.get("synthetic")),
+                }
+            )
+            outcome = ("ok", identity)
+    cache[key] = outcome
+    return outcome
+
+
+def _capture_drift_reason(
+    pinned: dict[str, Any], current: dict[str, Any] | None
+) -> str | None:
+    if current is None:
+        return "no capture recorded in the store"
+    if any(pinned.get(field) != current.get(field) for field in ("id", "model", "captured_at")):
+        pinned_label = pinned.get("model") or pinned.get("id")
+        current_label = current.get("model") or current.get("id")
+        return f"pinned capture {pinned_label} superseded by {current_label}"
+    return None
+
+
+def _pinned_marks_by_store_key(
+    components: dict[str, Any],
+) -> dict[str, list[tuple[str, dict[str, Any]]]]:
+    pinned: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for comp_name, entries in components.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("kind") != "marks":
+                continue
+            for record in entry.get("marks") or []:
+                if not isinstance(record, dict):
+                    continue
+                capture = record.get("capture")
+                address = record.get("address")
+                if not isinstance(capture, dict) or not address:
+                    continue
+                base = split_mark_address(str(address))[0]
+                if not base.startswith("store:"):
+                    continue
+                key = base[len("store:") :]
+                pinned.setdefault(key, []).append((comp_name, record))
+    return pinned
+
+
+def _compute_marks_drift(
+    components: dict[str, Any], captures_cache: dict[str, Any] | None
+) -> tuple[list[dict[str, Any]], str | None]:
+    pinned_by_key = _pinned_marks_by_store_key(components)
+    if not pinned_by_key:
+        return [], None
+    cache = captures_cache if captures_cache is not None else {}
+    drifted: list[dict[str, Any]] = []
+    unchecked: str | None = None
+    for key in sorted(pinned_by_key):
+        status_kind, value = _current_store_capture(key, cache)
+        if status_kind == "unavailable":
+            if unchecked is None:
+                unchecked = value
+            continue
+        for comp_name, record in pinned_by_key[key]:
+            reason = _capture_drift_reason(record["capture"], value)
+            if reason is not None:
+                drifted.append(
+                    {
+                        "component": comp_name,
+                        "address": record.get("address"),
+                        "reason": reason,
+                    }
+                )
+    return drifted, unchecked
+
+
+def _compute_drift(
+    handle: ManifestHandle,
+    index_mtime: float | None,
+    *,
+    captures_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     sources_changed = []
     members_vanished = []
     references_gone = []
@@ -1340,34 +1466,45 @@ def _compute_drift(handle: ManifestHandle, index_mtime: float | None) -> dict[st
             pass
 
     components = handle.index.get("components", {}) if handle.index else {}
-    if isinstance(components, dict):
-        for comp_name, entries in components.items():
-            if not isinstance(entries, list):
+    if not isinstance(components, dict):
+        components = {}
+    for comp_name, entries in components.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("source_type") != "local":
                 continue
-            for entry in entries:
-                if not isinstance(entry, dict) or entry.get("source_type") != "local":
-                    continue
-                absolute = _local_entry_source_path(handle, entry)
-                if absolute is None:
-                    continue
-                try:
-                    mtime = absolute.stat().st_mtime
-                except OSError:
-                    members_vanished.append({"component": comp_name, "path": str(absolute)})
-                    continue
-                if index_mtime is not None and mtime > index_mtime:
-                    sources_changed.append({"component": comp_name, "path": str(absolute)})
+            absolute = _local_entry_source_path(handle, entry)
+            if absolute is None:
+                continue
+            try:
+                mtime = absolute.stat().st_mtime
+            except OSError:
+                members_vanished.append({"component": comp_name, "path": str(absolute)})
+                continue
+            if index_mtime is not None and mtime > index_mtime:
+                sources_changed.append({"component": comp_name, "path": str(absolute)})
 
     for edge in handle.references_out:
         target = edge.get("target_path")
         if target and not Path(target).exists():
             references_gone.append(edge)
 
+    marks_drifted, marks_unchecked = _compute_marks_drift(components, captures_cache)
+
     return {
-        "any": bool(sources_changed or members_vanished or references_gone or hydration_stale),
+        "any": bool(
+            sources_changed
+            or members_vanished
+            or references_gone
+            or marks_drifted
+            or hydration_stale
+        ),
         "sources_changed": sources_changed,
         "members_vanished": members_vanished,
         "references_gone": references_gone,
+        "marks_drifted": marks_drifted,
+        "marks_unchecked": marks_unchecked,
         "hydration_stale": hydration_stale,
     }
 
@@ -1382,10 +1519,19 @@ def _drift_detail(drift: dict[str, Any]) -> str:
         bits.append(f"{len(drift['members_vanished'])} member target(s) vanished")
     if drift["references_gone"]:
         bits.append(f"{len(drift['references_gone'])} referenced manifest(s) gone")
+    if drift.get("marks_drifted"):
+        bits.append(f"{len(drift['marks_drifted'])} mark(s) drifted from the store transcript")
+    if drift.get("marks_unchecked"):
+        bits.append(f"mark drift unchecked: {drift['marks_unchecked']}")
     return "; ".join(bits) or "drift detected"
 
 
-def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> dict[str, Any]:
+def _full_status(
+    handle: ManifestHandle,
+    *,
+    status_path: str | None = None,
+    captures_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     name = handle.registry_name or handle.display_name
     hydration = _latest_hydration_status(handle.registry_name, status_path)
     result: dict[str, Any] = {
@@ -1423,7 +1569,7 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
     except OSError:
         index_mtime = None
 
-    drift = _compute_drift(handle, index_mtime)
+    drift = _compute_drift(handle, index_mtime, captures_cache=captures_cache)
     result["cache_age_seconds"] = (time.time() - index_mtime) if index_mtime is not None else None
     result["drift"] = drift
 
@@ -1434,10 +1580,21 @@ def _full_status(handle: ManifestHandle, *, status_path: str | None = None) -> d
             next_steps=_next_steps("hydrate-failed", handle),
         )
     elif drift["any"]:
-        state = "stale-cache" if (drift["hydration_stale"] or drift["sources_changed"]) else "dangling-reference"
-        result.update(state=state, detail=_drift_detail(drift), next_steps=_next_steps("stale-cache", handle))
+        if drift["hydration_stale"] or drift["sources_changed"]:
+            state = "stale-cache"
+        elif drift["members_vanished"] or drift["references_gone"]:
+            state = "dangling-reference"
+        else:
+            state = "transcript-drift"
+        steps_key = "transcript-drift" if state == "transcript-drift" else "stale-cache"
+        result.update(state=state, detail=_drift_detail(drift), next_steps=_next_steps(steps_key, handle))
     else:
-        result.update(state="ok", detail=None, next_steps=[])
+        unchecked = drift.get("marks_unchecked")
+        result.update(
+            state="ok",
+            detail=f"Mark drift unchecked: {unchecked}" if unchecked else None,
+            next_steps=[],
+        )
     return result
 
 
@@ -1448,6 +1605,7 @@ def _context_status(
     registry_path: str | None,
     status_path: str | None,
     cwd: str | None,
+    captures_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     handle = load_manifest_handle(name, registry=registry, registry_path=registry_path, cwd=cwd)
     if handle is None:
@@ -1455,7 +1613,7 @@ def _context_status(
         return {**not_found, "name": name, "detail": "Registry entry could not be resolved."}
     if handle.source is None:
         return {**_unresolvable_source(handle), "name": name}
-    return _full_status(handle, status_path=status_path)
+    return _full_status(handle, status_path=status_path, captures_cache=captures_cache)
 
 
 def status(
@@ -1476,11 +1634,22 @@ def status(
         }
 
     if selector_text is None:
+        captures_cache: dict[str, Any] = {}
         contexts = [
-            _context_status(name, registry, registry_path=registry_path, status_path=status_path, cwd=cwd)
+            _context_status(
+                name,
+                registry,
+                registry_path=registry_path,
+                status_path=status_path,
+                cwd=cwd,
+                captures_cache=captures_cache,
+            )
             for name in sorted(registry)
         ]
         drifted = sum(1 for entry in contexts if entry.get("drift", {}).get("any"))
+        marks_drifted = sum(
+            len(entry.get("drift", {}).get("marks_drifted") or []) for entry in contexts
+        )
         return {
             "state": "ok",
             "detail": None,
@@ -1490,7 +1659,11 @@ def status(
                 "path": str(registry_path) if registry_path else str(default_context_registry_path()),
             },
             "contexts": contexts,
-            "drift_summary": {"drifted": drifted, "total": len(registry)},
+            "drift_summary": {
+                "drifted": drifted,
+                "total": len(registry),
+                "marks_drifted": marks_drifted,
+            },
         }
 
     selector = parse_selector(selector_text, cwd=cwd)

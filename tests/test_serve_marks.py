@@ -519,3 +519,80 @@ def test_links_out_carries_mark_ref_edges(fake_store, tmp_path):
     mark_edges = [e for e in result["out"] if e.get("form") == "mark"]
     assert [e["spec"] for e in mark_edges] == ["notes/op9f.md"]
     assert mark_edges[0]["mark_address"] == f"{STORE_TARGET}@0:25-1:00"
+
+
+CURRENT_CAPTURE = {
+    "id": 3,
+    "model": "fake-asr-1",
+    "capturedAt": "2026-07-07T12:40:00Z",
+    "active": True,
+}
+SUPERSEDED_CAPTURE = {
+    "id": 9,
+    "model": "fake-asr-2",
+    "capturedAt": "2026-07-08T09:00:00Z",
+    "active": True,
+}
+
+
+def _stub_reader(monkeypatch, tmp_path: Path, captures: list[dict]) -> Path:
+    payload = tmp_path / "captures.json"
+    payload.write_text(json.dumps(captures), encoding="utf-8")
+    script = tmp_path / "context-reader-stub"
+    script.write_text(f"#!/bin/sh\ncat '{payload}'\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("CONTEXTUALIZE_READER_COMMAND", str(script))
+    return payload
+
+
+def test_status_counts_mark_drift(fake_store, monkeypatch, tmp_path):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    payload = _stub_reader(monkeypatch, tmp_path, [CURRENT_CAPTURE])
+
+    fresh = status("annot", registry_path=registry, cwd=str(tmp_path))
+    assert fresh["state"] == "ok"
+    assert fresh["drift"]["marks_drifted"] == []
+    assert fresh["drift"]["marks_unchecked"] is None
+
+    payload.write_text(json.dumps([SUPERSEDED_CAPTURE]), encoding="utf-8")
+    drifted = status("annot", registry_path=registry, cwd=str(tmp_path))
+    assert drifted["state"] == "transcript-drift"
+    assert drifted["drift"]["any"] is True
+    assert drifted["detail"]
+    assert drifted["next_steps"]
+    marks = drifted["drift"]["marks_drifted"]
+    assert [item["address"] for item in marks] == [
+        f"{STORE_TARGET}@0:04",
+        f"{STORE_TARGET}@0:25-1:00",
+    ]
+    assert "superseded by fake-asr-2" in marks[0]["reason"]
+    assert "2 mark(s) drifted" in drifted["detail"]
+
+
+def test_status_mark_drift_check_is_guarded(fake_store, monkeypatch, tmp_path):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    monkeypatch.setenv("CONTEXTUALIZE_READER_COMMAND", str(tmp_path / "no-such-binary"))
+
+    result = status("annot", registry_path=registry, cwd=str(tmp_path))
+    assert result["state"] == "ok"
+    assert result["drift"]["marks_drifted"] == []
+    assert "unavailable" in result["drift"]["marks_unchecked"]
+    assert "Mark drift unchecked" in result["detail"]
+
+
+def test_status_registry_wide_counts_marks_drifted(fake_store, monkeypatch, tmp_path):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    _stub_reader(monkeypatch, tmp_path, [SUPERSEDED_CAPTURE])
+
+    result = status(None, registry_path=registry, cwd=str(tmp_path))
+    assert result["drift_summary"] == {"drifted": 1, "total": 1, "marks_drifted": 2}
+    assert result["contexts"][0]["state"] == "transcript-drift"
+
+
+def test_show_mark_state_is_subprocess_free(fake_store, monkeypatch, tmp_path):
+    registry, manifest = _registered_marked_context(tmp_path)
+    monkeypatch.setenv("CONTEXTUALIZE_READER_COMMAND", str(tmp_path / "no-such-binary"))
+
+    result = show(f"{manifest}:reckoning", registry_path=registry)
+    marks = [m for m in _member(result)["marks"] if not m["disabled"]]
+    assert [m["state"] for m in marks] == ["ok", "ok"]
