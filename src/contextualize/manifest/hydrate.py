@@ -3348,7 +3348,7 @@ def _build_index_entry(
         digest = _hash_file(Path(item.source_full_path))
     else:
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    return {
+    entry = {
         "context_path": rel_path.as_posix(),
         "source_type": item.source_type,
         "source_ref": item.source_ref,
@@ -3358,6 +3358,24 @@ def _build_index_entry(
         "symbols": symbols,
         "hash": f"sha256:{digest}",
     }
+    mark_entry = _lifted_mark_entry(item)
+    if mark_entry is not None:
+        entry["mark"] = mark_entry
+    return entry
+
+
+def _lifted_mark_entry(item: ResolvedItem) -> dict[str, Any] | None:
+    metadata = item.plugin_metadata or {}
+    mark_meta = metadata.get("mark")
+    mark_state = metadata.get("mark_state")
+    if not isinstance(mark_meta, dict) and not isinstance(mark_state, str):
+        return None
+    entry = dict(mark_meta) if isinstance(mark_meta, dict) else {}
+    capture = metadata.get("capture")
+    if isinstance(capture, dict):
+        entry["capture"] = capture
+    entry["state"] = mark_state if isinstance(mark_state, str) else "ok"
+    return entry
 
 
 def _build_manifest_file_entry(

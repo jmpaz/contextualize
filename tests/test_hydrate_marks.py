@@ -391,3 +391,73 @@ def test_data_manifest_keeps_marks(fake_store, tmp_path):
     assert record["state"] == "ok"
     assert record["comment"] is None
     assert record["inline_comment"] is None
+
+
+def test_bare_address_member_hydrates_excerpt(fake_store, tmp_path):
+    context_dir = _hydrate(
+        tmp_path,
+        _mini_manifest(
+            tmp_path / "ctx",
+            f'      - "{STORE_TARGET}@0:25-1:00"\n',
+        ),
+    )
+    entry = _entries(context_dir)[0]
+    assert entry["source_type"] == "plugin:store"
+    assert entry["context_path"].endswith("12-34-52.m4a@0-25-1-00.md")
+    assert entry["mark"] == {
+        "authored": "0:25-1:00",
+        "start_s": 25.0,
+        "end_s": 60.0,
+        "covered_start_s": 20.0,
+        "covered_end_s": 66.0,
+        "segment_count": 2,
+        "capture": dict(fake_store.capture),
+        "state": "ok",
+    }
+    excerpt = (context_dir / entry["context_path"]).read_text(encoding="utf-8")
+    assert excerpt == (
+        "treat this as a case study for the work itself\n"
+        "two prompts and the supplement around them"
+    )
+
+
+def test_bare_address_beyond_duration_is_a_state_member(fake_store, tmp_path):
+    context_dir = _hydrate(
+        tmp_path,
+        _mini_manifest(
+            tmp_path / "ctx",
+            f'      - "{STORE_TARGET}@50:00"\n',
+        ),
+    )
+    entry = _entries(context_dir)[0]
+    assert entry["mark"]["state"] == "mark-beyond-duration"
+    content = (context_dir / entry["context_path"]).read_text(encoding="utf-8")
+    assert "beyond this recording" in content
+
+
+def test_bare_addresses_fuse_into_set(fake_store, tmp_path):
+    range_address = f"{STORE_TARGET}@0:25-1:00"
+    point_address = f"{STORE_TARGET}@0:04"
+    manifest_text = (
+        "config:\n"
+        f"  context:\n    dir: {tmp_path / 'ctx'}\n    include-meta: true\n"
+        "components:\n"
+        "  - set: threads\n"
+        "    files:\n"
+        f'      - "{range_address}"\n'
+        f'      - "{point_address}"\n'
+    )
+    context_dir = _hydrate(tmp_path, manifest_text)
+    entry = _entries(context_dir, "threads")[0]
+    assert entry["kind"] == "set"
+    assert [part["key"] for part in entry["parts"]] == [
+        range_address,
+        point_address,
+    ]
+    assert entry["parts"][1]["line_start"] > entry["parts"][0]["line_end"]
+
+    fused = (context_dir / entry["context_path"]).read_text(encoding="utf-8")
+    assert f"--- {range_address}" in fused
+    assert f"--- {point_address}" in fused
+    assert "so the reckoning note starts here" in fused
+    assert "mood kit day begins" not in fused
