@@ -6,7 +6,12 @@ from subprocess import CompletedProcess
 import pytest
 
 from contextualize.manifest import source as manifest_source
-from contextualize.manifest.source import load_manifest_source, load_manifest_text
+from contextualize.manifest.manifest import normalize_components
+from contextualize.manifest.source import (
+    iter_active_leaves,
+    load_manifest_source,
+    load_manifest_text,
+)
 
 
 def test_load_manifest_source_extracts_yaml_block_from_text_file(
@@ -71,19 +76,43 @@ components:
     source = load_manifest_source(path)
 
     assert source.source_format is not None
-    assert "# - name: skipped" not in source.source_format.body
-    assert "not hydrated" not in source.source_format.body
+    assert "# - name: skipped" in source.source_format.body
+    assert "not hydrated" in source.source_format.body
     assert "# speech materials" in source.source_format.body
     speech_slice = source.source_format.group_slices[("speech",)]
     assert speech_slice.line == 6
     assert speech_slice.body == (
         "components:\n"
+        "  # speech materials\n"
         "  - group: speech\n"
         "    components:\n"
         "      - name: anchor  # main voice note\n"
         "        text: hello\n"
+        "      # - name: skipped\n"
+        "      #   text: not hydrated\n"
         "\n"
     )
+
+    outline = source.source_format.outline
+    assert [node["kind"] for node in outline] == ["group", "component"]
+    speech_group = outline[0]
+    assert speech_group["name"] == "speech"
+    assert speech_group["order"] == 0
+    assert speech_group["comment"] == {
+        "text": "speech materials",
+        "line_start": 5,
+        "line_end": 5,
+    }
+    anchor, skipped = speech_group["children"]
+    assert anchor["name"] == "anchor"
+    assert anchor["disabled"] is False
+    assert anchor["inline_comment"] == "main voice note"
+    assert skipped["name"] == "skipped"
+    assert skipped["disabled"] is True
+    assert skipped["raw"] == "- name: skipped\n  text: not hydrated"
+    refs = outline[1]
+    assert refs["name"] == "refs"
+    assert refs["order"] == 1
 
 
 def test_load_manifest_text_rejects_text_without_manifest() -> None:
@@ -114,3 +143,62 @@ def test_load_manifest_source_evaluates_nix_manifest(
 
     assert source.manifest_cwd == str(tmp_path)
     assert source.data["components"] == [{"name": "main", "text": "hello"}]
+
+
+def test_outline_handles_zero_indent_block_sequences(tmp_path: Path) -> None:
+    # YAML permits list items at the same indentation as their parent key;
+    # this style is common in the wild and previously produced an empty
+    # outline (the "components:"/"files:" block-end scan stopped on the
+    # first item instead of the next sibling key).
+    path = tmp_path / "manifest.yaml"
+    path.write_text(
+        """config:
+  root: '~'
+components:
+- name: percept span and facets
+  files:
+  - dev/mood-board/packages/percept/src/percept/span.py
+  - dev/mood-board/packages/percept/src/percept/contracts.py
+- name: current ad-hoc extraction to replace
+  files:
+  - dev/mood-board/src/mood_board/core/director/orchestrator.py
+""",
+        encoding="utf-8",
+    )
+
+    source = load_manifest_source(path)
+    assert source.source_format is not None
+
+    normalized = normalize_components(source.data["components"])
+    leaves = list(iter_active_leaves(source.source_format.outline))
+    assert len(leaves) == len(normalized) == 2
+    assert [leaf["name"] for leaf in leaves] == [
+        "percept span and facets",
+        "current ad-hoc extraction to replace",
+    ]
+    assert [len(leaf["members"]["files"]) for leaf in leaves] == [2, 1]
+
+
+def test_outline_finds_members_on_bare_unnamed_component(tmp_path: Path) -> None:
+    # `- files:` with no `name:`/`group:`/`set:` key puts the member list key
+    # directly on the item's dash line rather than on its own line.
+    path = tmp_path / "manifest.yaml"
+    path.write_text(
+        """components:
+  - files:
+      - a.md
+      - b.md
+  - name: named
+    files:
+      - c.md
+""",
+        encoding="utf-8",
+    )
+
+    source = load_manifest_source(path)
+    assert source.source_format is not None
+    leaves = list(iter_active_leaves(source.source_format.outline))
+    assert leaves[0]["name"] is None
+    assert len(leaves[0]["members"]["files"]) == 2
+    assert leaves[1]["name"] == "named"
+    assert len(leaves[1]["members"]["files"]) == 1

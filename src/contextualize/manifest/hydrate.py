@@ -9,7 +9,7 @@ import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ..concurrency import run_indexed_tasks_fail_fast
@@ -39,10 +39,20 @@ from ..utils import brace_expand, extract_ranges
 from .manifest import (
     GROUP_BASE_KEY,
     GROUP_PATH_KEY,
+    SET_KEY,
     coerce_file_spec,
     normalize_components,
 )
-from .source import ManifestFormat, ManifestSlice, load_manifest_source
+from .source import (
+    ManifestFormat,
+    ManifestSlice,
+    frontmatter_has_manifest_tag,
+    iter_active_leaves,
+    load_manifest_source,
+    path_contains_manifest,
+)
+
+_MANIFEST_REFERENCE_EXTENSIONS = {".md", ".markdown", ".yaml", ".yml"}
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _SOURCE_IGNORE_PATTERNS = [
@@ -497,6 +507,13 @@ def build_hydration_plan_data(
     plugin_seen_counter = 0
     resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]] = {}
     linked_manifest_failures: list[LinkedManifestFailure] = []
+    reference_edges: list[dict[str, Any]] = []
+    registry_sources_cache: list[set[Path]] = []
+
+    def get_registry_sources() -> set[Path]:
+        if not registry_sources_cache:
+            registry_sources_cache.append(_load_registry_manifest_sources())
+        return registry_sources_cache[0]
 
     global_strip_prefix: Path | None = None
     if context_cfg["path_strategy"] == "by-component":
@@ -510,9 +527,20 @@ def build_hydration_plan_data(
             context_cfg["agents_text"],
         )
 
+    active_outline_nodes: list[dict[str, Any]] = (
+        list(iter_active_leaves(manifest_format.outline))
+        if manifest_format is not None
+        else []
+    )
+
     log_progress("hydrate", "component", "total", count=len(components))
-    for comp in components:
+    for comp_index, comp in enumerate(components):
         comp_name = comp["name"]
+        outline_node = (
+            active_outline_nodes[comp_index]
+            if comp_index < len(active_outline_nodes)
+            else None
+        )
         log_progress("hydrate", "component", "start", target=comp_name)
         comp_files = comp.get("files")
         comp_repos = comp.get("repos")
@@ -595,6 +623,7 @@ def build_hydration_plan_data(
                     str | None,
                     dict[str, Any],
                     str | None,
+                    bool,
                 ]
             ] = []
             spec_jobs = get_payload_spec_jobs()
@@ -750,6 +779,7 @@ def build_hydration_plan_data(
                         extract_ranges(item.content, ranges) if ranges else item.content
                     )
                     suffix = _build_suffix(ranges, symbols)
+                    from_files = not spec_cache_key[1]
                     resolved_items.append(
                         (
                             item,
@@ -761,6 +791,7 @@ def build_hydration_plan_data(
                             spec_comment,
                             file_opts,
                             spec_root,
+                            from_files,
                         )
                     )
 
@@ -778,44 +809,133 @@ def build_hydration_plan_data(
                 effective_strip_prefix = global_strip_prefix
                 skip_external_root = False
 
-            for (
-                item,
-                content,
-                suffix,
-                ranges,
-                symbols,
-                range_spec,
-                spec_comment,
-                file_opts,
-                spec_root,
-            ) in resolved_items:
-                rel_path, should_write = _resolve_context_path(
-                    comp_name,
-                    item,
-                    suffix,
+            if comp.get(SET_KEY):
+                set_rel_path = _dedupe_path(
+                    _build_set_output_path(
+                        comp_name,
+                        comp.get(GROUP_PATH_KEY),
+                        comp.get(GROUP_BASE_KEY),
+                    ),
                     used_paths,
-                    identity_paths,
-                    context_cfg["path_strategy"],
+                )
+                _ensure_relative(set_rel_path)
+                fused_text, parts = _build_set_fusion(resolved_items, outline_node)
+                files_to_write.append((context_dir / set_rel_path, fused_text))
+                index_components.setdefault(comp_name, []).append(
+                    _build_set_index_entry(set_rel_path, fused_text, parts)
+                )
+                if outline_node is not None:
+                    outline_node["set"] = {
+                        "context_path": set_rel_path.as_posix(),
+                        "parts": parts,
+                    }
+                normalized_files.extend(
+                    _build_manifest_file_entry(
+                        item, range_spec, symbols, spec_comment, file_opts
+                    )
+                    for (
+                        item,
+                        _content,
+                        _suffix,
+                        _ranges,
+                        symbols,
+                        range_spec,
+                        spec_comment,
+                        file_opts,
+                        _spec_root,
+                        _from_files,
+                    ) in resolved_items
+                )
+            else:
+                for (
+                    item,
+                    content,
+                    suffix,
                     ranges,
                     symbols,
-                    component_root=component_root,
-                    use_external_root=use_external_root,
-                    strip_prefix=effective_strip_prefix,
-                    skip_external_root=skip_external_root,
-                    external_root_prefix=spec_root,
-                )
-                plugin_identity = _plugin_pending_key(item, ranges, symbols)
-                if plugin_identity is not None:
-                    plugin_pending.setdefault(plugin_identity, []).append(
-                        _PluginPendingWrite(
-                            rel_path=rel_path,
-                            content=content,
-                            should_write=should_write,
-                            item=item,
-                            encounter_index=plugin_seen_counter,
-                        )
+                    range_spec,
+                    spec_comment,
+                    file_opts,
+                    spec_root,
+                    from_files,
+                ) in resolved_items:
+                    rel_path, should_write = _resolve_context_path(
+                        comp_name,
+                        item,
+                        suffix,
+                        used_paths,
+                        identity_paths,
+                        context_cfg["path_strategy"],
+                        ranges,
+                        symbols,
+                        component_root=component_root,
+                        use_external_root=use_external_root,
+                        strip_prefix=effective_strip_prefix,
+                        skip_external_root=skip_external_root,
+                        external_root_prefix=spec_root,
                     )
-                    plugin_seen_counter += 1
+                    if from_files:
+                        _record_recognized_reference(
+                            reference_edges,
+                            component_name=comp_name,
+                            item=item,
+                            context_path=rel_path,
+                            registry_sources=get_registry_sources,
+                            ranges=ranges,
+                            symbols=symbols,
+                            copy_files=context_cfg["copy"],
+                        )
+                    plugin_identity = _plugin_pending_key(item, ranges, symbols)
+                    if plugin_identity is not None:
+                        plugin_pending.setdefault(plugin_identity, []).append(
+                            _PluginPendingWrite(
+                                rel_path=rel_path,
+                                content=content,
+                                should_write=should_write,
+                                item=item,
+                                encounter_index=plugin_seen_counter,
+                            )
+                        )
+                        plugin_seen_counter += 1
+                        index_components.setdefault(comp_name, []).append(
+                            _build_index_entry(
+                                rel_path,
+                                item,
+                                ranges,
+                                symbols,
+                                content,
+                            )
+                        )
+                        normalized_files.append(
+                            _build_manifest_file_entry(
+                                item,
+                                range_spec,
+                                symbols,
+                                spec_comment,
+                                file_opts,
+                            )
+                        )
+                        continue
+                    if should_write:
+                        _queue_hydrated_file(
+                            context_dir / rel_path,
+                            item,
+                            content,
+                            copy_files=context_cfg["copy"],
+                            ranges=ranges,
+                            symbols=symbols,
+                            files_to_write=files_to_write,
+                            files_to_copy=files_to_copy,
+                            files_to_symlink=files_to_symlink,
+                        )
+                        file_ts = _item_file_ts(item)
+                        if file_ts:
+                            file_timestamps[context_dir / rel_path] = file_ts
+                        dir_ts = _item_dir_ts(item)
+                        if dir_ts:
+                            file_timestamps.setdefault(
+                                (context_dir / rel_path).parent, dir_ts
+                            )
                     index_components.setdefault(comp_name, []).append(
                         _build_index_entry(
                             rel_path,
@@ -834,45 +954,6 @@ def build_hydration_plan_data(
                             file_opts,
                         )
                     )
-                    continue
-                if should_write:
-                    _queue_hydrated_file(
-                        context_dir / rel_path,
-                        item,
-                        content,
-                        copy_files=context_cfg["copy"],
-                        ranges=ranges,
-                        symbols=symbols,
-                        files_to_write=files_to_write,
-                        files_to_copy=files_to_copy,
-                        files_to_symlink=files_to_symlink,
-                    )
-                    file_ts = _item_file_ts(item)
-                    if file_ts:
-                        file_timestamps[context_dir / rel_path] = file_ts
-                    dir_ts = _item_dir_ts(item)
-                    if dir_ts:
-                        file_timestamps.setdefault(
-                            (context_dir / rel_path).parent, dir_ts
-                        )
-                index_components.setdefault(comp_name, []).append(
-                    _build_index_entry(
-                        rel_path,
-                        item,
-                        ranges,
-                        symbols,
-                        content,
-                    )
-                )
-                normalized_files.append(
-                    _build_manifest_file_entry(
-                        item,
-                        range_spec,
-                        symbols,
-                        spec_comment,
-                        file_opts,
-                    )
-                )
 
         if comp_manifests:
             from .contexts import ensure_manifest_link_hydrated
@@ -936,6 +1017,17 @@ def build_hydration_plan_data(
                 dest_rel = _dedupe_path(manifest_root / slug, used_paths)
                 _ensure_relative(dest_rel)
                 dirs_to_symlink.append((context_dir / dest_rel, canonical_dir))
+                reference_edges.append(
+                    {
+                        "component": comp_name,
+                        "form": "full",
+                        "spec": str(manifest_spec),
+                        "target_path": str(resolved_link_path),
+                        "detected_via": "manifests-key",
+                        "payload": "pointer",
+                        "context_path": dest_rel.as_posix(),
+                    }
+                )
 
         if normalized_files:
             normalized_comp["files"] = _dedupe_manifest_entries(normalized_files)
@@ -1006,6 +1098,10 @@ def build_hydration_plan_data(
         )
         if manifest_source is not None:
             index_data["manifest_source"] = manifest_source
+        if manifest_format is not None and manifest_format.outline:
+            index_data["outline"] = manifest_format.outline
+        if reference_edges:
+            index_data["references"] = {"out": reference_edges}
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
 
@@ -1387,10 +1483,14 @@ def _build_normalized_component(comp: dict[str, Any], name: str) -> dict[str, An
     normalized = {
         k: v
         for k, v in comp.items()
-        if k not in {"files", "repos", "name", GROUP_PATH_KEY, GROUP_BASE_KEY}
+        if k
+        not in {"files", "repos", "name", GROUP_PATH_KEY, GROUP_BASE_KEY, SET_KEY}
         and v is not None
     }
-    normalized["name"] = name
+    if comp.get(SET_KEY):
+        normalized["set"] = name
+    else:
+        normalized["name"] = name
     return normalized
 
 
@@ -1588,6 +1688,83 @@ def _find_global_subpath_prefix(
             except (FileNotFoundError, ValueError):
                 pass
     return _find_common_subpath_prefix(all_subpaths)
+
+
+def _record_recognized_reference(
+    edges: list[dict[str, Any]],
+    *,
+    component_name: str,
+    item: ResolvedItem,
+    context_path: Path,
+    registry_sources: Callable[[], set[Path]],
+    ranges: list[tuple[int, int]] | None,
+    symbols: list[str] | None,
+    copy_files: bool,
+) -> None:
+    if item.source_type != "local" or not item.source_full_path:
+        return
+    path = Path(item.source_full_path)
+    if path.suffix.lower() not in _MANIFEST_REFERENCE_EXTENSIONS:
+        return
+    detected_via = _detect_manifest_reference(path, registry_sources)
+    if detected_via is None:
+        return
+    payload = "pointer" if _will_symlink_local(item, ranges, symbols, copy_files) else "copy"
+    edges.append(
+        {
+            "component": component_name,
+            "form": "recognized",
+            "spec": item.manifest_spec,
+            "target_path": str(path),
+            "detected_via": detected_via,
+            "payload": payload,
+            "context_path": context_path.as_posix(),
+        }
+    )
+
+
+def _detect_manifest_reference(
+    path: Path, registry_sources: Callable[[], set[Path]]
+) -> str | None:
+    # registry_sources() can shell out to zk; local checks must run first
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = None
+    if text is not None and frontmatter_has_manifest_tag(text):
+        return "frontmatter-tag"
+    if path_contains_manifest(path):
+        return "fenced-block"
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    if resolved in registry_sources():
+        return "registry"
+    return None
+
+
+def _load_registry_manifest_sources() -> set[Path]:
+    from .contexts import load_context_registry
+
+    sources: set[Path] = set()
+    try:
+        registry = load_context_registry()
+    except Exception:
+        return sources
+    for entry in registry.values():
+        manifest = entry.manifest if isinstance(entry.manifest, dict) else {}
+        raw_source = manifest.get("source")
+        if not isinstance(raw_source, str) or not raw_source:
+            continue
+        candidate = Path(os.path.expanduser(raw_source))
+        if not candidate.is_absolute():
+            candidate = entry.target_dir / candidate
+        try:
+            sources.add(candidate.resolve(strict=False))
+        except OSError:
+            continue
+    return sources
 
 
 def _manifest_has_local_sources(components: list[dict[str, Any]]) -> bool:
@@ -2060,8 +2237,18 @@ def _iter_source_files(
         for name in names:
             file_path = os.path.join(root, name)
             match_path = _ignore_match_path(file_path, ignore_base)
-            if not ignore_spec.match_file(match_path):
-                files.append(file_path)
+            if ignore_spec.match_file(match_path):
+                continue
+            if os.path.islink(file_path) and not os.path.exists(file_path):
+                log_progress(
+                    "hydrate",
+                    "file",
+                    "skipped",
+                    target=file_path,
+                    detail="dangling symlink in source",
+                )
+                continue
+            files.append(file_path)
     return files
 
 
@@ -2375,6 +2562,94 @@ def _build_component_root(
         name = base_name if isinstance(base_name, str) and base_name else component_name
         return Path(*parts, name)
     return Path(component_name)
+
+
+def _build_set_output_path(
+    component_name: str,
+    group_path: Any | None,
+    base_name: Any | None,
+) -> Path:
+    if group_path:
+        parts = [group_path] if isinstance(group_path, str) else list(group_path)
+        name = base_name if isinstance(base_name, str) and base_name else component_name
+        return Path(*parts, f"{name}.md")
+    return Path(f"{component_name}.md")
+
+
+def _format_set_part_header(item: ResolvedItem, title: str | None) -> str:
+    bits = [item.manifest_spec]
+    if title:
+        bits.append(title)
+    timestamp = item.source_modified or item.source_created
+    if timestamp:
+        bits.append(timestamp)
+    return f"--- {' · '.join(bits)} ---"
+
+
+def _set_member_titles(outline_node: dict[str, Any] | None) -> list[str | None]:
+    if outline_node is None:
+        return []
+    files = outline_node.get("members", {}).get("files", [])
+    return [member["inline_comment"] for member in files if not member["disabled"]]
+
+
+def _build_set_fusion(
+    resolved_items: list[
+        tuple[
+            ResolvedItem,
+            str,
+            str | None,
+            list[tuple[int, int]] | None,
+            list[str] | None,
+            list[tuple[int, int]] | None,
+            str | None,
+            dict[str, Any],
+            str | None,
+            bool,
+        ]
+    ],
+    outline_node: dict[str, Any] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    member_titles = _set_member_titles(outline_node)
+    parts: list[dict[str, Any]] = []
+    blocks: list[str] = []
+    line_cursor = 1
+    for order, (item, content, *_rest) in enumerate(resolved_items):
+        spec_comment = _rest[4]
+        title = spec_comment or (
+            member_titles[order] if order < len(member_titles) else None
+        )
+        header = _format_set_part_header(item, title)
+        body = content if content.endswith("\n") else f"{content}\n"
+        block = f"{header}\n\n{body}"
+        line_start = line_cursor
+        line_end = line_start + block.count("\n") - 1
+        line_cursor = line_end + 2
+        blocks.append(block)
+        parts.append(
+            {
+                "order": order,
+                "key": item.manifest_spec,
+                "title": title,
+                "source_created": item.source_created,
+                "source_modified": item.source_modified,
+                "line_start": line_start,
+                "line_end": line_end,
+            }
+        )
+    return "\n".join(blocks), parts
+
+
+def _build_set_index_entry(
+    rel_path: Path, fused_text: str, parts: list[dict[str, Any]]
+) -> dict[str, Any]:
+    digest = hashlib.sha256(fused_text.encode("utf-8")).hexdigest()
+    return {
+        "context_path": rel_path.as_posix(),
+        "kind": "set",
+        "hash": f"sha256:{digest}",
+        "parts": parts,
+    }
 
 
 def _resolve_context_path(
@@ -2723,6 +2998,21 @@ def _plugin_rank(item: ResolvedItem, encounter_index: int) -> tuple[int, int]:
     return (rank, encounter_index)
 
 
+def _will_symlink_local(
+    item: ResolvedItem,
+    ranges: list[tuple[int, int]] | None,
+    symbols: list[str] | None,
+    copy_files: bool,
+) -> bool:
+    return (
+        bool(item.source_full_path)
+        and not ranges
+        and not symbols
+        and item.source_type == "local"
+        and not copy_files
+    )
+
+
 def _queue_hydrated_file(
     dest: Path,
     item: ResolvedItem,
@@ -2737,7 +3027,7 @@ def _queue_hydrated_file(
 ) -> None:
     source = Path(item.source_full_path) if item.source_full_path else None
     if source is not None and not ranges and not symbols:
-        if item.source_type == "local" and not copy_files:
+        if _will_symlink_local(item, ranges, symbols, copy_files):
             files_to_symlink.append((dest, source))
             return
         if item.source_type in {"local", "git"}:

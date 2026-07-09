@@ -4,6 +4,7 @@ from typing import Any
 GROUP_DELIMITER = "."
 GROUP_PATH_KEY = "__group_path"
 GROUP_BASE_KEY = "__group_base"
+SET_KEY = "__is_set"
 
 _DEFAULT_KEYS = {
     "wrap",
@@ -62,34 +63,55 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
         return defaults
 
     def add_component(
-        entry: dict[str, Any], group_path: list[str], defaults: dict[str, Any]
+        entry: dict[str, Any],
+        group_path: list[str],
+        defaults: dict[str, Any],
+        *,
+        is_set: bool = False,
     ) -> None:
+        kind = "Set" if is_set else "Component"
         if "group" in entry:
-            raise ValueError("Component cannot define 'group'")
+            raise ValueError(f"{kind} cannot define 'group'")
         if "components" in entry:
-            raise ValueError("Component cannot define 'components' without 'group'")
+            raise ValueError(f"{kind} cannot define 'components' without 'group'")
 
         comp = dict(entry)
-        name = comp.get("name")
+        if is_set:
+            if "name" in comp:
+                raise ValueError("Set cannot also define 'name'")
+            name = comp.pop("set")
+        else:
+            name = comp.get("name")
         if name is None:
             name = next_auto_name()
         if not isinstance(name, str):
-            raise ValueError("Component name must be a string")
+            raise ValueError(f"{kind} name must be a string")
         name = name.strip()
         if not name:
-            raise ValueError("Component name must be a non-empty string")
-        validate_name(name, kind="Component name", allow_delimiter=True)
+            raise ValueError(f"{kind} name must be a non-empty string")
+        validate_name(name, kind=f"{kind} name", allow_delimiter=True)
 
         full_name = join_group_name(group_path, name)
         if full_name in used_names:
             raise ValueError(f"Duplicate component name: {full_name}")
         used_names.add(full_name)
 
+        if is_set:
+            for unsupported in ("repos", "manifests"):
+                if unsupported in comp:
+                    raise ValueError(
+                        f"Set '{full_name}' does not support '{unsupported}'"
+                    )
+            if not comp.get("files"):
+                raise ValueError(f"Set '{full_name}' must define 'files'")
+
         for key, value in defaults.items():
             if key not in comp:
                 comp[key] = value
 
         comp["name"] = full_name
+        if is_set:
+            comp[SET_KEY] = True
         if group_path:
             comp[GROUP_PATH_KEY] = tuple(group_path)
             comp[GROUP_BASE_KEY] = name
@@ -113,6 +135,8 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
                 if "components" not in entry:
                     raise ValueError(f"Group '{group_name}' must define components")
                 group_components = entry.get("components")
+                if group_components is None:
+                    group_components = []
                 if not isinstance(group_components, list):
                     raise ValueError("Group components must be a list")
 
@@ -127,6 +151,8 @@ def normalize_components(components: list[Any]) -> list[dict[str, Any]]:
                 merged_defaults = dict(defaults)
                 merged_defaults.update(group_defaults)
                 process(group_components, group_path + [group_name], merged_defaults)
+            elif "set" in entry:
+                add_component(entry, group_path, defaults, is_set=True)
             else:
                 add_component(entry, group_path, defaults)
 
