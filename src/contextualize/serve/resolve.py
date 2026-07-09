@@ -50,6 +50,7 @@ def _existing_file(text: str, cwd: str | None) -> bool:
 def is_external_target(text: str) -> bool:
     from ..git.target import parse_git_target
     from ..plugins import plugin_target_provider
+    from ..references.address import split_mark_address
     from ..references.helpers import is_http_url, parse_target_spec
 
     if is_http_url(text):
@@ -59,7 +60,8 @@ def is_external_target(text: str) -> bool:
     target = parse_target_spec(text).get("target", text)
     if not isinstance(target, str):
         target = text
-    return plugin_target_provider(target) is not None
+    base, _mark = split_mark_address(target)
+    return plugin_target_provider(base) is not None
 
 
 @dataclass

@@ -314,8 +314,9 @@ def _build_context(
     refresh_cache: bool,
     cache_only: bool,
     overrides: dict[str, Any],
+    span: dict[str, Any] | None = None,
 ) -> PluginContext:
-    return {
+    context: PluginContext = {
         "format": format,
         "label": label,
         "label_suffix": label_suffix,
@@ -329,6 +330,9 @@ def _build_context(
         "cache_only": cache_only,
         "overrides": overrides,
     }
+    if span is not None:
+        context["span"] = span
+    return context
 
 
 def resolve_plugin_references(
@@ -346,6 +350,7 @@ def resolve_plugin_references(
     cache_ttl: timedelta | None,
     refresh_cache: bool,
     overrides: dict[str, Any],
+    span: dict[str, Any] | None = None,
 ) -> tuple[list[PluginReference], bool]:
     from contextualize.runtime import get_cache_only
 
@@ -363,6 +368,7 @@ def resolve_plugin_references(
         refresh_cache=refresh_cache,
         cache_only=cache_only,
         overrides=overrides,
+        span=span,
     )
     for plugin in get_loaded_plugins():
         matched = False
