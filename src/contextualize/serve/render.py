@@ -52,6 +52,8 @@ def _origin_header(result: dict[str, Any]) -> list[str]:
     header = str(name)
     if origin.get("manifest_path"):
         header += f"  ({origin['manifest_path']})"
+    if origin.get("kind") == "target":
+        return [header]
     hydrated = "hydrated" if origin.get("hydrated") else "not hydrated"
     return [header, f"  {hydrated}"]
 

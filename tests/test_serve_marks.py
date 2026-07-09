@@ -283,6 +283,10 @@ def test_cat_mark_beyond_duration_from_index_and_live(
     assert pinned["state"] == "mark-beyond-duration"
     _assert_legible(pinned)
 
+    shown = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+    assert shown["state"] == "mark-beyond-duration"
+    _assert_legible(shown)
+
 
 def test_cat_marks_on_untimed_targets(fake_store, tmp_path, empty_registry):
     (tmp_path / "plain.md").write_text("prose\n", encoding="utf-8")
@@ -302,6 +306,11 @@ def test_cat_marks_on_untimed_targets(fake_store, tmp_path, empty_registry):
         _assert_legible(result)
         assert "content" not in result
 
+        _hydrate(manifest)
+        shown = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+        assert shown["state"] == "marks-on-untimed-target"
+        _assert_legible(shown)
+
 
 def test_cat_marks_require_single_document(fake_store, tmp_path, empty_registry):
     manifest = _write_mini(
@@ -316,6 +325,11 @@ def test_cat_marks_require_single_document(fake_store, tmp_path, empty_registry)
     assert result["state"] == "marks-require-single-document"
     _assert_legible(result)
     assert "content" not in result
+
+    _hydrate(manifest)
+    shown = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+    assert shown["state"] == "marks-require-single-document"
+    _assert_legible(shown)
 
 
 def test_cat_mark_invalid_time_is_legible(fake_store, tmp_path, empty_registry):
