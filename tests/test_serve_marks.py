@@ -359,6 +359,38 @@ def test_cat_marks_require_single_document(fake_store, tmp_path, empty_registry)
     _assert_legible(shown)
 
 
+def test_mark_params_unsupported_across_cat_index_and_show(
+    fake_store, tmp_path, empty_registry
+):
+    manifest = _write_mini(
+        tmp_path,
+        f'      - path: "{STORE_TARGET}?after=2w"\n'
+        "        marks:\n"
+        "          - at: 0:04\n",
+    )
+    live = draw_substance(
+        cat_selector(
+            f"{manifest}:reckoning.1.1", registry_path=empty_registry, cwd=str(tmp_path)
+        )
+    )
+    assert live["state"] == "mark-params-unsupported"
+    _assert_legible(live)
+    assert "content" not in live
+
+    _hydrate(manifest)
+    index = json.loads((tmp_path / "ctx" / "index.json").read_text(encoding="utf-8"))
+    marks_entries = [
+        e
+        for e in index["components"]["reckoning"]
+        if isinstance(e, dict) and e.get("kind") == "marks"
+    ]
+    assert marks_entries[0]["marks"][0]["state"] == "mark-params-unsupported"
+
+    shown = show(f"{manifest}:reckoning.1.1", registry_path=empty_registry)
+    assert shown["state"] == "mark-params-unsupported"
+    _assert_legible(shown)
+
+
 def test_cat_mark_invalid_time_is_legible(fake_store, tmp_path, empty_registry):
     manifest = _write_mini(
         tmp_path,
