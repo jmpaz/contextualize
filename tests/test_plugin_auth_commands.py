@@ -48,7 +48,9 @@ def _entrypoint(
 def test_auth_placeholder_without_auth_plugins(monkeypatch, tmp_path: Path) -> None:
     from contextualize import cli
     from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
 
+    monkeypatch.setattr(plugin_loader, "_iter_plugin_entrypoints", lambda: [])
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     clear_loaded_plugins_cache()
 
@@ -164,7 +166,9 @@ def test_auth_placeholder_renders_plugin_source(monkeypatch, tmp_path: Path) -> 
 def test_plugins_command_without_plugins(monkeypatch, tmp_path: Path) -> None:
     from contextualize import cli
     from contextualize.plugins import clear_loaded_plugins_cache
+    from contextualize.plugins import loader as plugin_loader
 
+    monkeypatch.setattr(plugin_loader, "_iter_plugin_entrypoints", lambda: [])
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     clear_loaded_plugins_cache()
 
