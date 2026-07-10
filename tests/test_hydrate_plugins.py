@@ -1605,6 +1605,54 @@ components:
     assert set(index_json["components"].keys()) == {"notes"}
 
 
+def test_hydrate_allows_disabled_only_component_from_source(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+    path-strategy: by-component
+
+components:
+  - name: live
+    files:
+      - notes/a.md
+
+  - name: aside
+    files:
+      # - notes/gone.md   # set aside, reason kept visible
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "a.md").write_text("a", encoding="utf-8")
+
+    plan = build_hydration_plan(
+        str(manifest_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    index_json = json.loads((context_dir / "index.json").read_text(encoding="utf-8"))
+    aside = index_json["outline"][1]
+    assert aside["name"] == "aside"
+    assert aside["members"]["files"][0]["disabled"] is True
+    assert "aside" not in index_json["components"]
+
+    from contextualize.manifest.hydrate import build_hydration_plan_data
+
+    with pytest.raises(ValueError, match="has no content"):
+        build_hydration_plan_data(
+            {"components": [{"name": "empty", "files": []}]},
+            str(tmp_path),
+            overrides=HydrateOverrides(),
+            cwd=str(tmp_path),
+        )
+
+
 def test_hydrate_set_fuses_members_into_one_addressable_file(
     tmp_path: Path,
 ) -> None:

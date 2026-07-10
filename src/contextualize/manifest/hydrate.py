@@ -47,6 +47,7 @@ from .manifest import (
     normalize_components,
 )
 from .source import (
+    MEMBER_KEYS,
     ManifestFormat,
     ManifestSlice,
     frontmatter_has_manifest_tag,
@@ -582,6 +583,15 @@ def build_hydration_plan_data(
             and comp_suffix is None
             and not comp_manifests
         ):
+            outline_members = (outline_node or {}).get("members") or {}
+            if any(outline_members.get(key) for key in MEMBER_KEYS):
+                normalized_components.append(
+                    _build_normalized_component(comp, comp_name)
+                )
+                log_progress(
+                    "hydrate", "component", "done", target=comp_name, count=0
+                )
+                continue
             raise ValueError(f"Component '{comp_name}' has no content")
 
         normalized_comp = _build_normalized_component(comp, comp_name)
