@@ -876,6 +876,20 @@ def _use_default_hydrate_progress(ctx, *, quiet: bool) -> None:
     _set_progress_logging(ctx, not (quiet or ctx.obj.get("quiet", False)))
 
 
+def _use_default_cat_progress(ctx, *, trace: bool, json_output: bool) -> None:
+    if ctx.obj.get("quiet", False):
+        return
+    emits_payload_to_stdout = json_output or not (
+        trace
+        or ctx.obj.get("write_file")
+        or ctx.obj.get("copy")
+        or ctx.obj.get("copy_segments")
+        or ctx.obj.get("count_only")
+    )
+    if not emits_payload_to_stdout:
+        _set_progress_logging(ctx, True)
+
+
 def _finish_run(ctx) -> None:
     from .progress import flush_progress_summary, set_live_progress
 
@@ -2557,6 +2571,7 @@ def cat_cmd(
                 ctx.exit()
 
     ctx.obj["format"] = format  # for segmentation
+    _use_default_cat_progress(ctx, trace=trace, json_output=json_output)
 
     from pathlib import Path
 
