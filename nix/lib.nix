@@ -30,6 +30,7 @@ let
     version = 1;
     contexts = lib.mapAttrs (_name: context: {
       targetDir = context.targetDir;
+      contextDir = context.contextDir;
       replace = context.replace;
       manifest = manifestToRegistry context.manifest;
       origin = context.origin or "nix";

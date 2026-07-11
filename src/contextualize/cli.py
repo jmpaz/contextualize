@@ -1535,7 +1535,7 @@ def _echo_context_registry(contexts) -> None:
     from rich.console import Console
     from rich.table import Table
 
-    from .manifest.contexts import manifest_source_label
+    from .manifest.contexts import manifest_source_label, resolved_context_dir
 
     names = sorted(contexts, key=lambda name: (contexts[name].origin, name))
     click.echo(f"Context registry: total={len(names)}")
@@ -1548,10 +1548,11 @@ def _echo_context_registry(contexts) -> None:
             manifest_source_label(contexts[name]),
             contexts[name].origin,
             str(contexts[name].target_dir),
+            str(resolved_context_dir(contexts[name]) or "manifest"),
         )
         for name in names
     ]
-    headers = ("name", "source", "origin", "target")
+    headers = ("name", "source", "origin", "target", "context")
     table_width = max(
         sum(term_len(value) for value in row) + (len(row) - 1) * 4
         for row in [headers, *rows]
@@ -1570,7 +1571,7 @@ def _echo_context_registry(contexts) -> None:
 
 
 def _echo_context_registry_json(contexts) -> None:
-    from .manifest.contexts import manifest_source_label
+    from .manifest.contexts import manifest_source_label, resolved_context_dir
 
     payload = [
         {
@@ -1578,6 +1579,11 @@ def _echo_context_registry_json(contexts) -> None:
             "source": manifest_source_label(contexts[name]),
             "origin": contexts[name].origin,
             "target": str(contexts[name].target_dir),
+            "contextDir": (
+                str(resolved_context_dir(contexts[name]))
+                if resolved_context_dir(contexts[name]) is not None
+                else None
+            ),
         }
         for name in sorted(contexts, key=lambda name: (contexts[name].origin, name))
     ]

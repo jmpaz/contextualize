@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 from contextlib import redirect_stderr
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,7 @@ class ContextEntry:
     target_dir: Path
     manifest: dict[str, Any]
     replace: str
+    context_dir: str | None = None
     origin: str = "registry"
     ensure_target_dir: bool = False
 
@@ -185,6 +186,7 @@ def _parse_context_subscription(raw: Any) -> dict[str, Any]:
     root = _required_subscription_string(raw, "root")
     tag = _required_subscription_string(raw, "tag")
     target_root = _required_subscription_string(raw, "targetRoot")
+    context_dir = _optional_context_dir(raw, "contexts.subscriptions")
     replace = raw.get("replace", "guarded")
     if replace not in _REPLACE_POLICIES:
         raise ValueError(
@@ -196,7 +198,17 @@ def _parse_context_subscription(raw: Any) -> dict[str, Any]:
         "tag": tag,
         "targetRoot": target_root,
         "replace": replace,
+        "contextDir": context_dir,
     }
+
+
+def _optional_context_dir(raw: dict[str, Any], label: str) -> str | None:
+    value = raw.get("contextDir", raw.get("context_dir"))
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} contextDir must be a non-empty string")
+    return value.strip()
 
 
 def _required_subscription_string(raw: dict[str, Any], key: str) -> str:
@@ -240,6 +252,7 @@ def _discover_subscription_contexts(
                 target_dir=target_root / name,
                 manifest={"source": str(path.resolve())},
                 replace=subscription["replace"],
+                context_dir=subscription["contextDir"],
                 origin=f"tag:{subscription['tag']}",
                 ensure_target_dir=True,
             )
@@ -510,6 +523,7 @@ def _parse_context_entry(name: str, raw: Any) -> ContextEntry:
         target_dir=Path(os.path.expanduser(target_dir)),
         manifest=manifest,
         replace=replace,
+        context_dir=_optional_context_dir(raw, f"Context '{name}'"),
         origin=origin.strip(),
     )
 
@@ -537,6 +551,7 @@ def _hydrate_one(
 
     try:
         plan = _build_plan(context, overrides, resolving=resolving)
+        _reject_manifest_inside_context_root(context, plan.context_dir)
         linked_failure_reason = _linked_manifest_failure_reason(
             plan.linked_manifest_failures
         )
@@ -597,6 +612,9 @@ def _build_plan(
     target_dir = context.target_dir.resolve()
     manifest = context.manifest
     cwd = str(target_dir)
+    effective_overrides = overrides
+    if overrides.context_dir is None and context.context_dir is not None:
+        effective_overrides = replace(overrides, context_dir=context.context_dir)
     if "source" in manifest:
         source = manifest["source"]
         if not isinstance(source, str) or not source:
@@ -605,7 +623,7 @@ def _build_plan(
         if not source_path.is_absolute():
             source_path = target_dir / source_path
         return build_hydration_plan(
-            str(source_path), overrides=overrides, cwd=cwd, _resolving=resolving
+            str(source_path), overrides=effective_overrides, cwd=cwd, _resolving=resolving
         )
     if "text" in manifest:
         text = manifest["text"]
@@ -616,7 +634,7 @@ def _build_plan(
             data,
             manifest_cwd=cwd,
             manifest_path=None,
-            overrides=overrides,
+            overrides=effective_overrides,
             cwd=cwd,
             _resolving=resolving,
         )
@@ -627,9 +645,35 @@ def _build_plan(
         data,
         manifest_cwd=cwd,
         manifest_path=None,
-        overrides=overrides,
+        overrides=effective_overrides,
         cwd=cwd,
         _resolving=resolving,
+    )
+
+
+def resolved_context_dir(context: ContextEntry) -> Path | None:
+    if context.context_dir is None:
+        return None
+    path = Path(os.path.expanduser(context.context_dir))
+    if not path.is_absolute():
+        path = context.target_dir / path
+    return path.resolve()
+
+
+def _reject_manifest_inside_context_root(context: ContextEntry, context_dir: Path) -> None:
+    source = context.manifest.get("source")
+    if not isinstance(source, str):
+        return
+    source_path = Path(os.path.expanduser(source))
+    if not source_path.is_absolute():
+        source_path = context.target_dir / source_path
+    try:
+        source_path.resolve().relative_to(context_dir.resolve())
+    except ValueError:
+        return
+    raise ValueError(
+        f"Context '{context.name}' manifest source is inside its context root: "
+        f"{source_path.resolve()}"
     )
 
 

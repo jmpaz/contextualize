@@ -18,7 +18,14 @@ def _write_registry(path: Path, contexts: dict) -> None:
     )
 
 
-def _write_context_config(path: Path, root: Path, target_root: Path) -> None:
+def _write_context_config(
+    path: Path,
+    root: Path,
+    target_root: Path,
+    *,
+    context_dir: str | None = None,
+    replace: str = "guarded",
+) -> None:
     config_dir = path / "contextualize"
     config_dir.mkdir(parents=True)
     (config_dir / "config.yaml").write_text(
@@ -30,7 +37,8 @@ def _write_context_config(path: Path, root: Path, target_root: Path) -> None:
                 f"      root: {root}",
                 "      tag: ctx/ref",
                 f"      targetRoot: {target_root}",
-                "      replace: guarded",
+                *([f"      contextDir: {context_dir}"] if context_dir else []),
+                f"      replace: {replace}",
                 "",
             ]
         ),
@@ -116,6 +124,55 @@ def test_contexts_list_discovers_zk_subscription(
     assert str(target_root / "subscribed-demo") in result.output
 
 
+def test_contexts_list_rejects_empty_subscription_context_dir(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config" / "contextualize"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "contexts:\n"
+        "  subscriptions:\n"
+        "    - source: zk\n"
+        f"      root: {tmp_path / 'notes'}\n"
+        "      tag: ctx/ref\n"
+        f"      targetRoot: {tmp_path / 'ref'}\n"
+        "      contextDir: ''\n",
+        encoding="utf-8",
+    )
+    _write_registry(tmp_path / "registry.json", {})
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    result = CliRunner().invoke(
+        cli.cli,
+        ["contexts", "list", "--registry", str(tmp_path / "registry.json")],
+    )
+
+    assert result.exit_code != 0
+    assert "contexts.subscriptions contextDir must be a non-empty string" in result.output
+
+
+def test_contexts_list_rejects_empty_static_context_dir(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    _write_registry(
+        registry,
+        {
+            "demo": {
+                "targetDir": str(tmp_path / "demo"),
+                "contextDir": "",
+                "manifest": {"data": {"components": []}},
+            }
+        },
+    )
+
+    result = CliRunner().invoke(
+        cli.cli, ["contexts", "list", "--registry", str(registry)]
+    )
+
+    assert result.exit_code != 0
+    assert "Context 'demo' contextDir must be a non-empty string" in result.output
+
+
 def test_contexts_list_json_discovers_zk_subscription(
     monkeypatch,
     tmp_path: Path,
@@ -140,8 +197,9 @@ def test_contexts_list_json_discovers_zk_subscription(
         {
             "name": "subscribed-demo",
             "source": str(note.resolve()),
-            "origin": "tag:ctx/ref",
-            "target": str(target_root / "subscribed-demo"),
+                "origin": "tag:ctx/ref",
+                "target": str(target_root / "subscribed-demo"),
+                "contextDir": None,
         }
     ]
 
@@ -323,6 +381,142 @@ def test_contexts_hydrate_includes_subscription_and_creates_target(
     assert (
         target_root / "subscribed-demo" / ".context/main/notes/text-001.md"
     ).read_text(encoding="utf-8") == "hello"
+
+
+def test_contexts_hydrate_subscription_can_write_directly_to_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    notes_dir = tmp_path / "notes"
+    target_root = tmp_path / "ref"
+    note = notes_dir / "demo.md"
+    _write_note(note, name="Subscribed Demo")
+    _write_registry(tmp_path / "registry.json", {})
+    _write_context_config(
+        tmp_path / "config",
+        notes_dir,
+        target_root,
+        context_dir=".",
+        replace="always",
+    )
+    _mock_zk(monkeypatch, [note])
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    statuses = hydrate_contexts(
+        ["subscribed-demo"],
+        registry_path=tmp_path / "registry.json",
+        status_path=tmp_path / "status.json",
+    )
+
+    target = target_root / "subscribed-demo"
+    assert statuses[0].result == "hydrated"
+    assert statuses[0].context_dir == str(target.resolve())
+    assert (target / "main/notes/text-001.md").read_text(encoding="utf-8") == "hello"
+    assert not (target / ".context").exists()
+
+
+def test_static_context_dir_overrides_manifest_and_removes_stale_files(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "ref" / "demo"
+    target.mkdir(parents=True)
+    (target / "stale.md").write_text("stale", encoding="utf-8")
+    registry = tmp_path / "registry.json"
+    _write_registry(
+        registry,
+        {
+            "demo": {
+                "targetDir": str(target),
+                "contextDir": ".",
+                "replace": "always",
+                "manifest": {
+                    "data": {
+                        "config": {"context": {"dir": ".context"}},
+                        "components": [{"name": "main", "text": "hello"}],
+                    }
+                },
+            }
+        },
+    )
+
+    statuses = hydrate_contexts(
+        ["demo"], registry_path=registry, status_path=tmp_path / "status.json"
+    )
+
+    assert statuses[0].result == "hydrated"
+    assert not (target / "stale.md").exists()
+    assert (target / "main/notes/text-001.md").is_file()
+    assert (target / "manifest.yaml").is_file()
+    assert (target / "index.json").is_file()
+
+
+def test_cli_context_dir_overrides_registry_context_dir(tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    registry = tmp_path / "registry.json"
+    _write_registry(
+        registry,
+        {
+            "demo": {
+                "targetDir": str(target),
+                "contextDir": "registry-output",
+                "manifest": {
+                    "data": {
+                        "config": {"context": {"dir": "manifest-output"}},
+                        "components": [{"name": "main", "text": "hello"}],
+                    }
+                },
+            }
+        },
+    )
+
+    result = CliRunner().invoke(
+        cli.cli,
+        [
+            "contexts",
+            "hydrate",
+            "--registry",
+            str(registry),
+            "--dir",
+            "cli-output",
+            "demo",
+        ],
+        env={"XDG_STATE_HOME": str(tmp_path / "state")},
+    )
+
+    assert result.exit_code == 0
+    assert (target / "cli-output/main/notes/text-001.md").is_file()
+    assert not (target / "registry-output").exists()
+    assert not (target / "manifest-output").exists()
+
+
+def test_direct_context_rejects_manifest_inside_generated_root(tmp_path: Path) -> None:
+    target = tmp_path / "ref" / "demo"
+    target.mkdir(parents=True)
+    manifest = target / "manifest-source.yaml"
+    manifest.write_text(
+        "components:\n  - name: main\n    text: hello\n", encoding="utf-8"
+    )
+    registry = tmp_path / "registry.json"
+    _write_registry(
+        registry,
+        {
+            "demo": {
+                "targetDir": str(target),
+                "contextDir": ".",
+                "replace": "always",
+                "manifest": {"source": str(manifest)},
+            }
+        },
+    )
+
+    statuses = hydrate_contexts(
+        ["demo"], registry_path=registry, status_path=tmp_path / "status.json"
+    )
+
+    assert statuses[0].result == "failed"
+    assert "manifest source is inside its context root" in (statuses[0].reason or "")
+    assert manifest.is_file()
 
 
 def test_hydrate_context_from_registry_data(tmp_path: Path) -> None:
@@ -674,8 +868,9 @@ def test_contexts_list_cli_json_uses_registry(tmp_path: Path) -> None:
         {
             "name": "demo",
             "source": "manifest.yaml",
-            "origin": "nix",
-            "target": str(target_dir),
+                "origin": "nix",
+                "target": str(target_dir),
+                "contextDir": None,
         }
     ]
 

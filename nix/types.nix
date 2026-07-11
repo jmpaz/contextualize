@@ -26,6 +26,12 @@ let
 
   contextDeclaration = types.submodule {
     options = {
+      contextDir = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional hydration root, resolved relative to the repository.";
+      };
+
       replace = lib.mkOption {
         type = types.enum [ "guarded" "always" "never" ];
         default = "guarded";
@@ -51,6 +57,12 @@ let
       targetDir = lib.mkOption {
         type = types.str;
         description = "Repository or project directory hydrated by this context.";
+      };
+
+      contextDir = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional hydration root, resolved relative to targetDir.";
       };
 
       replace = lib.mkOption {

@@ -188,10 +188,13 @@ contexts:
       root: ~/notes
       tag: ctx/ref
       targetRoot: ~/ref
+      contextDir: "."
       replace: guarded
 ```
 
 Subscribed notes must contain a contextualize manifest. The context name comes from frontmatter `cx.context` when present, otherwise from a slugged manifest `config.name`. Static registry entries stay authoritative when names or manifest sources overlap.
+
+`contextDir` is optional for both static entries and subscriptions. Relative values are resolved from `targetDir`; `contextDir: "."` makes the target itself the generated context root. This direct form is intended for dedicated, disposable output directories. It is never inferred from Git repository presence. Command-line `--dir` overrides registry placement, which overrides the manifest's `config.context.dir`.
 
 ```bash
 contextualize contexts list  # shows source, origin, and target
