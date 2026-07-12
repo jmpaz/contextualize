@@ -11,6 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .manifest.edition import (
+    AuthoredEdition,
+    compile_authored_context,
+    compile_authored_manifest,
+    compile_authored_registry,
+)
+
 
 @dataclass(frozen=True)
 class ResolvedRef:

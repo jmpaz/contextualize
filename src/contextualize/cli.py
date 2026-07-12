@@ -1762,6 +1762,59 @@ def contexts_status_cmd(status_path) -> None:
         click.echo(" ".join(parts), err=result in {"failed", "partial", "skipped"})
 
 
+@contexts_cmd.command("compile")
+@click.argument("names", nargs=-1, type=str, shell_complete=_complete_context_names)
+@click.option(
+    "--registry",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Context registry path (default: XDG contextualize/contexts.json).",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Compile one file-backed manifest instead of the registry.",
+)
+@click.option("--name", "context_name", help="Context name for --manifest.")
+@click.option("--pretty", is_flag=True, help="Indent the machine-readable JSON.")
+def contexts_compile_cmd(names, registry, manifest_path, context_name, pretty) -> None:
+    """Compile authored manifests into versioned edition JSON."""
+    import json
+
+    from .manifest.edition import (
+        AUTHORED_EDITION_SCHEMA_VERSION,
+        compile_authored_manifest,
+        compile_authored_registry,
+    )
+
+    if manifest_path and (registry or names):
+        raise click.UsageError("--manifest cannot be combined with --registry or context names")
+    if context_name and not manifest_path:
+        raise click.UsageError("--name requires --manifest")
+    try:
+        if manifest_path:
+            payload = compile_authored_manifest(
+                manifest_path,
+                context_name=context_name,
+            ).to_dict()
+        else:
+            editions = compile_authored_registry(registry, names=names or None)
+            payload = {
+                "schemaVersion": AUTHORED_EDITION_SCHEMA_VERSION,
+                "editions": [edition.to_dict() for edition in editions],
+            }
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2 if pretty else None,
+            sort_keys=pretty,
+        )
+    )
+
+
 @contexts_cmd.command("hydrate", cls=PluginGroupedCommand)
 @click.argument("names", nargs=-1, type=str, shell_complete=_complete_context_names)
 @click.option(

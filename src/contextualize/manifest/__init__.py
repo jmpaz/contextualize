@@ -36,6 +36,16 @@ from .contexts import (
     load_context_registry,
     write_context_status,
 )
+from .edition import (
+    AUTHORED_EDITION_SCHEMA_VERSION,
+    AuthoredDiagnostic,
+    AuthoredEdition,
+    AuthoredPortal,
+    AuthoredPosition,
+    compile_authored_context,
+    compile_authored_manifest,
+    compile_authored_registry,
+)
 from .source import ManifestSource, load_manifest_source, load_manifest_text
 
 __all__ = [
@@ -69,6 +79,14 @@ __all__ = [
     "hydrate_contexts",
     "load_context_registry",
     "write_context_status",
+    "AUTHORED_EDITION_SCHEMA_VERSION",
+    "AuthoredDiagnostic",
+    "AuthoredEdition",
+    "AuthoredPortal",
+    "AuthoredPosition",
+    "compile_authored_context",
+    "compile_authored_manifest",
+    "compile_authored_registry",
     "ManifestSource",
     "load_manifest_source",
     "load_manifest_text",
