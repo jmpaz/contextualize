@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..manifest.contexts import ContextEntry, load_context_registry
+from ..manifest.contexts import ContextEntry, load_context_registry, resolved_context_dir
 from ..manifest.manifest import coerce_mark_spec, mark_spec_items, normalize_components
 from ..manifest.source import MEMBER_KEYS, ManifestSource, load_manifest_source
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -210,7 +210,11 @@ def load_manifest_handle(
         if isinstance(raw_cfg, dict):
             cfg = raw_cfg
 
-    context_dir = _context_dir_for(cfg, base_dir)
+    context_dir = (
+        resolved_context_dir(registry_entry)
+        if registry_entry is not None and registry_entry.context_dir is not None
+        else _context_dir_for(cfg, base_dir)
+    )
     index, index_error = _load_index(context_dir)
     if index is None and index_error is None and not context_dir.is_dir():
         context_dir = None

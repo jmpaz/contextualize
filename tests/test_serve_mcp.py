@@ -4,9 +4,11 @@ import io
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from contextualize import cli
+from contextualize.manifest.contexts import hydrate_contexts
 from contextualize.serve import core
 from contextualize.serve.mcp import run_stdio_server
 
@@ -108,6 +110,68 @@ def test_show_tool_matches_core_and_cli_json(tmp_path: Path) -> None:
         env={"XDG_CONFIG_HOME": str(tmp_path / "xdg-config")},
     )
     assert json.loads(cli_result.output) == mcp_payload
+
+
+@pytest.mark.parametrize("context_dir", ["registry-output", "."])
+def test_registered_context_dir_is_shared_by_hydrate_and_queries(
+    tmp_path: Path, context_dir: str
+) -> None:
+    source_dir = tmp_path / "authored"
+    source_dir.mkdir()
+    (source_dir / "note.md").write_text("hydrated content\n", encoding="utf-8")
+    manifest = source_dir / "manifest.yaml"
+    manifest.write_text(
+        "config:\n"
+        "  name: demo\n"
+        "  context:\n"
+        "    dir: manifest-output\n"
+        "components:\n"
+        "  - name: main\n"
+        "    files:\n"
+        "      - note.md\n",
+        encoding="utf-8",
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "demo": {
+                        "targetDir": str(target_dir),
+                        "contextDir": context_dir,
+                        "replace": "always",
+                        "manifest": {"source": str(manifest)},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    statuses = hydrate_contexts(
+        ["demo"],
+        registry_path=registry_path,
+        status_path=tmp_path / "status.json",
+    )
+    expected_dir = (target_dir / context_dir).resolve()
+    assert statuses[0].result == "hydrated"
+    assert statuses[0].context_dir == str(expected_dir)
+
+    result = core.cat_selector(
+        "demo:main", registry_path=str(registry_path), cwd=str(tmp_path)
+    )
+
+    assert result["state"] == "ok"
+    assert result["origin"]["context_dir"] == str(expected_dir)
+    assert result["origin"]["hydrated"] is True
+    assert result["specs"]
+    assert all(Path(spec).is_relative_to(expected_dir) for spec in result["specs"])
+    assert "hydrated content" in Path(result["specs"][0]).read_text(encoding="utf-8")
+    assert not (target_dir / "manifest-output").exists()
 
 
 def test_cat_and_links_and_status_tools_match_core(tmp_path: Path) -> None:
