@@ -147,6 +147,42 @@ def test_recursive_relative_manifests_and_cycle_are_diagnostic(tmp_path: Path) -
     assert all(portal["positionId"] in position_ids for portal in resolved)
 
 
+def test_linked_manifest_resolution_failure_is_diagnostic(tmp_path: Path) -> None:
+    authored_root = tmp_path / "authored"
+    package = tmp_path / "package"
+    authored_root.mkdir()
+    package.mkdir()
+    linked = authored_root / "linked.yaml"
+    linked.write_text("components: []\n", encoding="utf-8")
+    manifest = package / "manifest.yaml"
+    manifest.write_text(
+        f"""config:
+  root: {authored_root}
+components:
+  - name: linked-world
+    manifests:
+      - linked.yaml
+""",
+        encoding="utf-8",
+    )
+
+    payload = compile_authored_manifest(manifest, context_name="demo").to_dict()
+    portal = payload["portals"][0]
+    diagnostic = next(
+        item
+        for item in payload["diagnostics"]
+        if item["code"] == "included-manifest-unresolved"
+    )
+
+    assert portal["status"] == "unresolved"
+    assert "targetPositionId" not in portal
+    assert diagnostic["portalKey"] == portal["key"]
+    assert diagnostic["details"] == {
+        "authoredTarget": "linked.yaml",
+        "resolvedPath": str((package / "linked.yaml").resolve()),
+    }
+
+
 def test_linked_manifest_exposes_friendly_authored_locator_and_exact_return(
     tmp_path: Path,
 ) -> None:

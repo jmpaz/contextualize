@@ -712,6 +712,20 @@ class _EditionCompiler:
         resolved = candidate if candidate.is_absolute() else Path(source.manifest_cwd) / candidate
         resolved = resolved.resolve()
         if not resolved.is_file():
+            if status != "unresolved":
+                self.diagnostics.append(
+                    AuthoredDiagnostic(
+                        code="included-manifest-unresolved",
+                        message=f"Included manifest does not exist: {resolved}",
+                        source_path=source.manifest_path,
+                        position_key=position_key,
+                        portal_key=portal_key,
+                        details={
+                            "authoredTarget": target,
+                            "resolvedPath": str(resolved),
+                        },
+                    )
+                )
             return None, "unresolved"
         if resolved in stack:
             chain = [str(path) for path in (*stack, resolved)]
