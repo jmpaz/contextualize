@@ -547,7 +547,7 @@ class _EditionCompiler:
                 _synthetic_member(index) for index in range(len(specs))
             ]
             active_specs = iter(specs)
-            for member_outline in outlines:
+            for member_index, member_outline in enumerate(outlines):
                 disabled = bool(member_outline.get("disabled"))
                 spec = None if disabled else next(active_specs, None)
                 expanded_specs = _expand_member_spec(member_key, spec)
@@ -571,6 +571,16 @@ class _EditionCompiler:
                                 line=authored_range.get("lineStart"),
                                 position_key=position_key,
                                 portal_key=portal_key,
+                                details=self._authored_range_location(
+                                    position_key=position_key,
+                                    role=role,
+                                    member_index=int(
+                                        member_outline.get("order", member_index)
+                                    ),
+                                    member_outline=member_outline,
+                                    target=target,
+                                    authored_range=authored_range,
+                                ),
                             )
                         )
                     dynamic = None
@@ -622,6 +632,50 @@ class _EditionCompiler:
                     self.portal_records.append(record)
                     portal_keys.append(portal_key)
         return portal_keys
+
+    def _authored_range_location(
+        self,
+        *,
+        position_key: str,
+        role: str,
+        member_index: int,
+        member_outline: Mapping[str, Any],
+        target: str | None,
+        authored_range: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        range_location = _omit_none(
+            {
+                "origin": authored_range.get("origin"),
+                "index": authored_range.get("order"),
+                "authored": authored_range.get("authored"),
+                "lineStart": authored_range.get("lineStart"),
+                "lineEnd": authored_range.get("lineEnd"),
+            }
+        )
+        location = {
+            "context": self.name,
+            "component": {
+                "key": position_key,
+                "locator": self._locator_for(position_key),
+            },
+            "reference": _omit_none(
+                {
+                    "role": role,
+                    "index": member_index,
+                    "target": target,
+                    "lineStart": member_outline.get("line_start"),
+                    "lineEnd": member_outline.get("line_end"),
+                }
+            ),
+            "range": range_location,
+        }
+        if authored_range.get("origin") == "mark":
+            location["mark"] = {
+                key: value
+                for key, value in range_location.items()
+                if key != "origin"
+            }
+        return {"authoredLocation": location}
 
     def _locator_for(self, position_key: str) -> str:
         record = next(item for item in self.position_records if item["key"] == position_key)

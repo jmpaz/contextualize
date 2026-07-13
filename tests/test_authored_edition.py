@@ -256,6 +256,69 @@ def test_unresolved_reference_has_no_invented_target_id(tmp_path: Path) -> None:
     assert payload["diagnostics"][0]["portalKey"] == portal["key"]
 
 
+def test_mark_diagnostic_locates_exact_authored_evidence(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """components:
+  - group: survey
+    components:
+      - name: evidence
+        files:
+          - path: store:voice/2026-07-01/first.m4a
+            marks:
+              - at: "0:10-0:20"
+          - path: store:voice/2026-07-01/second.m4a
+            marks:
+              - at: "1:00-1:10"
+              - at: "4:12"
+                quote: This quote has only a point address.
+""",
+        encoding="utf-8",
+    )
+
+    payload = compile_authored_manifest(manifest, context_name="alpha").to_dict()
+    diagnostic = payload["diagnostics"][0]
+
+    assert diagnostic == {
+        "code": "mark-quote-requires-range",
+        "message": "Invalid authored range: mark-quote-requires-range",
+        "severity": "error",
+        "sourcePath": str(manifest),
+        "line": 12,
+        "positionKey": "root/p0000/p0000",
+        "portalKey": "root/p0000/p0000/m0001",
+        "details": {
+            "authoredLocation": {
+                "context": "alpha",
+                "component": {
+                    "key": "root/p0000/p0000",
+                    "locator": "alpha:survey/evidence",
+                },
+                "reference": {
+                    "role": "material",
+                    "index": 1,
+                    "target": "store:voice/2026-07-01/second.m4a",
+                    "lineStart": 9,
+                    "lineEnd": 13,
+                },
+                "range": {
+                    "origin": "mark",
+                    "index": 1,
+                    "authored": "4:12",
+                    "lineStart": 12,
+                    "lineEnd": 13,
+                },
+                "mark": {
+                    "index": 1,
+                    "authored": "4:12",
+                    "lineStart": 12,
+                    "lineEnd": 13,
+                },
+            }
+        },
+    }
+
+
 def test_dynamic_member_coverage_and_edition_are_explicit(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text(

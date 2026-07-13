@@ -28,9 +28,11 @@ aliases without conflating the recording with its transcript or marked span.
 
 Included local manifests compile recursively. Relative includes resolve from
 the including manifest; cycles and invalid includes remain visible as
-diagnostics. Dynamic members carry their query, edition time, and coverage.
-Compilation does not acquire provider data unless an embedding caller supplies
-a `dynamic_resolver`.
+diagnostics. Mark diagnostics carry an `authoredLocation` with the context,
+component locator, reference index and target, mark index and authored value,
+and exact source lines. Dynamic members carry their query, edition time, and
+coverage. Compilation does not acquire provider data unless an embedding caller
+supplies a `dynamic_resolver`.
 
 The edition hash excludes compilation time. The same authored sources and
 dynamic result therefore keep the same edition and position IDs across runs.
