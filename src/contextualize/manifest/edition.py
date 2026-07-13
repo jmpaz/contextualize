@@ -709,7 +709,7 @@ class _EditionCompiler:
             )
             return None, "unresolved"
         candidate = Path(os.path.expanduser(target))
-        resolved = candidate if candidate.is_absolute() else Path(source.manifest_cwd) / candidate
+        resolved = candidate if candidate.is_absolute() else _manifest_base_dir(source) / candidate
         resolved = resolved.resolve()
         if not resolved.is_file():
             if status != "unresolved":

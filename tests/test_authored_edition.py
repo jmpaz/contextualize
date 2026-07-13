@@ -147,13 +147,22 @@ def test_recursive_relative_manifests_and_cycle_are_diagnostic(tmp_path: Path) -
     assert all(portal["positionId"] in position_ids for portal in resolved)
 
 
-def test_linked_manifest_resolution_failure_is_diagnostic(tmp_path: Path) -> None:
+def test_linked_manifest_resolution_honors_config_root_and_nested_cwd(
+    tmp_path: Path,
+) -> None:
     authored_root = tmp_path / "authored"
     package = tmp_path / "package"
+    nested = authored_root / "nested"
     authored_root.mkdir()
     package.mkdir()
+    nested.mkdir()
     linked = authored_root / "linked.yaml"
-    linked.write_text("components: []\n", encoding="utf-8")
+    linked.write_text(
+        "components:\n  - name: nested\n    manifests:\n      - nested/leaf.yaml\n",
+        encoding="utf-8",
+    )
+    leaf = nested / "leaf.yaml"
+    leaf.write_text("components: []\n", encoding="utf-8")
     manifest = package / "manifest.yaml"
     manifest.write_text(
         f"""config:
@@ -167,20 +176,22 @@ components:
     )
 
     payload = compile_authored_manifest(manifest, context_name="demo").to_dict()
-    portal = payload["portals"][0]
-    diagnostic = next(
-        item
-        for item in payload["diagnostics"]
-        if item["code"] == "included-manifest-unresolved"
-    )
+    resolved = [
+        portal for portal in payload["portals"] if portal["status"] == "resolved"
+    ]
 
-    assert portal["status"] == "unresolved"
-    assert "targetPositionId" not in portal
-    assert diagnostic["portalKey"] == portal["key"]
-    assert diagnostic["details"] == {
-        "authoredTarget": "linked.yaml",
-        "resolvedPath": str((package / "linked.yaml").resolve()),
+    assert {str(manifest.resolve()), str(linked.resolve()), str(leaf.resolve())} == set(
+        payload["context"]["sources"]
+    )
+    assert {portal["authoredTarget"] for portal in resolved} == {
+        "linked.yaml",
+        "nested/leaf.yaml",
     }
+    assert all(portal.get("targetPositionId") for portal in resolved)
+    assert not any(
+        diagnostic["code"] == "included-manifest-unresolved"
+        for diagnostic in payload["diagnostics"]
+    )
 
 
 def test_linked_manifest_exposes_friendly_authored_locator_and_exact_return(
