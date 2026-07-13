@@ -24,6 +24,7 @@ from contextualize.references.address import (
         ("0:59", 59.0),
         ("12:04", 724.0),
         ("99:59", 5999.0),
+        ("108:20", 6500.0),
         ("1:02:03", 3723.0),
         ("10:00:00", 36000.0),
         ("4:12.5", 252.5),
@@ -66,6 +67,7 @@ def test_parse_time_range_point_and_range():
     assert parse_time_range("4:12") == (252.0, None)
     assert parse_time_range("12:04-13:26") == (724.0, 806.0)
     assert parse_time_range("0:04-0:14.25") == (4.0, 14.25)
+    assert parse_time_range("108:20-108:45") == (6500.0, 6525.0)
 
 
 @pytest.mark.parametrize(
@@ -168,7 +170,7 @@ def test_format_clock_time(seconds, text):
     assert format_clock_time(seconds) == text
 
 
-@pytest.mark.parametrize("seconds", [0.0, 59.0, 252.5, 3723.25, 5999.0])
+@pytest.mark.parametrize("seconds", [0.0, 59.0, 252.5, 3723.25, 5999.0, 6500.0])
 def test_format_round_trips_through_parse(seconds):
     assert parse_clock_time(format_clock_time(seconds)) == seconds
 
@@ -218,6 +220,13 @@ def test_coerce_quote_with_range():
     assert record["problem"] is None
     assert record["quote"] == "Two prompts.\n"
     assert record["refs"] == ["notes/op9f.md"]
+
+
+def test_coerce_quote_with_elapsed_minutes_over_an_hour():
+    record = coerce_mark_spec({"at": "108:20-108:45", "quote": "Embodied text."})
+    assert record["start_seconds"] == 6500.0
+    assert record["end_seconds"] == 6525.0
+    assert record["problem"] is None
 
 
 def test_coerce_quote_on_point_is_a_problem_not_a_raise():

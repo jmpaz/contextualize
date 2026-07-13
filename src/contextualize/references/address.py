@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 _CLOCK_TIME_RE = re.compile(
-    r"^(?:(?P<hours>\d{1,2}):(?P<h_minutes>[0-5]\d)|(?P<minutes>\d{1,2}))"
+    r"^(?:(?P<hours>\d{1,2}):(?P<h_minutes>[0-5]\d)|"
+    r"(?P<minutes>(?:\d{1,2}|[1-9]\d{2,})))"
     r":(?P<seconds>[0-5]\d(?:\.\d+)?)$"
 )
 
@@ -28,6 +29,7 @@ class MarkAddress:
 
 
 def parse_clock_time(text: str) -> float | None:
+    """Parse elapsed M:SS or clock-style H:MM:SS."""
     match = _CLOCK_TIME_RE.match(text)
     if match is None:
         return None
