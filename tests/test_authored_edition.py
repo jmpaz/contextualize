@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from click.testing import CliRunner
 
@@ -350,6 +351,77 @@ def test_dynamic_member_coverage_and_edition_are_explicit(tmp_path: Path) -> Non
     }
     assert first["context"]["edition"] == second["context"]["edition"]
     assert first["positions"][1]["id"] == second["positions"][1]["id"]
+
+
+def test_stable_ids_follow_authored_positions_across_reordering(tmp_path: Path) -> None:
+    child = tmp_path / "child.yaml"
+    child.write_text(
+        """components:
+  - name: inside
+    files:
+      - https://example.test/one
+      - https://example.test/two
+""",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """components:
+  - name: before
+    files:
+      - https://example.test/before
+  - name: world
+    manifests:
+      - child.yaml
+  - name: after
+    files:
+      - https://example.test/after
+""",
+        encoding="utf-8",
+    )
+    first = compile_authored_manifest(manifest, context_name="demo").to_dict()
+
+    manifest.write_text(
+        """components:
+  - name: after
+    files:
+      - https://example.test/after
+  - name: before
+    files:
+      - https://example.test/before
+  - name: world
+    manifests:
+      - child.yaml
+""",
+        encoding="utf-8",
+    )
+    second = compile_authored_manifest(manifest, context_name="demo").to_dict()
+
+    first_positions = {
+        position["locators"][0]: position["stableId"]
+        for position in first["positions"]
+    }
+    second_positions = {
+        position["locators"][0]: position["stableId"]
+        for position in second["positions"]
+    }
+    assert first_positions == second_positions
+    assert first["context"]["edition"] != second["context"]["edition"]
+
+    def portal_identity(portal: dict[str, Any]) -> tuple[Any, Any, Any]:
+        return (
+            portal["reverse"]["positionLocators"][0],
+            portal["role"],
+            portal["authoredTarget"],
+        )
+
+    first_portals = {
+        portal_identity(portal): portal["stableId"] for portal in first["portals"]
+    }
+    second_portals = {
+        portal_identity(portal): portal["stableId"] for portal in second["portals"]
+    }
+    assert first_portals == second_portals
 
 
 def test_voice_span_in_path_exposes_recording_and_exact_aliases(tmp_path: Path) -> None:

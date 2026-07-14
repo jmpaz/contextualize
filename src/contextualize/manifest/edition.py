@@ -255,6 +255,10 @@ class _EditionCompiler:
         self.portal_records: list[dict[str, Any]] = []
         self.diagnostics: list[AuthoredDiagnostic] = []
         self.sources: list[str] = []
+        self.position_stable_identity_counts: dict[str, int] = {}
+        self.portal_stable_identity_counts: dict[str, int] = {}
+        self.position_stable_identities: set[str] = set()
+        self.portal_stable_identities: set[str] = set()
 
     def compile(self) -> AuthoredEdition:
         root_key = "root"
@@ -281,7 +285,9 @@ class _EditionCompiler:
             for record in self.position_records
         }
         position_stable_ids = {
-            record["key"]: _position_stable_id(self.name, record["key"])
+            record["key"]: _position_stable_id(
+                self.name, record["stable_identity"]
+            )
             for record in self.position_records
         }
         portal_ids = {
@@ -289,7 +295,9 @@ class _EditionCompiler:
             for record in self.portal_records
         }
         portal_stable_ids = {
-            record["key"]: _portal_stable_id(self.name, record["key"])
+            record["key"]: _portal_stable_id(
+                self.name, record["stable_identity"]
+            )
             for record in self.portal_records
         }
         positions = tuple(
@@ -415,6 +423,11 @@ class _EditionCompiler:
             "locators": [self.name] if parent_key is None else [f"{locator_base}/~manifest"],
             "child_locator_base": locator_base,
         }
+        root_record["stable_identity"] = self._allocate_stable_identity(
+            root_record["locators"][0],
+            self.position_stable_identity_counts,
+            self.position_stable_identities,
+        )
         self.position_records.append(root_record)
         components = source.data.get("components")
         if not isinstance(components, list):
@@ -497,6 +510,11 @@ class _EditionCompiler:
                 ],
                 "child_locator_base": None,
             }
+            record["stable_identity"] = self._allocate_stable_identity(
+                record["locators"][0],
+                self.position_stable_identity_counts,
+                self.position_stable_identities,
+            )
             self.position_records.append(record)
             child_keys.append(key)
             if record["disabled"]:
@@ -629,9 +647,59 @@ class _EditionCompiler:
                         "dynamic": dynamic,
                         "status": status,
                     }
+                    record["stable_identity"] = self._allocate_stable_identity(
+                        self._portal_stable_key(
+                            position_key=position_key,
+                            role=role,
+                            target=target,
+                            options=options,
+                            ranges=ranges,
+                        ),
+                        self.portal_stable_identity_counts,
+                        self.portal_stable_identities,
+                    )
                     self.portal_records.append(record)
                     portal_keys.append(portal_key)
         return portal_keys
+
+    @staticmethod
+    def _allocate_stable_identity(
+        base: str,
+        counts: dict[str, int],
+        used: set[str],
+    ) -> str:
+        occurrence = counts.get(base, 0) + 1
+        candidate = base if occurrence == 1 else f"{base}~{occurrence}"
+        while candidate in used:
+            occurrence += 1
+            candidate = f"{base}~{occurrence}"
+        counts[base] = occurrence
+        used.add(candidate)
+        return candidate
+
+    def _portal_stable_key(
+        self,
+        *,
+        position_key: str,
+        role: str,
+        target: str | None,
+        options: Mapping[str, Any],
+        ranges: list[dict[str, Any]],
+    ) -> str:
+        position = next(
+            item for item in self.position_records if item["key"] == position_key
+        )
+        semantic = {
+            "position": position["stable_identity"],
+            "role": role,
+            "target": target,
+            "options": _stable_portal_options(options),
+            "ranges": [_stable_range(item) for item in ranges],
+        }
+        digest = hashlib.sha256(
+            _canonical_json(semantic).encode("utf-8")
+        ).hexdigest()[:24]
+        return f"{position['stable_identity']}/{role}/{digest}"
 
     def _authored_range_location(
         self,
@@ -1137,6 +1205,32 @@ def _portal_id(context: str, edition: str, key: str) -> str:
 
 def _portal_stable_id(context: str, key: str) -> str:
     return f"ctx://authored-portal/{quote(context, safe='')}/{quote(key, safe='/')}"
+
+
+def _stable_portal_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    stable = dict(options)
+    collection = stable.get("collection")
+    if isinstance(collection, dict):
+        stable["collection"] = _without(collection, {"order"})
+    return stable
+
+
+def _stable_range(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value[key]
+        for key in (
+            "kind",
+            "origin",
+            "disabled",
+            "authored",
+            "startSeconds",
+            "endSeconds",
+            "quote",
+            "refs",
+            "problem",
+        )
+        if key in value
+    }
 
 
 def _canonical_json(value: Any) -> str:

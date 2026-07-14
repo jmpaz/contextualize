@@ -16,7 +16,10 @@ and `compile_authored_manifest`.
 An edition contains ordered `positions`, source-facing `portals`, and
 `diagnostics`. Positions retain manifest nesting, framing prose, source order,
 disabled structure, effective options, source lines, an editioned ID, and a
-logical stable ID. Their `locators` expose the authored selector vocabulary,
+logical stable ID. Stable IDs follow authored locators and semantic member
+content rather than compiler ordinals, so unchanged positions and portals
+survive source reordering while editioned IDs identify one compiled snapshot.
+Their `locators` expose the authored selector vocabulary,
 including friendly linked-manifest paths such as
 `alpha:voice-survey/address-analogy`.
 
