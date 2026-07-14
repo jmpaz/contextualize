@@ -424,6 +424,236 @@ def test_stable_ids_follow_authored_positions_across_reordering(tmp_path: Path) 
     assert first_portals == second_portals
 
 
+def test_framing_and_evidence_edits_preserve_stable_ids(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """config:
+  comment: old entrance framing
+components:
+  # old component framing
+  - name: item  # old inline framing
+    text: old component prose
+    files:
+      - path: https://example.test/source
+        comment: old material framing
+        marks:
+          # old evidence framing
+          - at: 1:00-1:30  # old mark framing
+            quote: old evidence prose
+            refs: [old-reference]
+""",
+        encoding="utf-8",
+    )
+    first = compile_authored_manifest(manifest, context_name="demo").to_dict()
+
+    revised = manifest.read_text(encoding="utf-8")
+    for old, new in (
+        ("old entrance framing", "new entrance framing"),
+        ("old component framing", "new component framing"),
+        ("old inline framing", "new inline framing"),
+        ("old component prose", "new component prose"),
+        ("old material framing", "new material framing"),
+        ("old evidence framing", "new evidence framing"),
+        ("old mark framing", "new mark framing"),
+        ("old evidence prose", "new evidence prose"),
+        ("old-reference", "new-reference"),
+    ):
+        revised = revised.replace(old, new)
+    manifest.write_text(revised, encoding="utf-8")
+    second = compile_authored_manifest(manifest, context_name="demo").to_dict()
+
+    assert {
+        position["locators"][0]: position["stableId"]
+        for position in first["positions"]
+    } == {
+        position["locators"][0]: position["stableId"]
+        for position in second["positions"]
+    }
+    assert [portal["stableId"] for portal in first["portals"]] == [
+        portal["stableId"] for portal in second["portals"]
+    ]
+    assert first["context"]["edition"] != second["context"]["edition"]
+    assert [position["id"] for position in first["positions"]] != [
+        position["id"] for position in second["positions"]
+    ]
+
+
+def test_target_and_range_edits_change_portal_stable_ids(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """components:
+  - name: item
+    files:
+      - path: https://example.test/one
+        marks:
+          - at: 1:00-1:30
+""",
+        encoding="utf-8",
+    )
+    first = compile_authored_manifest(manifest, context_name="demo").to_dict()
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "https://example.test/one", "https://example.test/two"
+        ),
+        encoding="utf-8",
+    )
+    target_edit = compile_authored_manifest(manifest, context_name="demo").to_dict()
+    assert first["positions"][1]["stableId"] == target_edit["positions"][1]["stableId"]
+    assert first["portals"][0]["stableId"] != target_edit["portals"][0]["stableId"]
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace("1:00-1:30", "1:00-1:31"),
+        encoding="utf-8",
+    )
+    range_edit = compile_authored_manifest(manifest, context_name="demo").to_dict()
+    assert target_edit["portals"][0]["stableId"] != range_edit["portals"][0]["stableId"]
+
+
+def test_rename_and_structural_move_change_position_and_portal_ids(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """components:
+  - group: first
+    components:
+      - name: item
+        files:
+          - https://example.test/source
+""",
+        encoding="utf-8",
+    )
+    first = compile_authored_manifest(manifest, context_name="demo").to_dict()
+    first_position = next(
+        position for position in first["positions"] if position.get("name") == "item"
+    )
+    first_portal = first["portals"][0]
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace("name: item", "name: renamed"),
+        encoding="utf-8",
+    )
+    renamed = compile_authored_manifest(manifest, context_name="demo").to_dict()
+    renamed_position = next(
+        position
+        for position in renamed["positions"]
+        if position.get("name") == "renamed"
+    )
+    assert first_position["stableId"] != renamed_position["stableId"]
+    assert first_portal["stableId"] != renamed["portals"][0]["stableId"]
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace("group: first", "group: second"),
+        encoding="utf-8",
+    )
+    moved = compile_authored_manifest(manifest, context_name="demo").to_dict()
+    moved_position = next(
+        position
+        for position in moved["positions"]
+        if position.get("name") == "renamed"
+    )
+    assert renamed_position["stableId"] != moved_position["stableId"]
+    assert renamed["portals"][0]["stableId"] != moved["portals"][0]["stableId"]
+
+
+def test_duplicate_linked_locators_are_occurrence_suffixed_and_collision_free(
+    tmp_path: Path,
+) -> None:
+    child = tmp_path / "child.md"
+    child.write_text(
+        """```yaml
+components:
+  - name: leaf
+    files:
+      - https://example.test/source
+```
+""",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """components:
+  - name: world
+    manifests:
+      - child.md
+      - child.md
+""",
+        encoding="utf-8",
+    )
+
+    payload = compile_authored_manifest(manifest, context_name="demo").to_dict()
+    linked_positions = [
+        position
+        for position in payload["positions"]
+        if position["locators"] == ["demo:world/child/leaf"]
+    ]
+    assert [position["stableId"] for position in linked_positions] == [
+        "ctx://context/demo/demo%3Aworld/child/leaf",
+        "ctx://context/demo/demo%3Aworld/child/leaf~2",
+    ]
+    linked_portals = [
+        portal for portal in payload["portals"] if portal["role"] == "context"
+    ]
+    assert len({portal["stableId"] for portal in linked_portals}) == 2
+    assert linked_portals[1]["stableId"].endswith("~2")
+
+
+def test_linked_friendly_locator_stable_id_survives_revisions(tmp_path: Path) -> None:
+    voice = tmp_path / "voice"
+    voice.mkdir()
+    linked = voice / "address-analogy.md"
+    root = tmp_path / "alpha.yaml"
+    root.write_text(
+        """components:
+  - name: voice-survey
+    manifests:
+      - voice/address-analogy.md
+""",
+        encoding="utf-8",
+    )
+    linked.write_text(
+        """```yaml
+components:
+  - name: address-analogy
+    text: old framing
+    files:
+      - path: store:voice/2026-07-07/example.m4a
+        marks:
+          - at: 1:00-1:30
+            quote: old evidence
+```
+""",
+        encoding="utf-8",
+    )
+
+    first = compile_authored_manifest(root, context_name="alpha").to_dict()
+    linked.write_text(
+        linked.read_text(encoding="utf-8")
+        .replace("old framing", "new framing")
+        .replace("old evidence", "new evidence"),
+        encoding="utf-8",
+    )
+    second = compile_authored_manifest(root, context_name="alpha").to_dict()
+
+    locator = "alpha:voice-survey/address-analogy"
+    first_position = next(
+        position for position in first["positions"] if locator in position["locators"]
+    )
+    second_position = next(
+        position for position in second["positions"] if locator in position["locators"]
+    )
+    assert first_position["stableId"] == second_position["stableId"]
+    assert first_position["stableId"] == (
+        "ctx://context/alpha/alpha%3Avoice-survey/address-analogy"
+    )
+    first_portal = next(portal for portal in first["portals"] if portal["role"] == "material")
+    second_portal = next(portal for portal in second["portals"] if portal["role"] == "material")
+    assert first_portal["stableId"] == second_portal["stableId"]
+    assert first["context"]["edition"] != second["context"]["edition"]
+    assert first_position["id"] != second_position["id"]
+
+
 def test_voice_span_in_path_exposes_recording_and_exact_aliases(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text(

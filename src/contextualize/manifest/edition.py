@@ -21,6 +21,30 @@ _EXTERNAL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _VOICE_RE = re.compile(
     r"^(?:store:)?(?P<key>voice/.+?\.m4a)(?:@(?P<span>[^#]+))?$"
 )
+_PORTAL_OPTION_EXCLUSIONS = {
+    "comment",
+    "description",
+    "inlineComment",
+    "label",
+    "marks",
+    "prefix",
+    "quote",
+    "range",
+    "raw",
+    "suffix",
+    "text",
+    "title",
+}
+_PROSE_KEYS = (
+    "comment",
+    "description",
+    "label",
+    "prefix",
+    "quote",
+    "suffix",
+    "text",
+    "title",
+)
 
 
 @dataclass(frozen=True)
@@ -270,6 +294,7 @@ class _EditionCompiler:
             stack=(),
             locator_base=self.name,
         )
+        self._assign_portal_stable_identities()
         self._diagnose_locator_conflicts()
         fingerprint = _fingerprint_value({
             "schemaVersion": AUTHORED_EDITION_SCHEMA_VERSION,
@@ -647,20 +672,47 @@ class _EditionCompiler:
                         "dynamic": dynamic,
                         "status": status,
                     }
-                    record["stable_identity"] = self._allocate_stable_identity(
-                        self._portal_stable_key(
-                            position_key=position_key,
-                            role=role,
-                            target=target,
-                            options=options,
-                            ranges=ranges,
-                        ),
-                        self.portal_stable_identity_counts,
-                        self.portal_stable_identities,
-                    )
                     self.portal_records.append(record)
                     portal_keys.append(portal_key)
         return portal_keys
+
+    def _assign_portal_stable_identities(self) -> None:
+        bases = {
+            record["key"]: self._portal_stable_key(
+                position_key=record["position_key"],
+                role=record["role"],
+                target=record["authored_target"],
+                options=record["options"],
+                ranges=record["ranges"],
+            )
+            for record in self.portal_records
+        }
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for record in self.portal_records:
+            grouped.setdefault(bases[record["key"]], []).append(record)
+
+        for base, records in grouped.items():
+            disambiguators = {
+                _canonical_json(_portal_representation_selector(record))
+                for record in records
+            }
+            use_representation = len(disambiguators) > 1
+            for record in records:
+                stable_key = base
+                if use_representation:
+                    stable_key = self._portal_stable_key(
+                        position_key=record["position_key"],
+                        role=record["role"],
+                        target=record["authored_target"],
+                        options=record["options"],
+                        ranges=record["ranges"],
+                        disambiguator=_portal_representation_selector(record),
+                    )
+                record["stable_identity"] = self._allocate_stable_identity(
+                    stable_key,
+                    self.portal_stable_identity_counts,
+                    self.portal_stable_identities,
+                )
 
     @staticmethod
     def _allocate_stable_identity(
@@ -685,6 +737,7 @@ class _EditionCompiler:
         target: str | None,
         options: Mapping[str, Any],
         ranges: list[dict[str, Any]],
+        disambiguator: Mapping[str, Any] | None = None,
     ) -> str:
         position = next(
             item for item in self.position_records if item["key"] == position_key
@@ -696,6 +749,8 @@ class _EditionCompiler:
             "options": _stable_portal_options(options),
             "ranges": [_stable_range(item) for item in ranges],
         }
+        if disambiguator:
+            semantic["disambiguator"] = disambiguator
         digest = hashlib.sha256(
             _canonical_json(semantic).encode("utf-8")
         ).hexdigest()[:24]
@@ -1208,7 +1263,7 @@ def _portal_stable_id(context: str, key: str) -> str:
 
 
 def _stable_portal_options(options: Mapping[str, Any]) -> dict[str, Any]:
-    stable = dict(options)
+    stable = _without(options, _PORTAL_OPTION_EXCLUSIONS)
     collection = stable.get("collection")
     if isinstance(collection, dict):
         stable["collection"] = _without(collection, {"order"})
@@ -1216,21 +1271,58 @@ def _stable_portal_options(options: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _stable_range(value: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         key: value[key]
-        for key in (
-            "kind",
-            "origin",
-            "disabled",
-            "authored",
-            "startSeconds",
-            "endSeconds",
-            "quote",
-            "refs",
-            "problem",
-        )
+        for key in ("kind", "origin", "disabled", "startSeconds", "endSeconds", "value")
         if key in value
     }
+    if "startSeconds" not in result and "endSeconds" not in result:
+        for key in ("authored", "problem"):
+            if key in value:
+                result[key] = value[key]
+    return result
+
+
+def _portal_representation_selector(record: Mapping[str, Any]) -> dict[str, Any]:
+    options = record.get("options")
+    option_prose = (
+        _prose_fields(options) if isinstance(options, Mapping) else {}
+    )
+    range_prose = []
+    for item in record.get("ranges") or []:
+        if not isinstance(item, Mapping):
+            continue
+        prose = _prose_fields(item)
+        if prose:
+            range_prose.append(prose)
+    selector = {
+        "options": option_prose,
+        "memberComment": _prose_value(record.get("comment")),
+        "memberInlineComment": record.get("inline_comment"),
+        "ranges": range_prose,
+    }
+    return {
+        key: value
+        for key, value in selector.items()
+        if value not in ({}, [], None, "")
+    }
+
+
+def _prose_fields(value: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {}
+    for key in _PROSE_KEYS:
+        if key not in value:
+            continue
+        prose = _prose_value(value[key])
+        if prose not in (None, ""):
+            fields[key] = prose
+    return fields
+
+
+def _prose_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return value.get("text")
+    return value
 
 
 def _canonical_json(value: Any) -> str:

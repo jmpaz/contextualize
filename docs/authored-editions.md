@@ -16,12 +16,22 @@ and `compile_authored_manifest`.
 An edition contains ordered `positions`, source-facing `portals`, and
 `diagnostics`. Positions retain manifest nesting, framing prose, source order,
 disabled structure, effective options, source lines, an editioned ID, and a
-logical stable ID. Stable IDs follow authored locators and semantic member
-content rather than compiler ordinals, so unchanged positions and portals
+logical stable ID. Stable IDs follow friendly authored locators and the
+smallest semantic member basis: position locator, role, target, selector
+options, and normalized ranges. Framing, comments, and evidence prose are
+revisable representation, not identity; only duplicate otherwise-identical
+placements may use that prose as a disambiguator. Duplicate locators receive
+deterministic occurrence suffixes. Unchanged positions and portals therefore
 survive source reordering while editioned IDs identify one compiled snapshot.
 Their `locators` expose the authored selector vocabulary,
 including friendly linked-manifest paths such as
 `alpha:voice-survey/address-analogy`.
+
+Stable position IDs encode those friendly locators without an edition or
+snapshot hash, so a consumer can re-enter a linked authored position by its
+stable ID or locator across editions. Editioned `id` values remain the
+snapshot-specific addresses for parent/child and portal references within one
+compiled edition.
 
 Portals retain every authored placement independently. A portal's `reverse`
 record is sufficient to return to its exact position and edition. A target that
