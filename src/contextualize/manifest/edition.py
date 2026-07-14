@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import quote
 
 from .contexts import ContextEntry, load_context_registry, manifest_source_label
@@ -197,6 +198,7 @@ class AuthoredEdition:
 
 
 DynamicResolver = Callable[[str, Mapping[str, Any]], Mapping[str, Any] | None]
+QuoteResolver = Callable[[str], Mapping[str, Any] | None]
 
 
 def compile_authored_manifest(
@@ -205,6 +207,7 @@ def compile_authored_manifest(
     context_name: str | None = None,
     compiled_at: str | None = None,
     dynamic_resolver: DynamicResolver | None = None,
+    quote_resolver: QuoteResolver | None = None,
 ) -> AuthoredEdition:
     source = load_manifest_source(manifest_path)
     name = context_name or _manifest_name(source) or Path(manifest_path).stem
@@ -215,6 +218,7 @@ def compile_authored_manifest(
         authority="file-backed-authored",
         compiled_at=compiled_at or _now(),
         dynamic_resolver=dynamic_resolver,
+        quote_resolver=quote_resolver,
     ).compile()
 
 
@@ -223,6 +227,7 @@ def compile_authored_context(
     *,
     compiled_at: str | None = None,
     dynamic_resolver: DynamicResolver | None = None,
+    quote_resolver: QuoteResolver | None = None,
 ) -> AuthoredEdition:
     source, authority = _source_for_context(context)
     return _EditionCompiler(
@@ -232,6 +237,7 @@ def compile_authored_context(
         authority=authority,
         compiled_at=compiled_at or _now(),
         dynamic_resolver=dynamic_resolver,
+        quote_resolver=quote_resolver,
     ).compile()
 
 
@@ -241,6 +247,7 @@ def compile_authored_registry(
     names: Iterable[str] | None = None,
     compiled_at: str | None = None,
     dynamic_resolver: DynamicResolver | None = None,
+    quote_resolver: QuoteResolver | None = None,
 ) -> list[AuthoredEdition]:
     registry = load_context_registry(registry_path)
     selected = list(names) if names is not None else sorted(registry)
@@ -253,6 +260,7 @@ def compile_authored_registry(
             registry[name],
             compiled_at=edition_time,
             dynamic_resolver=dynamic_resolver,
+            quote_resolver=quote_resolver,
         )
         for name in selected
     ]
@@ -268,6 +276,7 @@ class _EditionCompiler:
         authority: str,
         compiled_at: str,
         dynamic_resolver: DynamicResolver | None,
+        quote_resolver: QuoteResolver | None,
     ) -> None:
         self.name = name
         self.root_source = root_source
@@ -275,6 +284,8 @@ class _EditionCompiler:
         self.authority = authority
         self.compiled_at = compiled_at
         self.dynamic_resolver = dynamic_resolver
+        self.quote_resolver = quote_resolver
+        self.quote_representations: dict[str, Mapping[str, Any] | None] = {}
         self.position_records: list[dict[str, Any]] = []
         self.portal_records: list[dict[str, Any]] = []
         self.diagnostics: list[AuthoredDiagnostic] = []
@@ -495,7 +506,7 @@ class _EditionCompiler:
         outline_nodes: list[dict[str, Any]],
         source: ManifestSource,
         parent_key: str,
-        effective_leaves: Iterable[dict[str, Any]],
+        effective_leaves: Iterator[dict[str, Any]],
         stack: tuple[Path, ...],
     ) -> list[str]:
         nodes = outline_nodes or [
@@ -602,28 +613,46 @@ class _EditionCompiler:
                     status = "disabled" if disabled else "unresolved"
                     target_position_key = None
                     ranges = _member_ranges(expanded_spec, member_outline, target)
+                    ranges = self._resolve_quote_ranges(target, ranges)
                     for authored_range in ranges:
                         problem = authored_range.get("problem")
                         if not problem:
                             continue
+                        resolution = authored_range.get("quoteResolution")
+                        diagnostic_code = (
+                            f"mark-quote-{resolution['state']}"
+                            if isinstance(resolution, Mapping)
+                            and resolution.get("state") in {"unresolved", "ambiguous"}
+                            else problem
+                        )
+                        message = (
+                            "Legacy quote selector did not match the referenced source"
+                            if diagnostic_code == "mark-quote-unresolved"
+                            else "Legacy quote selector matched multiple source ranges"
+                            if diagnostic_code == "mark-quote-ambiguous"
+                            else f"Invalid authored range: {problem}"
+                        )
+                        details = self._authored_range_location(
+                            position_key=position_key,
+                            role=role,
+                            member_index=int(
+                                member_outline.get("order", member_index)
+                            ),
+                            member_outline=member_outline,
+                            target=target,
+                            authored_range=authored_range,
+                        )
+                        if isinstance(resolution, Mapping):
+                            details["quoteResolution"] = dict(resolution)
                         self.diagnostics.append(
                             AuthoredDiagnostic(
-                                code=problem,
-                                message=f"Invalid authored range: {problem}",
+                                code=diagnostic_code,
+                                message=message,
                                 source_path=source.manifest_path,
                                 line=authored_range.get("lineStart"),
                                 position_key=position_key,
                                 portal_key=portal_key,
-                                details=self._authored_range_location(
-                                    position_key=position_key,
-                                    role=role,
-                                    member_index=int(
-                                        member_outline.get("order", member_index)
-                                    ),
-                                    member_outline=member_outline,
-                                    target=target,
-                                    authored_range=authored_range,
-                                ),
+                                details=details,
                             )
                         )
                     dynamic = None
@@ -675,6 +704,63 @@ class _EditionCompiler:
                     self.portal_records.append(record)
                     portal_keys.append(portal_key)
         return portal_keys
+
+    def _resolve_quote_ranges(
+        self,
+        target: str | None,
+        ranges: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if self.quote_resolver is None or target is None:
+            return ranges
+        resolved: list[dict[str, Any]] = []
+        for authored_range in ranges:
+            if (
+                authored_range.get("origin") != "mark"
+                or authored_range.get("problem") != "mark-quote-requires-range"
+                or not authored_range.get("quote")
+            ):
+                resolved.append(authored_range)
+                continue
+            if target not in self.quote_representations:
+                self.quote_representations[target] = self.quote_resolver(target)
+            representation = self.quote_representations[target]
+            if representation is None:
+                resolved.append(authored_range)
+                continue
+            matches = _quote_matches(
+                authored_range["quote"],
+                representation,
+            )
+            updated = dict(authored_range)
+            if not matches:
+                updated["quoteResolution"] = _quote_resolution(
+                    state="unresolved",
+                    target=target,
+                    quote=authored_range["quote"],
+                    representation=representation,
+                )
+                updated["problem"] = "mark-quote-unresolved"
+            elif len(matches) > 1:
+                updated["quoteResolution"] = _quote_resolution(
+                    state="ambiguous",
+                    target=target,
+                    quote=authored_range["quote"],
+                    representation=representation,
+                    matches=matches,
+                )
+                updated["problem"] = "mark-quote-ambiguous"
+            else:
+                match = matches[0]
+                updated.pop("problem", None)
+                updated["quoteResolution"] = _quote_resolution(
+                    state="resolved",
+                    target=target,
+                    quote=authored_range["quote"],
+                    representation=representation,
+                    match=match,
+                )
+            resolved.append(updated)
+        return resolved
 
     def _assign_portal_stable_identities(self) -> None:
         bases = {
@@ -1179,6 +1265,156 @@ def _coerced_range(
             "raw": outline.get("raw") if disabled else None,
         }
     )
+
+
+def _quote_matches(
+    quote: str,
+    representation: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    raw_segments = representation.get("segments")
+    if not isinstance(raw_segments, list):
+        return []
+    segments = []
+    for index, segment in enumerate(raw_segments):
+        if not isinstance(segment, Mapping) or not isinstance(segment.get("text"), str):
+            continue
+        normalized = dict(segment)
+        normalized.setdefault("segmentIndex", index)
+        segments.append(normalized)
+    if not segments:
+        return []
+    authored_quote = quote.strip()
+    if not authored_quote:
+        return []
+    normalized_quote = _normalize_quote_text(authored_quote)
+    candidates: list[dict[str, Any]] = []
+    for start in range(len(segments)):
+        source_text = ""
+        normalized_text = ""
+        for end in range(start, len(segments)):
+            segment_text = segments[end]["text"]
+            source_text = f"{source_text}\n{segment_text}" if source_text else segment_text
+            normalized_text = _normalize_quote_text(source_text)
+            match_mode = None
+            if authored_quote in source_text:
+                match_mode = "exact"
+            elif normalized_quote in normalized_text:
+                match_mode = "normalized"
+            if match_mode is None:
+                continue
+            candidate = _quote_candidate(
+                segments[start : end + 1],
+                source_text=source_text,
+                match_mode=match_mode,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+    if not candidates:
+        return []
+    exact = [candidate for candidate in candidates if candidate["matchMode"] == "exact"]
+    candidates = exact or candidates
+    smallest = min(len(candidate["segmentIndexes"]) for candidate in candidates)
+    candidates = [
+        candidate
+        for candidate in candidates
+        if len(candidate["segmentIndexes"]) == smallest
+    ]
+    unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for candidate in candidates:
+        key = (
+            candidate["startSeconds"],
+            candidate["endSeconds"],
+            tuple(candidate["segmentIndexes"]),
+            candidate["text"],
+        )
+        unique[key] = candidate
+    return list(unique.values())
+
+
+def _quote_candidate(
+    segments: list[Mapping[str, Any]],
+    *,
+    source_text: str,
+    match_mode: str,
+) -> dict[str, Any] | None:
+    start = _segment_number(segments[0], "startSeconds", "start_time")
+    end = _segment_number(segments[-1], "endSeconds", "end_time")
+    if start is None or end is None or end <= start:
+        return None
+    indexes = [
+        segment.get("segmentIndex", index)
+        for index, segment in enumerate(segments)
+    ]
+    return {
+        "startSeconds": start,
+        "endSeconds": end,
+        "segmentIndexes": indexes,
+        "text": source_text,
+        "matchMode": match_mode,
+    }
+
+
+def _segment_number(
+    segment: Mapping[str, Any],
+    canonical: str,
+    alternate: str,
+) -> float | None:
+    value = segment.get(canonical, segment.get(alternate))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _normalize_quote_text(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _quote_resolution(
+    *,
+    state: str,
+    target: str,
+    quote: str,
+    representation: Mapping[str, Any],
+    match: Mapping[str, Any] | None = None,
+    matches: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    source = representation.get("source")
+    result: dict[str, Any] = {
+        "state": state,
+        "target": target,
+        "source": source if isinstance(source, str) and source else target,
+        "quote": quote,
+    }
+    if match is not None:
+        result.update(
+            {
+                "matchMode": match["matchMode"],
+                "range": {
+                    "startSeconds": match["startSeconds"],
+                    "endSeconds": match["endSeconds"],
+                },
+                "evidence": {
+                    "text": match["text"],
+                    "segmentIndexes": list(match["segmentIndexes"]),
+                },
+            }
+        )
+    if matches is not None:
+        result["candidates"] = [
+            {
+                "range": {
+                    "startSeconds": candidate["startSeconds"],
+                    "endSeconds": candidate["endSeconds"],
+                },
+                "segmentIndexes": list(candidate["segmentIndexes"]),
+                "text": candidate["text"],
+                "matchMode": candidate["matchMode"],
+            }
+            for candidate in matches
+        ]
+    return result
 
 
 def _target_aliases(target: str) -> list[str]:

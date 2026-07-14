@@ -13,6 +13,7 @@ from typing import Any
 
 from .manifest.edition import (
     AuthoredEdition,
+    QuoteResolver,
     compile_authored_context,
     compile_authored_manifest,
     compile_authored_registry,

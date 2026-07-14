@@ -320,6 +320,92 @@ def test_mark_diagnostic_locates_exact_authored_evidence(tmp_path: Path) -> None
     }
 
 
+def test_legacy_point_quote_resolution_preserves_evidence_and_states(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """components:
+  - name: evidence
+    files:
+      - path: store:voice/exact.m4a
+        marks:
+          - at: "0:10"
+            quote: exact evidence
+      - path: store:voice/missing.m4a
+        marks:
+          - at: "0:10"
+            quote: absent evidence
+      - path: store:voice/ambiguous.m4a
+        marks:
+          - at: "0:10"
+            quote: repeated evidence
+""",
+        encoding="utf-8",
+    )
+
+    representations = {
+        "store:voice/exact.m4a": {
+            "source": "voice/exact.m4a#capture-1",
+            "segments": [
+                {"segmentIndex": 0, "startSeconds": 0, "endSeconds": 30, "text": "exact evidence"},
+            ],
+        },
+        "store:voice/missing.m4a": {
+            "source": "voice/missing.m4a#capture-1",
+            "segments": [
+                {"segmentIndex": 0, "startSeconds": 0, "endSeconds": 30, "text": "other evidence"},
+            ],
+        },
+        "store:voice/ambiguous.m4a": {
+            "source": "voice/ambiguous.m4a#capture-1",
+            "segments": [
+                {"segmentIndex": 0, "startSeconds": 0, "endSeconds": 30, "text": "repeated evidence"},
+                {"segmentIndex": 1, "startSeconds": 60, "endSeconds": 90, "text": "repeated evidence"},
+            ],
+        },
+    }
+
+    payload = compile_authored_manifest(
+        manifest,
+        context_name="voice",
+        quote_resolver=representations.get,
+    ).to_dict()
+
+    exact, missing, ambiguous = payload["portals"]
+    assert exact["ranges"][0]["startSeconds"] == 10.0
+    assert "endSeconds" not in exact["ranges"][0]
+    assert exact["ranges"][0]["quoteResolution"] == {
+        "state": "resolved",
+        "target": "store:voice/exact.m4a",
+        "source": "voice/exact.m4a#capture-1",
+        "quote": "exact evidence",
+        "matchMode": "exact",
+        "range": {"startSeconds": 0.0, "endSeconds": 30.0},
+        "evidence": {"text": "exact evidence", "segmentIndexes": [0]},
+    }
+    assert [diagnostic["code"] for diagnostic in payload["diagnostics"]] == [
+        "mark-quote-unresolved",
+        "mark-quote-ambiguous",
+    ]
+    assert missing["ranges"][0]["quoteResolution"]["state"] == "unresolved"
+    assert ambiguous["ranges"][0]["quoteResolution"]["state"] == "ambiguous"
+    assert ambiguous["ranges"][0]["quoteResolution"]["candidates"] == [
+        {
+            "range": {"startSeconds": 0.0, "endSeconds": 30.0},
+            "segmentIndexes": [0],
+            "text": "repeated evidence",
+            "matchMode": "exact",
+        },
+        {
+            "range": {"startSeconds": 60.0, "endSeconds": 90.0},
+            "segmentIndexes": [1],
+            "text": "repeated evidence",
+            "matchMode": "exact",
+        },
+    ]
+
+
 def test_dynamic_member_coverage_and_edition_are_explicit(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text(

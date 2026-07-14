@@ -45,7 +45,10 @@ diagnostics. Mark diagnostics carry an `authoredLocation` with the context,
 component locator, reference index and target, mark index and authored value,
 and exact source lines. Dynamic members carry their query, edition time, and
 coverage. Compilation does not acquire provider data unless an embedding caller
-supplies a `dynamic_resolver`.
+supplies a `dynamic_resolver` or `quote_resolver`. A quote resolver returns a
+referenced timed representation; exact legacy point-plus-quote marks retain
+their authored selector and carry resolved evidence, while missing and
+ambiguous matches stay diagnostics.
 
 The edition hash excludes compilation time. The same authored sources and
 dynamic result therefore keep the same edition and position IDs across runs.

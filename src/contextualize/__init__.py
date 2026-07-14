@@ -2,6 +2,7 @@
 
 from .api import (
     AuthoredEdition,
+    QuoteResolver,
     ResolvedRef,
     compile_authored_context,
     compile_authored_manifest,
@@ -11,6 +12,7 @@ from .api import (
 
 __all__: list[str] = [
     "AuthoredEdition",
+    "QuoteResolver",
     "ResolvedRef",
     "compile_authored_context",
     "compile_authored_manifest",
