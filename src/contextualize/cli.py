@@ -1786,23 +1786,30 @@ def contexts_compile_cmd(names, registry, manifest_path, context_name, pretty) -
         compile_authored_manifest,
         compile_authored_registry,
     )
+    from .manifest.quote_resolver import LocalVoiceQuoteResolver
 
     if manifest_path and (registry or names):
         raise click.UsageError("--manifest cannot be combined with --registry or context names")
     if context_name and not manifest_path:
         raise click.UsageError("--name requires --manifest")
     try:
-        if manifest_path:
-            payload = compile_authored_manifest(
-                manifest_path,
-                context_name=context_name,
-            ).to_dict()
-        else:
-            editions = compile_authored_registry(registry, names=names or None)
-            payload = {
-                "schemaVersion": AUTHORED_EDITION_SCHEMA_VERSION,
-                "editions": [edition.to_dict() for edition in editions],
-            }
+        with LocalVoiceQuoteResolver() as quote_resolver:
+            if manifest_path:
+                payload = compile_authored_manifest(
+                    manifest_path,
+                    context_name=context_name,
+                    quote_resolver=quote_resolver,
+                ).to_dict()
+            else:
+                editions = compile_authored_registry(
+                    registry,
+                    names=names or None,
+                    quote_resolver=quote_resolver,
+                )
+                payload = {
+                    "schemaVersion": AUTHORED_EDITION_SCHEMA_VERSION,
+                    "editions": [edition.to_dict() for edition in editions],
+                }
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
