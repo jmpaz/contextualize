@@ -41,14 +41,10 @@ _REQUIRED_SCHEMA = {
 
 
 def default_documents_db_path() -> Path:
-    configured = os.environ.get("CONTEXTUALIZE_READER_DOCUMENTS_DB_PATH") or os.environ.get(
-        "NB_DOCUMENTS_DB_PATH"
-    )
+    configured = os.environ.get("CONTEXTUALIZE_QUOTE_STORE_DB")
     if configured:
         return Path(configured).expanduser()
-    state_dir = os.environ.get("CONTEXTUALIZE_READER_STATE_DIR") or os.environ.get(
-        "NB_STATE_DIR"
-    )
+    state_dir = os.environ.get("CONTEXTUALIZE_READER_STATE_DIR")
     if state_dir:
         return Path(state_dir).expanduser() / "documents.db"
     data_home = os.environ.get("XDG_DATA_HOME")

@@ -14,7 +14,7 @@ from contextualize.manifest import HydrateOverrides
 from contextualize.manifest.hydrate import apply_hydration_plan, build_hydration_plan
 from contextualize.serve import cat_selector, draw_substance, links, show, status
 
-from conftest import STORE_TARGET, UNTIMED_TARGET
+from conftest import STORE_KEY, STORE_TARGET, UNTIMED_TARGET
 
 MARKED_MANIFEST = """config:
   context:
@@ -667,40 +667,117 @@ def test_links_out_carries_mark_ref_edges(fake_store, tmp_path):
     assert mark_edges[0]["mark_address"] == f"{STORE_TARGET}@0:25-1:00"
 
 
-CURRENT_CAPTURE = {
-    "id": 3,
-    "model": "fake-asr-1",
-    "capturedAt": "2026-07-07T12:40:00Z",
-    "active": True,
-}
-SUPERSEDED_CAPTURE = {
-    "id": 9,
-    "model": "fake-asr-2",
-    "capturedAt": "2026-07-08T09:00:00Z",
-    "active": True,
-}
+def _capture_summary(
+    capture_id: int, model: str, captured_at: str, active: bool
+) -> dict[str, object]:
+    return {
+        "ref": f"{STORE_KEY}#transcript-capture={capture_id}",
+        "captureId": capture_id,
+        "model": model,
+        "capturedAt": captured_at,
+        "active": active,
+        "synthetic": False,
+    }
 
 
-def _stub_reader(monkeypatch, tmp_path: Path, captures: list[dict]) -> Path:
+CURRENT_CAPTURE = _capture_summary(3, "fake-asr-1", "2026-07-07T12:40:00Z", True)
+SUPERSEDED_CAPTURE = _capture_summary(9, "fake-asr-2", "2026-07-08T09:00:00Z", True)
+STALE_CAPTURE = _capture_summary(2, "fake-asr-0", "2026-07-06T12:40:00Z", False)
+
+
+def _reader_response(
+    captures: object,
+    *,
+    response_type: str = "object",
+    body_kind: str = "voice-recording",
+    include_captures: bool = True,
+) -> dict[str, object]:
+    audio_ref = f"{STORE_KEY}#audio"
+    body: dict[str, object] = {
+        "kind": body_kind,
+        "ref": STORE_KEY,
+        "quality": {
+            "state": "available",
+            "revisable": True,
+            "durationSeconds": 81,
+            "segmentCount": 2,
+            "observations": [],
+        },
+        "audio": {
+            "ref": audio_ref,
+            "kind": "audio",
+            "authority": "source",
+            "state": "available",
+            "exact": True,
+        },
+        "authoredPositionRefs": [],
+        "state": "complete",
+    }
+    if include_captures:
+        body["captures"] = captures
+    return {
+        "ref": STORE_KEY,
+        "identity": {
+            "encountered": STORE_KEY,
+            "canonical": STORE_KEY,
+            "citable": STORE_KEY,
+        },
+        "type": response_type,
+        "source": "voice",
+        "authority": "source",
+        "body": body,
+        "context": {
+            "sourceRef": STORE_KEY,
+            "containerRefs": [],
+            "occurrenceRefs": [],
+            "authoredPositionRefs": [],
+            "representationRefs": [audio_ref],
+            "relatedRefs": [],
+        },
+        "relations": [],
+        "available": [
+            {"operation": "open", "input": {"ref": STORE_KEY}},
+        ],
+    }
+
+
+def _stub_reader(
+    monkeypatch, tmp_path: Path, response: object
+) -> tuple[Path, Path]:
     payload = tmp_path / "captures.json"
-    payload.write_text(json.dumps(captures), encoding="utf-8")
+    serialized = response if isinstance(response, str) else json.dumps(response)
+    payload.write_text(serialized, encoding="utf-8")
+    argv = tmp_path / "argv.txt"
     script = tmp_path / "context-reader-stub"
-    script.write_text(f"#!/bin/sh\ncat '{payload}'\n", encoding="utf-8")
+    script.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv}'\ncat '{payload}'\n",
+        encoding="utf-8",
+    )
     script.chmod(0o755)
     monkeypatch.setenv("CONTEXTUALIZE_READER_COMMAND", str(script))
-    return payload
+    return payload, argv
 
 
 def test_status_counts_mark_drift(fake_store, monkeypatch, tmp_path):
     registry, _manifest = _registered_marked_context(tmp_path)
-    payload = _stub_reader(monkeypatch, tmp_path, [CURRENT_CAPTURE])
+    payload, argv = _stub_reader(
+        monkeypatch, tmp_path, _reader_response([STALE_CAPTURE, CURRENT_CAPTURE])
+    )
 
     fresh = status("annot", registry_path=registry, cwd=str(tmp_path))
     assert fresh["state"] == "ok"
     assert fresh["drift"]["marks_drifted"] == []
     assert fresh["drift"]["marks_unchecked"] is None
+    assert argv.read_text(encoding="utf-8").splitlines() == [
+        "open",
+        STORE_KEY,
+        "--json",
+    ]
 
-    payload.write_text(json.dumps([SUPERSEDED_CAPTURE]), encoding="utf-8")
+    payload.write_text(
+        json.dumps(_reader_response([STALE_CAPTURE, SUPERSEDED_CAPTURE])),
+        encoding="utf-8",
+    )
     drifted = status("annot", registry_path=registry, cwd=str(tmp_path))
     assert drifted["state"] == "transcript-drift"
     assert drifted["drift"]["any"] is True
@@ -723,12 +800,111 @@ def test_status_mark_drift_check_is_guarded(fake_store, monkeypatch, tmp_path):
     assert result["state"] == "ok"
     assert result["drift"]["marks_drifted"] == []
     assert "unavailable" in result["drift"]["marks_unchecked"]
+    assert f"context-reader open {STORE_KEY}" in result["drift"]["marks_unchecked"]
     assert "Mark drift unchecked" in result["detail"]
+
+
+def test_status_uses_first_capture_when_no_capture_is_active(
+    fake_store, monkeypatch, tmp_path
+):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    first = _capture_summary(3, "fake-asr-1", "2026-07-07T12:40:00Z", False)
+    second = _capture_summary(9, "fake-asr-2", "2026-07-08T09:00:00Z", False)
+    _stub_reader(monkeypatch, tmp_path, _reader_response([first, second]))
+
+    result = status("annot", registry_path=registry, cwd=str(tmp_path))
+
+    assert result["state"] == "ok"
+    assert result["drift"]["marks_drifted"] == []
+    assert result["drift"]["marks_unchecked"] is None
+
+
+def test_status_accepts_valid_empty_capture_list(
+    fake_store, monkeypatch, tmp_path
+):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    _stub_reader(monkeypatch, tmp_path, _reader_response([]))
+
+    result = status("annot", registry_path=registry, cwd=str(tmp_path))
+
+    assert result["state"] == "transcript-drift"
+    assert result["drift"]["marks_unchecked"] is None
+    assert len(result["drift"]["marks_drifted"]) == 2
+    assert all(
+        item["reason"] == "no transcription recorded in the store"
+        for item in result["drift"]["marks_drifted"]
+    )
+
+
+LEGACY_ID_CAPTURE = {
+    key: value for key, value in CURRENT_CAPTURE.items() if key != "captureId"
+} | {"id": 3}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        [],
+        _reader_response([LEGACY_ID_CAPTURE]),
+        _reader_response([CURRENT_CAPTURE], response_type="list"),
+        _reader_response([CURRENT_CAPTURE], body_kind="voice-note"),
+        _reader_response([CURRENT_CAPTURE], include_captures=False),
+        _reader_response("not-a-capture-list"),
+        "{malformed-json",
+    ],
+    ids=[
+        "legacy-bare-list",
+        "legacy-capture-field",
+        "wrong-response-type",
+        "wrong-body-kind",
+        "missing-captures",
+        "malformed-captures",
+        "malformed-json",
+    ],
+)
+def test_status_rejects_non_strict_reader_responses(
+    fake_store, monkeypatch, tmp_path, response
+):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    _stub_reader(monkeypatch, tmp_path, response)
+
+    result = status("annot", registry_path=registry, cwd=str(tmp_path))
+
+    diagnostic = f"context-reader open {STORE_KEY} returned an invalid voice-recording response"
+    assert result["state"] == "ok"
+    assert result["drift"]["marks_drifted"] == []
+    assert result["drift"]["marks_unchecked"] == diagnostic
+    assert diagnostic in result["detail"]
+
+
+def test_status_ignores_retired_runtime_command_environment(
+    fake_store, monkeypatch, tmp_path
+):
+    registry, _manifest = _registered_marked_context(tmp_path)
+    payload = tmp_path / "retired-captures.json"
+    payload.write_text(
+        json.dumps(_reader_response([CURRENT_CAPTURE])), encoding="utf-8"
+    )
+    retired_script = tmp_path / "retired-runtime-stub"
+    retired_script.write_text(f"#!/bin/sh\ncat '{payload}'\n", encoding="utf-8")
+    retired_script.chmod(0o755)
+    monkeypatch.setenv(
+        "_".join(("CTX", "BRIDGE", "COMMAND")), str(retired_script)
+    )
+    monkeypatch.setenv("CONTEXTUALIZE_READER_COMMAND", str(tmp_path / "no-such-binary"))
+
+    result = status("annot", registry_path=registry, cwd=str(tmp_path))
+
+    assert result["state"] == "ok"
+    assert result["drift"]["marks_drifted"] == []
+    assert "unavailable" in result["drift"]["marks_unchecked"]
 
 
 def test_status_registry_wide_counts_marks_drifted(fake_store, monkeypatch, tmp_path):
     registry, _manifest = _registered_marked_context(tmp_path)
-    _stub_reader(monkeypatch, tmp_path, [SUPERSEDED_CAPTURE])
+    _stub_reader(
+        monkeypatch, tmp_path, _reader_response([SUPERSEDED_CAPTURE])
+    )
 
     result = status(None, registry_path=registry, cwd=str(tmp_path))
     assert result["drift_summary"] == {"drifted": 1, "total": 1, "marks_drifted": 2}

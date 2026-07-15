@@ -1346,6 +1346,57 @@ def _local_entry_source_path(handle: ManifestHandle, entry: dict[str, Any]) -> P
     return None
 
 
+_VOICE_CAPTURE_SUMMARY_KEYS = {
+    "ref",
+    "captureId",
+    "model",
+    "capturedAt",
+    "active",
+    "synthetic",
+}
+
+
+def _strict_voice_capture_identity(
+    payload: Any,
+) -> tuple[bool, dict[str, Any] | None]:
+    if not isinstance(payload, dict) or payload.get("type") != "object":
+        return False, None
+    body = payload.get("body")
+    if not isinstance(body, dict) or body.get("kind") != "voice-recording":
+        return False, None
+    captures = body.get("captures")
+    if not isinstance(captures, list):
+        return False, None
+    for capture in captures:
+        if not isinstance(capture, dict) or set(capture) != _VOICE_CAPTURE_SUMMARY_KEYS:
+            return False, None
+        if (
+            not isinstance(capture["ref"], str)
+            or not capture["ref"]
+            or isinstance(capture["captureId"], bool)
+            or not isinstance(capture["captureId"], int)
+            or capture["captureId"] <= 0
+            or not isinstance(capture["model"], str)
+            or not capture["model"]
+            or not isinstance(capture["capturedAt"], str)
+            or not capture["capturedAt"]
+            or not isinstance(capture["active"], bool)
+            or not isinstance(capture["synthetic"], bool)
+        ):
+            return False, None
+    chosen = next((capture for capture in captures if capture["active"]), None)
+    if chosen is None and captures:
+        chosen = captures[0]
+    if chosen is None:
+        return True, None
+    return True, {
+        "id": chosen["captureId"],
+        "model": chosen["model"],
+        "captured_at": chosen["capturedAt"],
+        "synthetic": chosen["synthetic"],
+    }
+
+
 def _current_store_capture(key: str, cache: dict[str, Any]) -> tuple[str, Any]:
     if key in cache:
         return cache[key]
@@ -1355,46 +1406,37 @@ def _current_store_capture(key: str, cache: dict[str, Any]) -> tuple[str, Any]:
 
     raw = os.environ.get("CONTEXTUALIZE_READER_COMMAND", "context-reader").strip()
     command = shlex.split(raw) if raw else ["context-reader"]
+    diagnostic = f"context-reader open {key}"
     outcome: tuple[str, Any]
     try:
         proc = subprocess.run(
-            [*command, "documents", "captures", key, "--json"],
+            [*command, "open", key, "--json"],
             capture_output=True,
             text=True,
         )
     except OSError as exc:
-        outcome = ("unavailable", f"context-reader unavailable: {exc}")
+        outcome = ("unavailable", f"{diagnostic} unavailable: {exc}")
     else:
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout).strip()
             outcome = (
                 "unavailable",
-                f"documents captures {key} failed" + (f": {detail}" if detail else ""),
+                f"{diagnostic} failed" + (f": {detail}" if detail else ""),
             )
         else:
             try:
                 payload = json.loads(proc.stdout or "null")
             except ValueError:
                 payload = None
-            captures = (
-                [item for item in payload if isinstance(item, dict)]
-                if isinstance(payload, list)
-                else []
+            valid, identity = _strict_voice_capture_identity(payload)
+            outcome = (
+                ("ok", identity)
+                if valid
+                else (
+                    "unavailable",
+                    f"{diagnostic} returned an invalid voice-recording response",
+                )
             )
-            chosen = next((item for item in captures if item.get("active")), None)
-            if chosen is None and captures:
-                chosen = captures[0]
-            identity = (
-                None
-                if chosen is None
-                else {
-                    "id": chosen.get("id"),
-                    "model": chosen.get("model"),
-                    "captured_at": chosen.get("capturedAt") or chosen.get("captured_at"),
-                    "synthetic": bool(chosen.get("synthetic")),
-                }
-            )
-            outcome = ("ok", identity)
     cache[key] = outcome
     return outcome
 
