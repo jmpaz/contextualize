@@ -833,7 +833,7 @@ def test_registry_api_and_cli_emit_machine_contract(tmp_path: Path) -> None:
         ["contexts", "compile", "demo", "--registry", str(registry)],
     )
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["schemaVersion"] == AUTHORED_EDITION_SCHEMA_VERSION
     assert payload["editions"][0]["context"]["name"] == "demo"
     assert payload["editions"][0]["positions"][1]["locators"] == ["demo:entrance"]
