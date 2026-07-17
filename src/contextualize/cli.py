@@ -1570,11 +1570,13 @@ def _echo_context_registry(contexts) -> None:
     Console(width=max(240, table_width + 80)).print(table)
 
 
-def _echo_context_registry_json(contexts) -> None:
+def _echo_context_registry_json(contexts, statuses=None) -> None:
     from .manifest.contexts import manifest_source_label, resolved_context_dir
 
-    payload = [
-        {
+    status_by_name = {entry["name"]: entry for entry in statuses or []}
+    payload = []
+    for name in sorted(contexts, key=lambda name: (contexts[name].origin, name)):
+        entry = {
             "name": name,
             "source": manifest_source_label(contexts[name]),
             "origin": contexts[name].origin,
@@ -1585,8 +1587,17 @@ def _echo_context_registry_json(contexts) -> None:
                 else None
             ),
         }
-        for name in sorted(contexts, key=lambda name: (contexts[name].origin, name))
-    ]
+        context_status = status_by_name.get(name)
+        if context_status is not None:
+            entry.update(
+                hydrated=context_status.get("hydrated"),
+                hydration=context_status.get("hydration"),
+                cache_age_seconds=context_status.get("cache_age_seconds"),
+                state=context_status.get("state"),
+                detail=context_status.get("detail"),
+                drift=context_status.get("drift"),
+            )
+        payload.append(entry)
     click.echo(json.dumps(payload, indent=2))
 
 
@@ -1702,9 +1713,16 @@ def contexts_cmd() -> None:
     type=click.Path(exists=True, dir_okay=False),
     help="Context registry path (default: XDG contextualize/contexts.json).",
 )
+@click.option(
+    "--status",
+    "status_path",
+    type=click.Path(dir_okay=False),
+    help="Context hydration status path (default: XDG contextualize/contexts/status.json).",
+)
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
-def contexts_list_cmd(registry, json_output) -> None:
-    """List registered contexts."""
+def contexts_list_cmd(registry, status_path, json_output) -> None:
+    """List registered contexts. --json includes each context's hydration
+    state, cache age, and drift alongside its registry entry."""
     from .manifest.contexts import load_context_registry
 
     try:
@@ -1713,7 +1731,12 @@ def contexts_list_cmd(registry, json_output) -> None:
         raise click.ClickException(str(exc)) from exc
 
     if json_output:
-        _echo_context_registry_json(contexts)
+        from .serve.core import status as query_status
+
+        statuses = query_status(
+            None, registry_path=registry, status_path=status_path, cwd=os.getcwd()
+        ).get("contexts", [])
+        _echo_context_registry_json(contexts, statuses)
     else:
         _echo_context_registry(contexts)
 
@@ -3123,16 +3146,29 @@ def links_cmd(ctx, selector, direction_in, direction_out, registry, json_output)
     type=click.Path(dir_okay=False),
     help="Context hydration status path (default: XDG contextualize/contexts/status.json).",
 )
+@click.option(
+    "--cwd",
+    "cwd_scope",
+    type=click.Path(file_okay=False),
+    help="Scope registry-wide status to contexts whose target contains this directory.",
+)
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
 @click.pass_context
-def status_cmd(ctx, selector, registry, status_path, json_output) -> None:
+def status_cmd(ctx, selector, registry, status_path, cwd_scope, json_output) -> None:
     """Freshness and drift, per context or registry-wide: hydration state,
     cache age, per-source resolution, and how the composition has drifted
-    from its territory."""
+    from its territory. --cwd narrows the registry-wide view to contexts
+    whose target contains it."""
     from .serve.core import status as query_status
     from .serve.render import render_status
 
-    result = query_status(selector, registry_path=registry, status_path=status_path, cwd=os.getcwd())
+    result = query_status(
+        selector,
+        registry_path=registry,
+        status_path=status_path,
+        cwd=os.getcwd(),
+        cwd_scope=cwd_scope,
+    )
     _emit_serve_result(ctx, result, json_output, render_status)
 
 

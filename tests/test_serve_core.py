@@ -436,6 +436,11 @@ def test_status_registry_wide_summarizes_all_contexts(monkeypatch, tmp_path):
     names_states = {c["name"]: c["state"] for c in result["contexts"]}
     assert names_states == {"one": "ok", "two": "unhydrated"}
 
+    scoped = status(None, registry_path=registry_path, cwd_scope=str(one))
+    assert scoped["registry"]["total"] == 1
+    assert [c["name"] for c in scoped["contexts"]] == ["one"]
+    assert scoped["drift_summary"]["total"] == 1
+
 
 def test_designed_state_not_found_for_unknown_origin(monkeypatch, tmp_path, empty_registry):
     _isolate(monkeypatch, tmp_path)

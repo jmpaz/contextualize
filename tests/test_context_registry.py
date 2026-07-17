@@ -193,13 +193,27 @@ def test_contexts_list_json_discovers_zk_subscription(
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.output) == [
+    assert json.loads(result.stdout) == [
         {
             "name": "subscribed-demo",
             "source": str(note.resolve()),
-                "origin": "tag:ctx/ref",
-                "target": str(target_root / "subscribed-demo"),
-                "contextDir": None,
+            "origin": "tag:ctx/ref",
+            "target": str(target_root / "subscribed-demo"),
+            "contextDir": None,
+            "hydrated": False,
+            "hydration": None,
+            "cache_age_seconds": None,
+            "state": "unhydrated",
+            "detail": "Not yet hydrated.",
+            "drift": {
+                "any": False,
+                "sources_changed": [],
+                "members_vanished": [],
+                "references_gone": [],
+                "marks_drifted": [],
+                "marks_unchecked": None,
+                "hydration_stale": False,
+            },
         }
     ]
 
@@ -864,13 +878,19 @@ def test_contexts_list_cli_json_uses_registry(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.output) == [
+    assert json.loads(result.stdout) == [
         {
             "name": "demo",
             "source": "manifest.yaml",
-                "origin": "nix",
-                "target": str(target_dir),
-                "contextDir": None,
+            "origin": "nix",
+            "target": str(target_dir),
+            "contextDir": None,
+            "hydrated": None,
+            "hydration": None,
+            "cache_age_seconds": None,
+            "state": "unresolvable-source",
+            "detail": f"[Errno 2] No such file or directory: '{target_dir / 'manifest.yaml'}'",
+            "drift": None,
         }
     ]
 

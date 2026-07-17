@@ -239,6 +239,56 @@ def test_status_cli_registry_wide_and_per_context(tmp_path: Path) -> None:
     assert "unhydrated" in per_context.output
 
 
+def test_status_cli_cwd_scopes_registry_wide_json(tmp_path: Path) -> None:
+    one = tmp_path / "one"
+    one.mkdir()
+    (one / "manifest.yaml").write_text(
+        "config:\n  name: one\n  context:\n    include-meta: true\n"
+        "components:\n  - name: m\n    text: hi\n",
+        encoding="utf-8",
+    )
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "manifest.yaml").write_text(
+        "config:\n  name: other\n  context:\n    include-meta: true\n"
+        "components:\n  - name: m\n    text: hi\n",
+        encoding="utf-8",
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "one": {"targetDir": str(one), "manifest": {"source": "manifest.yaml"}},
+                    "other": {"targetDir": str(other), "manifest": {"source": "manifest.yaml"}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    scoped = runner.invoke(
+        cli.cli,
+        ["status", "--registry", str(registry_path), "--cwd", str(one), "--json"],
+        env=_isolated_env(tmp_path),
+    )
+    assert scoped.exit_code == 0
+    payload = json.loads(scoped.stdout)
+    assert [entry["name"] for entry in payload["contexts"]] == ["one"]
+    assert payload["registry"]["total"] == 1
+
+    unscoped = runner.invoke(
+        cli.cli,
+        ["status", "--registry", str(registry_path), "--json"],
+        env=_isolated_env(tmp_path),
+    )
+    assert unscoped.exit_code == 0
+    unscoped_payload = json.loads(unscoped.stdout)
+    assert sorted(entry["name"] for entry in unscoped_payload["contexts"]) == ["one", "other"]
+
+
 def test_show_names_inline_text_instead_of_no_members(tmp_path: Path) -> None:
     drive = tmp_path / "drive"
     drive.mkdir()

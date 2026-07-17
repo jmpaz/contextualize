@@ -1680,6 +1680,7 @@ def status(
     registry_path: str | None = None,
     status_path: str | None = None,
     cwd: str | None = None,
+    cwd_scope: str | None = None,
 ) -> dict[str, Any]:
     try:
         registry = load_context_registry(registry_path)
@@ -1692,6 +1693,11 @@ def status(
         }
 
     if selector_text is None:
+        names = (
+            [entry["name"] for entry in shelf_for_cwd(cwd_scope, registry)]
+            if cwd_scope is not None
+            else sorted(registry)
+        )
         captures_cache: dict[str, Any] = {}
         contexts = [
             _context_status(
@@ -1702,7 +1708,7 @@ def status(
                 cwd=cwd,
                 captures_cache=captures_cache,
             )
-            for name in sorted(registry)
+            for name in names
         ]
         drifted = sum(1 for entry in contexts if entry.get("drift", {}).get("any"))
         marks_drifted = sum(
@@ -1713,13 +1719,14 @@ def status(
             "detail": None,
             "next_steps": [],
             "registry": {
-                "total": len(registry),
+                "total": len(names),
                 "path": str(registry_path) if registry_path else str(default_context_registry_path()),
+                "cwd": cwd_scope,
             },
             "contexts": contexts,
             "drift_summary": {
                 "drifted": drifted,
-                "total": len(registry),
+                "total": len(names),
                 "marks_drifted": marks_drifted,
             },
         }
