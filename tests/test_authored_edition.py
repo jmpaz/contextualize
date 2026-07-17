@@ -839,6 +839,119 @@ def test_registry_api_and_cli_emit_machine_contract(tmp_path: Path) -> None:
     assert payload["editions"][0]["positions"][1]["locators"] == ["demo:entrance"]
 
 
+def test_markdown_lead_prose_lands_once_on_manifest_position(tmp_path: Path) -> None:
+    linked = tmp_path / "address-analogy.md"
+    linked.write_text(
+        """---
+title: voice survey — address-analogy
+tags:
+  - ctx/manifest
+---
+
+
+felt mechanisms of the exchange itself, and rulings on mappings.
+Selection and salience stand for redline.
+
+
+```yaml
+config:
+  root: ~
+
+components:
+  - name: address-analogy
+    files:
+      - path: "store:voice/2024-11-07/23-05-58.m4a"
+        marks:
+          - at: 0:50-1:15    # a single wrapping annotation
+            quote: |
+              handle the loom
+      - path: "store:voice/2024-12-16/17-10-23.m4a"
+        marks:
+          - at: 4:35-5:25    # first of two, not promoted
+            quote: |
+              quote one
+          - at: 5:25-6:40    # second of two, not promoted
+            quote: |
+              quote two
+```
+""",
+        encoding="utf-8",
+    )
+    root = tmp_path / "alpha.yaml"
+    root.write_text(
+        """components:
+  - name: voice-survey
+    manifests:
+      - address-analogy.md
+""",
+        encoding="utf-8",
+    )
+
+    payload = compile_authored_manifest(root, context_name="alpha").to_dict()
+
+    manifest_position = next(
+        position
+        for position in payload["positions"]
+        if position["kind"] == "manifest" and position["sourcePath"] == str(linked.resolve())
+    )
+    assert manifest_position["framing"] == [
+        {
+            "kind": "text",
+            "text": (
+                "felt mechanisms of the exchange itself, and rulings on mappings.\n"
+                "Selection and salience stand for redline."
+            ),
+        }
+    ]
+
+    component_position = next(
+        position
+        for position in payload["positions"]
+        if "alpha:voice-survey/address-analogy" in position["locators"]
+    )
+    assert component_position["framing"] == []
+
+    portals = {
+        portal["authoredTarget"]: portal
+        for portal in payload["portals"]
+        if portal["positionId"] == component_position["id"]
+    }
+    single = portals["store:voice/2024-11-07/23-05-58.m4a"]
+    multi = portals["store:voice/2024-12-16/17-10-23.m4a"]
+
+    assert single["inlineComment"] == "a single wrapping annotation"
+    assert "comment" not in single
+
+    assert "inlineComment" not in multi
+    assert "comment" not in multi
+    assert multi["ranges"][0]["inlineComment"] == "first of two, not promoted"
+    assert multi["ranges"][1]["inlineComment"] == "second of two, not promoted"
+
+
+def test_prose_free_manifest_framing_and_portal_annotation_are_unchanged(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """components:
+  - name: plain
+    files:
+      - path: store:voice/2026-01-01/example.m4a
+        marks:
+          - at: 0:10-0:20
+            quote: unannotated evidence
+""",
+        encoding="utf-8",
+    )
+
+    payload = compile_authored_manifest(manifest, context_name="demo").to_dict()
+
+    assert payload["positions"][0]["framing"] == []
+    portal = payload["portals"][0]
+    assert "comment" not in portal
+    assert "inlineComment" not in portal
+
+
 def test_manifest_cli_rejects_registry_selection(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text("components: []\n", encoding="utf-8")

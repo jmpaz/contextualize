@@ -453,7 +453,7 @@ class _EditionCompiler:
             "source_path": source_path,
             "line_start": source.source_format.line if source.source_format else None,
             "line_end": None,
-            "framing": _framing(cfg, None),
+            "framing": _framing(cfg, None, lead_text=_manifest_lead_text(source)),
             "options": _without(cfg, {"text", "prefix", "suffix", "comment"}),
             "raw": None,
             "locators": [self.name] if parent_key is None else [f"{locator_base}/~manifest"],
@@ -678,6 +678,11 @@ class _EditionCompiler:
                                 stack=stack,
                                 status=status,
                             )
+                    comment, inline_comment = _portal_annotation(
+                        member_outline.get("comment"),
+                        member_outline.get("inline_comment"),
+                        ranges,
+                    )
                     record = {
                         "key": portal_key,
                         "position_key": position_key,
@@ -690,8 +695,8 @@ class _EditionCompiler:
                         "source_path": source.manifest_path,
                         "line_start": member_outline.get("line_start"),
                         "line_end": member_outline.get("line_end"),
-                        "comment": member_outline.get("comment"),
-                        "inline_comment": member_outline.get("inline_comment"),
+                        "comment": comment,
+                        "inline_comment": inline_comment,
                         "options": (
                             options
                             if expanded_spec is not None
@@ -1152,8 +1157,15 @@ def _position_options(value: Any, kind: str) -> dict[str, Any]:
     return _without(value, omitted)
 
 
-def _framing(value: Any, outline: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _framing(
+    value: Any,
+    outline: dict[str, Any] | None,
+    *,
+    lead_text: str | None = None,
+) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
+    if lead_text:
+        result.append({"kind": "text", "text": lead_text})
     if outline:
         comment = outline.get("comment")
         if isinstance(comment, dict) and comment.get("text"):
@@ -1167,6 +1179,19 @@ def _framing(value: Any, outline: dict[str, Any] | None) -> list[dict[str, Any]]
             if isinstance(text, str) and text:
                 result.append({"kind": key, "text": text})
     return result
+
+
+def _manifest_lead_text(source: ManifestSource) -> str | None:
+    """The survey's own editorial prose, authored ahead of its fenced YAML.
+
+    Distinct from `config.text`/`config.comment` (authored *inside* the YAML
+    data), this is document prose the manifest format itself carries outside
+    the fence -- the paragraph(s) that introduce a voice-survey brief before
+    its pointer inventory begins. It lands once on the manifest's own
+    position, not on any of its components or portals.
+    """
+    source_format = source.source_format
+    return source_format.lead_text if source_format else None
 
 
 def _member_target_and_options(spec: Any) -> tuple[str | None, dict[str, Any]]:
@@ -1202,6 +1227,40 @@ def _expand_member_spec(member_key: str, spec: Any) -> list[Any]:
                 }
             )
     return expanded
+
+
+def _portal_annotation(
+    comment: dict[str, Any] | None,
+    inline_comment: str | None,
+    ranges: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """A portal's own editorial annotation, if the manifest structurally gives it one.
+
+    A member's `comment`/`inline_comment` are authored directly on its own
+    line (a `#` line before `- path: ...`, or trailing it) and always win.
+    Absent that, a pointer wrapped by exactly one active mark inherits that
+    mark's annotation -- the single wrapper is the unambiguous prose for the
+    pointer as a whole. Two or more marks each annotate their own sub-range
+    instead, and offer nothing unambiguous to promote, so the portal stays
+    unannotated at its own level (its ranges still carry their own prose).
+    """
+    if comment is not None or inline_comment is not None:
+        return comment, inline_comment
+    active_marks = [
+        item
+        for item in ranges
+        if item.get("kind") == "voice-span"
+        and item.get("origin") == "mark"
+        and not item.get("disabled")
+    ]
+    if len(active_marks) != 1:
+        return comment, inline_comment
+    only = active_marks[0]
+    mark_comment = only.get("comment")
+    mark_inline_comment = only.get("inlineComment")
+    if mark_comment is None and mark_inline_comment is None:
+        return comment, inline_comment
+    return mark_comment, mark_inline_comment
 
 
 def _member_ranges(

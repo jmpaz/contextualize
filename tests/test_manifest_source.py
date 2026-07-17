@@ -52,6 +52,64 @@ components:
     )
 
 
+def test_load_manifest_source_captures_lead_prose_ahead_of_fence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "survey.md"
+    path.write_text(
+        """---
+title: voice survey
+tags:
+  - ctx/manifest
+---
+
+
+felt mechanisms of the exchange itself. Mined from the voice corpus;
+every quote verified against segments.
+
+
+```yaml
+components:
+  - name: main
+    text: hello
+```
+""",
+        encoding="utf-8",
+    )
+
+    source = load_manifest_source(path)
+
+    assert source.source_format is not None
+    assert source.source_format.lead_text == (
+        "felt mechanisms of the exchange itself. Mined from the voice corpus;\n"
+        "every quote verified against segments."
+    )
+
+
+def test_load_manifest_source_has_no_lead_prose_without_document_text(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "note.md"
+    path.write_text(
+        """---
+title: context
+---
+
+```yaml
+components:
+  - name: main
+    text: hello
+```
+""",
+        encoding="utf-8",
+    )
+
+    source = load_manifest_source(path)
+
+    assert source.source_format is not None
+    assert source.source_format.lead_text is None
+
+
 def test_load_manifest_source_preserves_group_slices(tmp_path: Path) -> None:
     path = tmp_path / "manifest.yaml"
     path.write_text(

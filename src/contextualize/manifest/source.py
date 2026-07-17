@@ -26,6 +26,7 @@ class ManifestFormat:
     source_path: str | None
     group_slices: dict[tuple[str, ...], ManifestSlice]
     outline: list[dict[str, Any]]
+    lead_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,7 @@ def _load_manifest_text_with_format(
                 body,
                 source_path=source_path,
                 line=line,
+                lead_text=_extract_lead_prose(text[: match.start()]),
             )
 
     if labeled_errors:
@@ -218,6 +220,7 @@ def _build_manifest_format(
     *,
     source_path: str | None,
     line: int,
+    lead_text: str | None = None,
 ) -> ManifestFormat:
     lines = body.splitlines(keepends=True)
     return ManifestFormat(
@@ -226,7 +229,36 @@ def _build_manifest_format(
         source_path=source_path,
         group_slices=_extract_group_slices(lines, line),
         outline=_build_outline(lines, line),
+        lead_text=lead_text,
     )
+
+
+# --- document-level lead prose: markdown text ahead of the fenced manifest ---
+
+
+def _extract_lead_prose(text: str) -> str | None:
+    """The manifest's own document prose, preceding its fenced YAML block.
+
+    A voice-survey brief carries its editorial framing here: frontmatter,
+    then a paragraph or two describing the survey as a whole, then the
+    fence. Frontmatter (a leading `---`...`---` block) is not prose and is
+    stripped before what remains is offered as the document's lead text.
+    """
+    lines = text.splitlines()
+    start = 0
+    if lines and lines[0].strip() == "---":
+        end_index = next(
+            (
+                index
+                for index, line in enumerate(lines[1:], start=1)
+                if line.strip() == "---"
+            ),
+            None,
+        )
+        if end_index is not None:
+            start = end_index + 1
+    prose = "\n".join(lines[start:]).strip()
+    return prose or None
 
 
 # --- group manifest slicing (hydrated `.context/<name>/**/manifest.yaml` copies) ---
