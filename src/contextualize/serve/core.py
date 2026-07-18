@@ -1,5 +1,5 @@
 """Query core: one internal API over (registry + parsed manifests + index +
-cache state), rendered by the CLI and MCP as thin, structurally identical
+cache state), rendered by the CLI and context-reader as thin, structurally identical
 JSON producers. Every designed state below names the condition and at
 least one path out; none falls through as a raw error."""
 
