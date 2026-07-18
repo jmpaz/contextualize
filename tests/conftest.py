@@ -1,6 +1,6 @@
 """Shared fixtures: a fake segments-bearing store plugin.
 
-Mirrors the segment_store span contract — `documents segments` shapes
+Mirrors the segment-store span contract — `documents segments` shapes
 (camelCase, float seconds), span docs with mark/asr/capture metadata, and
 designed-state docs carrying `mark_state` — without shelling out.
 """

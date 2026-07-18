@@ -40,17 +40,14 @@ _REQUIRED_SCHEMA = {
 }
 
 
-def default_documents_db_path() -> Path:
+def default_documents_db_path() -> Path | None:
     configured = os.environ.get("CONTEXTUALIZE_QUOTE_STORE_DB")
     if configured:
         return Path(configured).expanduser()
     state_dir = os.environ.get("CONTEXTUALIZE_READER_STATE_DIR")
     if state_dir:
         return Path(state_dir).expanduser() / "documents.db"
-    data_home = os.environ.get("XDG_DATA_HOME")
-    if data_home:
-        return Path(data_home).expanduser() / "context-reader" / "documents.db"
-    return Path.home() / ".local" / "share" / "context-reader" / "documents.db"
+    return None
 
 
 def canonical_voice_key(target: str) -> str | None:
@@ -71,7 +68,7 @@ class LocalVoiceQuoteResolver:
 
     def __enter__(self) -> "LocalVoiceQuoteResolver":
         try:
-            if self.database_path.is_file():
+            if self.database_path is not None and self.database_path.is_file():
                 uri = (
                     "file:"
                     + quote(str(self.database_path.resolve()), safe="/")

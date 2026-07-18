@@ -143,33 +143,12 @@ def test_local_voice_quote_resolver_is_canonical_read_only_and_fail_closed(
     assert resolver._database is None
 
 
-def test_default_documents_db_path_uses_only_reader_environment(monkeypatch, tmp_path):
+def test_default_documents_db_path_uses_only_declared_environment(monkeypatch, tmp_path):
     for name in ("CONTEXTUALIZE_QUOTE_STORE_DB", "CONTEXTUALIZE_READER_STATE_DIR"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
-    for name, value in (
-        (
-            "_".join(("CTX", "BRIDGE", "DOCUMENTS", "DB", "PATH")),
-            tmp_path / "retired-documents.db",
-        ),
-        (
-            "_".join(("CTX", "BRIDGE", "STATE", "DIR")),
-            tmp_path / "retired-state",
-        ),
-        (
-            "_".join(("NB", "DOCUMENTS", "DB", "PATH")),
-            tmp_path / "retired-notebook-documents.db",
-        ),
-        (
-            "_".join(("NB", "STATE", "DIR")),
-            tmp_path / "retired-notebook-state",
-        ),
-    ):
-        monkeypatch.setenv(name, str(value))
 
-    assert default_documents_db_path() == (
-        tmp_path / "xdg-data" / "context-reader" / "documents.db"
-    )
+    assert default_documents_db_path() is None
 
     state_dir = tmp_path / "state"
     monkeypatch.setenv("CONTEXTUALIZE_READER_STATE_DIR", str(state_dir))

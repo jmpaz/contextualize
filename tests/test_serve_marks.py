@@ -1,6 +1,6 @@
 """Serving marks: show renders them under members, cat draws them, links
 aggregates them, status counts their drift (marks spec §4.3/4.5). Store
-resolution comes from the conftest fake plugin; no live context-reader.
+resolution comes from the conftest fake plugin; no live reader binary.
 """
 
 from __future__ import annotations
@@ -748,7 +748,7 @@ def _stub_reader(
     serialized = response if isinstance(response, str) else json.dumps(response)
     payload.write_text(serialized, encoding="utf-8")
     argv = tmp_path / "argv.txt"
-    script = tmp_path / "context-reader-stub"
+    script = tmp_path / "reader-stub"
     script.write_text(
         f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv}'\ncat '{payload}'\n",
         encoding="utf-8",
@@ -800,7 +800,7 @@ def test_status_mark_drift_check_is_guarded(fake_store, monkeypatch, tmp_path):
     assert result["state"] == "ok"
     assert result["drift"]["marks_drifted"] == []
     assert "unavailable" in result["drift"]["marks_unchecked"]
-    assert f"context-reader open {STORE_KEY}" in result["drift"]["marks_unchecked"]
+    assert f"{tmp_path / 'no-such-binary'} open {STORE_KEY}" in result["drift"]["marks_unchecked"]
     assert "Mark drift unchecked" in result["detail"]
 
 
@@ -870,7 +870,7 @@ def test_status_rejects_non_strict_reader_responses(
 
     result = status("annot", registry_path=registry, cwd=str(tmp_path))
 
-    diagnostic = f"context-reader open {STORE_KEY} returned an invalid voice-recording response"
+    diagnostic = f"{tmp_path / 'reader-stub'} open {STORE_KEY} returned an invalid voice-recording response"
     assert result["state"] == "ok"
     assert result["drift"]["marks_drifted"] == []
     assert result["drift"]["marks_unchecked"] == diagnostic

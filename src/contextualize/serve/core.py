@@ -1,5 +1,5 @@
 """Query core: one internal API over (registry + parsed manifests + index +
-cache state), rendered by the CLI and context-reader as thin, structurally identical
+cache state), rendered by the CLI and external readers as thin, structurally identical
 JSON producers. Every designed state below names the condition and at
 least one path out; none falls through as a raw error."""
 
@@ -1404,9 +1404,11 @@ def _current_store_capture(key: str, cache: dict[str, Any]) -> tuple[str, Any]:
     import shlex
     import subprocess
 
-    raw = os.environ.get("CONTEXTUALIZE_READER_COMMAND", "context-reader").strip()
-    command = shlex.split(raw) if raw else ["context-reader"]
-    diagnostic = f"context-reader open {key}"
+    raw = os.environ.get("CONTEXTUALIZE_READER_COMMAND", "").strip()
+    if not raw:
+        return ("unavailable", "reader command not configured")
+    command = shlex.split(raw)
+    diagnostic = f"{command[0]} open {key}"
     outcome: tuple[str, Any]
     try:
         proc = subprocess.run(
