@@ -166,6 +166,20 @@ def progress_summary_lines() -> list[str]:
     return lines
 
 
+def progress_counters(context: str | None = None) -> dict[str, int]:
+    with _LOCK:
+        events = list(_EVENTS)
+    counters: Counter[str] = Counter()
+    for event in events:
+        if context is not None and event.context != context:
+            continue
+        key = f"{event.provider}.{event.operation}.{event.outcome}"
+        counters[key] += event.count if event.count is not None else 1
+        if event.size_bytes is not None:
+            counters[f"{event.provider}.{event.operation}.bytes"] += event.size_bytes
+    return dict(sorted(counters.items()))
+
+
 def flush_progress_summary(*, enabled: bool) -> None:
     if not enabled:
         return
@@ -441,7 +455,14 @@ def _format_units(state: _LiveTaskState) -> str:
 def _format_task_stats(state: _LiveTaskState) -> str:
     parts: list[str] = []
     counts = state.counts or Counter()
-    for outcome in ("cache_hit", "cache_miss", "processed", "failed", "partial", "done"):
+    for outcome in (
+        "cache_hit",
+        "cache_miss",
+        "processed",
+        "failed",
+        "partial",
+        "done",
+    ):
         total = counts.get(outcome, 0)
         if total:
             parts.append(f"{_outcome_label(outcome)}={total}")

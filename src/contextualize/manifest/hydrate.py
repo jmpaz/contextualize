@@ -25,7 +25,7 @@ from ..plugins.reference import PluginReference
 from ..progress import log_progress
 from ..references import URLReference, create_file_references
 from ..references.address import format_clock_time, split_mark_address
-from ..runtime import get_payload_spec_jobs
+from ..runtime import get_payload_spec_jobs, get_refresh_cache, get_refresh_media
 from ..references.helpers import (
     fetch_gist_files,
     is_http_url,
@@ -105,6 +105,16 @@ class HydrateResult:
 
 
 @dataclass
+class HydrationRunCache:
+    resolved_specs: dict[
+        tuple[Any, ...], dict[tuple[Any, ...], list["ResolvedItem"]]
+    ] = field(default_factory=dict)
+    linked_manifests: dict[tuple[Any, ...], tuple[Path, str | None]] = field(
+        default_factory=dict
+    )
+
+
+@dataclass
 class ResolvedItem:
     source_type: str
     source_ref: str
@@ -155,7 +165,13 @@ class HydratePlan:
     file_timestamps: dict[Path, tuple[float, float]] = field(default_factory=dict)
     files_to_copy: list[tuple[Path, Path]] = field(default_factory=list)
     dirs_to_symlink: list[tuple[Path, Path]] = field(default_factory=list)
-    linked_manifest_failures: list["LinkedManifestFailure"] = field(default_factory=list)
+    linked_manifest_failures: list["LinkedManifestFailure"] = field(
+        default_factory=list
+    )
+    local_input_fingerprints: list[dict[str, Any]] = field(default_factory=list)
+    freshness_receipts: list[dict[str, Any]] = field(default_factory=list)
+    provider_revisions: dict[str, str] = field(default_factory=dict)
+    enrichment_completeness: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -437,6 +453,7 @@ def build_hydration_plan(
     overrides: HydrateOverrides,
     cwd: str,
     _resolving: tuple[Path, ...] = (),
+    _run_cache: HydrationRunCache | None = None,
 ) -> HydratePlan:
     source = load_manifest_source(manifest_path)
     return build_hydration_plan_data(
@@ -447,6 +464,7 @@ def build_hydration_plan(
         overrides=overrides,
         cwd=cwd,
         _resolving=_resolving,
+        _run_cache=_run_cache,
     )
 
 
@@ -459,6 +477,7 @@ def build_hydration_plan_data(
     overrides: HydrateOverrides,
     cwd: str,
     _resolving: tuple[Path, ...] = (),
+    _run_cache: HydrationRunCache | None = None,
 ) -> HydratePlan:
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a mapping with 'config' and 'components'")
@@ -509,7 +528,22 @@ def build_hydration_plan_data(
     normalized_components: list[dict[str, Any]] = []
     plugin_pending: dict[tuple[Any, ...], list[_PluginPendingWrite]] = {}
     plugin_seen_counter = 0
-    resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]] = {}
+    cache_ttl = context_cfg["cache_ttl"]
+    cache_scope = (
+        bool(context_cfg["use_cache"]),
+        cache_ttl.total_seconds() if cache_ttl is not None else None,
+    )
+    share_resolution_cache = bool(
+        _run_cache is not None
+        and context_cfg["use_cache"]
+        and not context_cfg["refresh_cache"]
+        and not get_refresh_cache()
+        and not get_refresh_media()
+    )
+    if share_resolution_cache:
+        resolved_spec_cache = _run_cache.resolved_specs.setdefault(cache_scope, {})
+    else:
+        resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]] = {}
     linked_manifest_failures: list[LinkedManifestFailure] = []
     reference_edges: list[dict[str, Any]] = []
     registry_sources_cache: list[set[Path]] = []
@@ -588,9 +622,7 @@ def build_hydration_plan_data(
                 normalized_components.append(
                     _build_normalized_component(comp, comp_name)
                 )
-                log_progress(
-                    "hydrate", "component", "done", target=comp_name, count=0
-                )
+                log_progress("hydrate", "component", "done", target=comp_name, count=0)
                 continue
             raise ValueError(f"Component '{comp_name}' has no content")
 
@@ -697,7 +729,7 @@ def build_hydration_plan_data(
                 alias_hint = file_opts.get("alias") or file_opts.get("filename")
                 cache_alias = alias_hint if isinstance(alias_hint, str) else None
                 spec_cache_key = (
-                    raw_spec,
+                    _canonical_resolution_source(raw_spec, base_dir),
                     force_git,
                     comp_gitignore,
                     cache_alias,
@@ -728,6 +760,7 @@ def build_hydration_plan_data(
                     marks_plan = _prepare_member_marks(
                         marks_spec,
                         raw_spec=raw_spec,
+                        base_dir=base_dir,
                         outline_member=outline_member,
                         force_git=force_git,
                         gitignore=comp_gitignore,
@@ -1087,6 +1120,7 @@ def build_hydration_plan_data(
                         resolved_link_path,
                         parent_overrides=overrides,
                         resolving=resolving_chain,
+                        run_cache=_run_cache,
                     )
                 except (OSError, ValueError) as exc:
                     label = str(resolved_link_path)
@@ -1205,6 +1239,8 @@ def build_hydration_plan_data(
         index_text = _dump_index(index_data)
         files_to_write.append((context_dir / "index.json", index_text))
 
+    receipt_data = _collect_plan_receipt_data(resolved_spec_cache)
+
     return HydratePlan(
         context_dir=context_dir,
         files_to_write=files_to_write,
@@ -1217,7 +1253,60 @@ def build_hydration_plan_data(
         files_to_copy=files_to_copy,
         dirs_to_symlink=dirs_to_symlink,
         linked_manifest_failures=linked_manifest_failures,
+        local_input_fingerprints=receipt_data["local_inputs"],
+        freshness_receipts=receipt_data["freshness"],
+        provider_revisions=receipt_data["provider_revisions"],
+        enrichment_completeness=receipt_data["enrichment"],
     )
+
+
+def _collect_plan_receipt_data(
+    resolved_spec_cache: dict[tuple[Any, ...], list[ResolvedItem]],
+) -> dict[str, Any]:
+    local_inputs: dict[str, dict[str, Any]] = {}
+    freshness: dict[str, dict[str, Any]] = {}
+    providers: set[str] = set()
+    enrichment: dict[str, bool] = {}
+    for items in resolved_spec_cache.values():
+        for item in items:
+            if item.source_full_path:
+                path = Path(item.source_full_path).resolve(strict=False)
+                if path.is_file() and str(path) not in local_inputs:
+                    stat_result = path.stat()
+                    local_inputs[str(path)] = {
+                        "path": str(path),
+                        "size": stat_result.st_size,
+                        "mtime_ns": stat_result.st_mtime_ns,
+                        "sha256": _hash_file(path),
+                    }
+            if item.plugin_name:
+                providers.add(item.plugin_name)
+            metadata = item.plugin_metadata or {}
+            freshness_receipt = metadata.get("freshness_receipt")
+            if isinstance(freshness_receipt, dict):
+                normalized = dict(freshness_receipt)
+                normalized.setdefault("provider", item.plugin_name or "unknown")
+                key = json.dumps(normalized, sort_keys=True, default=str)
+                freshness[key] = normalized
+            enrichment_receipt = metadata.get("enrichment_completeness")
+            if isinstance(enrichment_receipt, dict):
+                for key, value in enrichment_receipt.items():
+                    if isinstance(key, str) and isinstance(value, bool):
+                        enrichment[key] = enrichment.get(key, True) and value
+
+    from ..plugins.loader import get_loaded_plugins
+
+    origins = {
+        plugin.name: plugin.revision or plugin.origin for plugin in get_loaded_plugins()
+    }
+    return {
+        "local_inputs": list(local_inputs.values()),
+        "freshness": list(freshness.values()),
+        "provider_revisions": {
+            provider: origins.get(provider, "unknown") for provider in sorted(providers)
+        },
+        "enrichment": dict(sorted(enrichment.items())),
+    }
 
 
 def _resolve_base_dir(
@@ -1317,9 +1406,13 @@ def _resolve_context_config(
     }
 
 
-def _reject_removed_embedded_traversal_keys(mapping: dict[str, Any], label: str) -> None:
+def _reject_removed_embedded_traversal_keys(
+    mapping: dict[str, Any], label: str
+) -> None:
     removed = [
-        key for key in ("target-depth", "target-scope", "include-parent") if key in mapping
+        key
+        for key in ("target-depth", "target-scope", "include-parent")
+        if key in mapping
     ]
     if not removed:
         return
@@ -1494,6 +1587,28 @@ def _plugin_overrides_cache_key(
     )
 
 
+def _canonical_resolution_source(raw_spec: str, base_dir: str) -> tuple[Any, ...]:
+    spec = os.path.expanduser(raw_spec)
+    options = parse_target_spec(spec)
+    target = options.pop("target", spec)
+    if not isinstance(target, str):
+        target = spec
+    source_options = tuple(
+        (name, value) for name, value in sorted(options.items()) if name != "filename"
+    )
+    if is_http_url(target) or _has_explicit_scheme(target) or parse_git_target(target):
+        return ("external", target, source_options)
+    resolved = Path(target)
+    if not resolved.is_absolute():
+        resolved = Path(base_dir) / resolved
+    return (
+        "local",
+        str(resolved.resolve(strict=False)),
+        str(Path(base_dir).resolve(strict=False)),
+        source_options,
+    )
+
+
 def _plugin_target_from_spec(raw_spec: str) -> str:
     spec = os.path.expanduser(raw_spec)
     opts = parse_target_spec(spec)
@@ -1583,8 +1698,7 @@ def _build_normalized_component(comp: dict[str, Any], name: str) -> dict[str, An
     normalized = {
         k: v
         for k, v in comp.items()
-        if k
-        not in {"files", "repos", "name", GROUP_PATH_KEY, GROUP_BASE_KEY, SET_KEY}
+        if k not in {"files", "repos", "name", GROUP_PATH_KEY, GROUP_BASE_KEY, SET_KEY}
         and v is not None
     }
     if comp.get(SET_KEY):
@@ -1809,7 +1923,9 @@ def _record_recognized_reference(
     detected_via = _detect_manifest_reference(path, registry_sources)
     if detected_via is None:
         return
-    payload = "pointer" if _will_symlink_local(item, ranges, symbols, copy_files) else "copy"
+    payload = (
+        "pointer" if _will_symlink_local(item, ranges, symbols, copy_files) else "copy"
+    )
     edges.append(
         {
             "component": component_name,
@@ -2120,9 +2236,7 @@ def _plugin_context_subpath(
             base = f"{alias_prefix}/{base}"
     sidecar_stem = _context_sidecar_stem_from_metadata(metadata)
     if sidecar_stem is not None:
-        return _sidecar_context_subpath(
-            sidecar_stem, base, source_type=source_type
-        )
+        return _sidecar_context_subpath(sidecar_stem, base, source_type=source_type)
     return _join_context_subpath(_context_prefix_from_metadata(metadata), base)
 
 
@@ -2197,8 +2311,8 @@ def _resolve_external_items_via_refs(
                 alias=alias,
                 total_refs=plugin_count if plugin_count > 0 else len(refs),
             )
-            dedupe_mode, dedupe_key, dedupe_rank, dedupe_link = (
-                _plugin_dedupe_fields(metadata)
+            dedupe_mode, dedupe_key, dedupe_rank, dedupe_link = _plugin_dedupe_fields(
+                metadata
             )
             items.append(
                 ResolvedItem(
@@ -2239,7 +2353,11 @@ def _resolve_external_items_via_refs(
         http_target = ref_path_raw if isinstance(ref_path_raw, str) else target
         if is_http_url(http_target):
             origin, url_path = _split_url_path(http_target)
-            if alias is None and ref_sidecar_stem is None and ref_context_prefix is None:
+            if (
+                alias is None
+                and ref_sidecar_stem is None
+                and ref_context_prefix is None
+            ):
                 context_path = _http_host_context_path(http_target)
             else:
                 context_path = _apply_filename_hint(url_path, alias)
@@ -2274,9 +2392,7 @@ def _resolve_external_items_via_refs(
                     source_type="plugin:materialized",
                 )
             else:
-                context_path = _join_context_subpath(
-                    ref_context_prefix, context_path
-                )
+                context_path = _join_context_subpath(ref_context_prefix, context_path)
             items.append(
                 ResolvedItem(
                     source_type="plugin:materialized",
@@ -2774,6 +2890,7 @@ def _prepare_member_marks(
     marks_spec: list[dict[str, Any]],
     *,
     raw_spec: str,
+    base_dir: str,
     outline_member: dict[str, Any] | None,
     force_git: bool,
     gitignore: bool,
@@ -2807,7 +2924,7 @@ def _prepare_member_marks(
             keys.append(None)
             continue
         key = (
-            address,
+            _canonical_resolution_source(address, base_dir),
             force_git,
             gitignore,
             None,
@@ -2904,14 +3021,10 @@ def _build_marks_unit(
     mark_records: list[dict[str, Any]] = []
     line_cursor = 1
     for order, record in enumerate(records):
-        outline_mark = (
-            outline_marks[order] if order < len(outline_marks) else None
-        )
+        outline_mark = outline_marks[order] if order < len(outline_marks) else None
         comment = outline_mark.get("comment") if outline_mark else None
         comment_text = comment["text"] if isinstance(comment, dict) else None
-        inline_comment = (
-            outline_mark.get("inline_comment") if outline_mark else None
-        )
+        inline_comment = outline_mark.get("inline_comment") if outline_mark else None
 
         mark_item = _resolved_mark_item(keys[order], resolved_spec_cache)
         state, detail = _mark_state(
@@ -2938,9 +3051,7 @@ def _build_marks_unit(
         asr_text = None
         if state == "ok":
             asr_value = (mark_item.plugin_metadata or {}).get("asr")
-            asr_text = (
-                asr_value if isinstance(asr_value, str) else mark_item.content
-            )
+            asr_text = asr_value if isinstance(asr_value, str) else mark_item.content
             lines.append("asr:")
             lines.extend(asr_text.splitlines())
             if record["quote"]:
@@ -3055,11 +3166,7 @@ def _mark_address_text(
     if mark_item is not None:
         metadata = mark_item.plugin_metadata or {}
         trace = metadata.get("trace_path")
-        if (
-            isinstance(metadata.get("mark"), dict)
-            and isinstance(trace, str)
-            and trace
-        ):
+        if isinstance(metadata.get("mark"), dict) and isinstance(trace, str) and trace:
             return trace
     return composed
 

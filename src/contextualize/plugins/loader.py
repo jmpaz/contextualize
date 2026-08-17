@@ -52,11 +52,13 @@ def _validate_plugin_callables(
     normalize_manifest_config: Any,
     register_cli_options: Any,
     collect_cli_overrides: Any,
+    probe_freshness: Any,
     register_command: Any,
     transcription_providers: Any,
     transcription_gates: Any,
     plugin_kind: Any,
     priority: int,
+    revision: str | None,
 ) -> LoadedPlugin | None:
     if can_resolve is None and resolve is None:
         can_resolve = _noop_can_resolve
@@ -111,6 +113,12 @@ def _validate_plugin_callables(
             _warn(f"plugin '{name}' has non-callable collect_cli_overrides ({origin})")
             return None
         cli_collect_hook = collect_cli_overrides
+    freshness_hook = None
+    if probe_freshness is not None:
+        if not callable(probe_freshness):
+            _warn(f"plugin '{name}' has non-callable probe_freshness ({origin})")
+            return None
+        freshness_hook = probe_freshness
     register_command_hook = None
     if register_command is not None:
         if not callable(register_command):
@@ -165,6 +173,7 @@ def _validate_plugin_callables(
         origin=origin,
         can_resolve=can_resolve,
         resolve=resolve,
+        revision=revision,
         list_targets=list_targets_hook,
         materialize=materialize_hook,
         register_auth_command=auth_hook,
@@ -172,6 +181,7 @@ def _validate_plugin_callables(
         normalize_manifest_config=normalize_hook,
         register_cli_options=cli_register_hook,
         collect_cli_overrides=cli_collect_hook,
+        probe_freshness=freshness_hook,
         register_command=register_command_hook,
         transcription_providers=provider_items,
         transcription_gates=gate_items,
@@ -228,6 +238,11 @@ def _load_entrypoint_plugins() -> list[_PluginCandidate]:
             priority = int(getattr(plugin_obj, "PLUGIN_PRIORITY", 0))
         except Exception:
             priority = 0
+        distribution = getattr(entrypoint, "dist", None)
+        distribution_version = _as_name(getattr(distribution, "version", None))
+        revision = (
+            f"{ep_value}@{distribution_version}" if distribution_version else ep_value
+        )
 
         transcription_providers = None
         get_providers = getattr(plugin_obj, "get_transcription_providers", None)
@@ -264,11 +279,13 @@ def _load_entrypoint_plugins() -> list[_PluginCandidate]:
             ),
             register_cli_options=getattr(plugin_obj, "register_cli_options", None),
             collect_cli_overrides=getattr(plugin_obj, "collect_cli_overrides", None),
+            probe_freshness=getattr(plugin_obj, "probe_freshness", None),
             register_command=getattr(plugin_obj, "register_command", None),
             transcription_providers=transcription_providers,
             transcription_gates=transcription_gates,
             plugin_kind=getattr(plugin_obj, "PLUGIN_KIND", None),
             priority=priority,
+            revision=revision,
         )
         if loaded is not None:
             plugins.append(_PluginCandidate(plugin=loaded))

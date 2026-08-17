@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from contextlib import redirect_stderr
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -16,12 +17,15 @@ from typing import Any
 
 from ..progress import (
     log_progress,
+    progress_counters,
     reset_progress_context,
     set_progress_context,
     write_progress_log,
 )
+from ..runtime import get_refresh_cache, get_refresh_media
 from ..utils import read_config
 from .hydrate import (
+    HydrationRunCache,
     HydrateOverrides,
     HydrateResult,
     apply_hydration_plan,
@@ -44,6 +48,7 @@ class ContextEntry:
     target_dir: Path
     manifest: dict[str, Any]
     replace: str
+    designations: tuple[str, ...] = ()
     context_dir: str | None = None
     origin: str = "registry"
     ensure_target_dir: bool = False
@@ -61,6 +66,7 @@ class ContextHydrationStatus:
     component_count: int | None = None
     file_count: int | None = None
     replace: str = "guarded"
+    receipt: dict[str, Any] | None = None
 
 
 def default_context_registry_path() -> Path:
@@ -74,7 +80,9 @@ def default_context_status_path() -> Path:
     state_home = os.environ.get("XDG_STATE_HOME")
     if state_home:
         return Path(state_home) / "contextualize" / "contexts" / "status.json"
-    return Path.home() / ".local" / "state" / "contextualize" / "contexts" / "status.json"
+    return (
+        Path.home() / ".local" / "state" / "contextualize" / "contexts" / "status.json"
+    )
 
 
 def manifest_link_identity(resolved_manifest_path: Path) -> str:
@@ -104,7 +112,11 @@ def default_manifest_link_status_path() -> Path:
 def load_context_registry(
     registry_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, ContextEntry]:
-    path = Path(registry_path).expanduser() if registry_path else default_context_registry_path()
+    path = (
+        Path(registry_path).expanduser()
+        if registry_path
+        else default_context_registry_path()
+    )
     if not path.exists():
         if registry_path:
             raise FileNotFoundError(str(path))
@@ -116,8 +128,7 @@ def load_context_registry(
     if not isinstance(contexts, dict):
         raise ValueError("Context registry must contain a 'contexts' mapping")
     static_contexts = {
-        name: _parse_context_entry(name, value)
-        for name, value in contexts.items()
+        name: _parse_context_entry(name, value) for name, value in contexts.items()
     }
     return _merge_subscribed_contexts(static_contexts)
 
@@ -312,7 +323,9 @@ def _zk_subscription_notes(*, root: Path, tag: str) -> list[dict[str, Any]]:
             check=True,
         )
     except FileNotFoundError as exc:
-        raise ValueError("zk is required for contexts.subscriptions source: zk") from exc
+        raise ValueError(
+            "zk is required for contexts.subscriptions source: zk"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
         suffix = f": {detail}" if detail else ""
@@ -414,56 +427,106 @@ def hydrate_contexts(
     registry_path: str | os.PathLike[str] | None = None,
     status_path: str | os.PathLike[str] | None = None,
     overrides: HydrateOverrides | None = None,
+    all_contexts: bool = False,
 ) -> list[ContextHydrationStatus]:
     contexts = load_context_registry(registry_path)
-    selected_names = list(names or contexts.keys())
+    requested_names = list(names or ())
+    if all_contexts and requested_names:
+        raise ValueError("context names cannot be combined with --all")
+    if not all_contexts and not requested_names:
+        raise ValueError("provide one or more context names, or pass --all")
+    selected_names = list(contexts) if all_contexts else requested_names
     effective_overrides = overrides or HydrateOverrides()
+    run_cache = HydrationRunCache()
     statuses: list[ContextHydrationStatus] = []
+    previous_payload = _load_status_payload(status_path)
+    previous_contexts = previous_payload.get("contexts")
+    if not isinstance(previous_contexts, dict):
+        previous_contexts = {}
+    run = {
+        "id": str(uuid.uuid4()),
+        "state": "running",
+        "pid": os.getpid(),
+        "started_at": _now(),
+        "selected": selected_names,
+        "selected_count": len(selected_names),
+        "completed_count": 0,
+        "current_context": None,
+        "work": {},
+    }
+    write_context_status([], status_path=status_path, run=run)
 
     log_progress("hydrate", "context", "total", count=len(selected_names))
-    for name in selected_names:
-        log_progress("hydrate", "context", "start", target=name)
-        context = contexts.get(name)
-        if context is None:
-            statuses.append(
-                _status(
-                    name=name,
-                    target_dir="",
-                    manifest_source="",
-                    context_dir=None,
-                    result="failed",
-                    reason=f"context is not registered: {name}",
-                    replace="guarded",
+    try:
+        for name in selected_names:
+            run["current_context"] = name
+            run["updated_at"] = _now()
+            write_context_status(statuses, status_path=status_path, run=run)
+            log_progress("hydrate", "context", "start", target=name)
+            context = contexts.get(name)
+            if context is None:
+                statuses.append(
+                    _status(
+                        name=name,
+                        target_dir="",
+                        manifest_source="",
+                        context_dir=None,
+                        result="failed",
+                        reason=f"context is not registered: {name}",
+                        replace="guarded",
+                    )
                 )
-            )
-            log_progress(
-                "hydrate",
-                "context",
-                "failed",
-                target=name,
-                detail="not registered",
-            )
-            continue
-        with redirect_stderr(_ContextStderrPrefixer(context.name, sys.stderr)):
-            token = set_progress_context(context.name)
-            try:
-                status = _hydrate_one(context, effective_overrides)
-            finally:
-                reset_progress_context(token)
-        statuses.append(status)
-        progress_outcome = {
-            "failed": "failed",
-            "partial": "partial",
-        }.get(status.result, "done")
-        log_progress(
-            "hydrate",
-            "context",
-            progress_outcome,
-            target=name,
-            detail=status.reason or status.result,
-        )
+                log_progress(
+                    "hydrate",
+                    "context",
+                    "failed",
+                    target=name,
+                    detail="not registered",
+                )
+            else:
+                with redirect_stderr(_ContextStderrPrefixer(context.name, sys.stderr)):
+                    token = set_progress_context(context.name)
+                    try:
+                        status = _hydrate_one(
+                            context,
+                            effective_overrides,
+                            run_cache=run_cache,
+                            previous_status=previous_contexts.get(name),
+                        )
+                    finally:
+                        reset_progress_context(token)
+                statuses.append(status)
+                progress_outcome = {
+                    "failed": "failed",
+                    "partial": "partial",
+                }.get(status.result, "done")
+                log_progress(
+                    "hydrate",
+                    "context",
+                    progress_outcome,
+                    target=name,
+                    detail=status.reason or status.result,
+                )
+            run["completed_count"] = len(statuses)
+            run["work"] = {
+                selected: progress_counters(selected) for selected in selected_names
+            }
+            write_context_status(statuses, status_path=status_path, run=run)
+    except BaseException:
+        run["state"] = "interrupted"
+        run["current_context"] = run.get("current_context")
+        run["updated_at"] = _now()
+        run["work"] = {
+            selected: progress_counters(selected) for selected in selected_names
+        }
+        write_context_status(statuses, status_path=status_path, run=run)
+        raise
 
-    write_context_status(statuses, status_path=status_path)
+    run["state"] = "complete"
+    run["current_context"] = None
+    run["completed_at"] = _now()
+    run["updated_at"] = run["completed_at"]
+    write_context_status(statuses, status_path=status_path, run=run)
     return statuses
 
 
@@ -471,29 +534,57 @@ def write_context_status(
     statuses: list[ContextHydrationStatus],
     *,
     status_path: str | os.PathLike[str] | None = None,
+    run: dict[str, Any] | None = None,
 ) -> None:
-    path = Path(status_path).expanduser() if status_path else default_context_status_path()
+    path = (
+        Path(status_path).expanduser() if status_path else default_context_status_path()
+    )
     previous: dict[str, Any] = {}
-    if path.exists():
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                loaded = json.load(fh)
-            if isinstance(loaded, dict):
-                previous = loaded
-        except (OSError, json.JSONDecodeError):
-            previous = {}
-    contexts = previous.get("contexts") if isinstance(previous.get("contexts"), dict) else {}
+    previous = _load_status_payload(path)
+    contexts = (
+        previous.get("contexts") if isinstance(previous.get("contexts"), dict) else {}
+    )
     contexts = dict(contexts)
     for status in statuses:
         contexts[status.name] = asdict(status)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "version": 1,
+        "version": 2,
         "updated_at": _now(),
         "contexts": contexts,
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if run is not None:
+        payload["run"] = dict(run)
+    _atomic_write_json(path, payload)
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _load_status_payload(
+    status_path: str | os.PathLike[str] | Path | None,
+) -> dict[str, Any]:
+    path = (
+        Path(status_path).expanduser() if status_path else default_context_status_path()
+    )
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _parse_context_entry(name: str, raw: Any) -> ContextEntry:
@@ -518,14 +609,41 @@ def _parse_context_entry(name: str, raw: Any) -> ContextEntry:
     origin = raw.get("origin", "registry")
     if not isinstance(origin, str) or not origin.strip():
         raise ValueError(f"Context '{name}' origin must be a non-empty string")
+    designations = _parse_context_designations(name, raw.get("designations"))
     return ContextEntry(
         name=name,
         target_dir=Path(os.path.expanduser(target_dir)),
         manifest=manifest,
         replace=replace,
+        designations=designations,
         context_dir=_optional_context_dir(raw, f"Context '{name}'"),
         origin=origin.strip(),
     )
+
+
+def _parse_context_designations(name: str, raw: Any) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"Context '{name}' designations must be a list")
+    designations: list[str] = []
+    for index, value in enumerate(raw):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"Context '{name}' designations[{index}] must be a non-empty string"
+            )
+        designation = value.strip()
+        if not _CONTEXT_NAME_RE.fullmatch(designation):
+            raise ValueError(
+                f"Context '{name}' designation '{designation}' must contain only "
+                "letters, numbers, '.', '_', or '-'"
+            )
+        if designation in designations:
+            raise ValueError(
+                f"Context '{name}' designation '{designation}' is duplicated"
+            )
+        designations.append(designation)
+    return tuple(designations)
 
 
 def _hydrate_one(
@@ -533,10 +651,16 @@ def _hydrate_one(
     overrides: HydrateOverrides,
     *,
     resolving: tuple[Path, ...] = (),
+    run_cache: HydrationRunCache | None = None,
+    previous_status: Any = None,
 ) -> ContextHydrationStatus:
     target_dir = context.target_dir
     manifest_source = manifest_source_label(context)
-    if not target_dir.is_dir() and context.ensure_target_dir and not target_dir.exists():
+    if (
+        not target_dir.is_dir()
+        and context.ensure_target_dir
+        and not target_dir.exists()
+    ):
         target_dir.mkdir(parents=True)
     if not target_dir.is_dir():
         return _status(
@@ -550,11 +674,42 @@ def _hydrate_one(
         )
 
     try:
-        plan = _build_plan(context, overrides, resolving=resolving)
+        fast_receipt = _current_hydration_receipt(
+            context,
+            overrides,
+            previous_status,
+        )
+        if fast_receipt is not None:
+            context_dir = previous_status.get("context_dir")
+            log_progress(
+                "hydrate",
+                "receipt",
+                "cache_hit",
+                target=context.name,
+            )
+            return _status(
+                name=context.name,
+                target_dir=str(target_dir),
+                manifest_source=manifest_source,
+                context_dir=context_dir,
+                result="up-to-date",
+                reason=None,
+                replace=context.replace,
+                component_count=previous_status.get("component_count"),
+                file_count=previous_status.get("file_count"),
+                receipt=fast_receipt,
+            )
+        plan = _build_plan(
+            context,
+            overrides,
+            resolving=resolving,
+            run_cache=run_cache,
+        )
         _reject_manifest_inside_context_root(context, plan.context_dir)
         linked_failure_reason = _linked_manifest_failure_reason(
             plan.linked_manifest_failures
         )
+        receipt = _hydration_receipt(context, overrides, plan)
         existing_status = _prepare_existing_context(plan, context.replace)
         if existing_status is not None:
             outcome, reason = existing_status
@@ -572,6 +727,7 @@ def _hydrate_one(
                 outcome=outcome,
                 reason=reason,
                 manifest_source=manifest_source,
+                receipt=receipt,
             )
         result = apply_hydration_plan(plan)
         return _status_from_result(
@@ -580,6 +736,7 @@ def _hydrate_one(
             outcome="partial" if linked_failure_reason else "hydrated",
             reason=linked_failure_reason,
             manifest_source=manifest_source,
+            receipt=receipt,
         )
     except (OSError, ValueError) as exc:
         reason = str(exc)
@@ -608,22 +765,27 @@ def _build_plan(
     overrides: HydrateOverrides,
     *,
     resolving: tuple[Path, ...] = (),
+    run_cache: HydrationRunCache | None = None,
 ):
     target_dir = context.target_dir.resolve()
     manifest = context.manifest
     cwd = str(target_dir)
-    effective_overrides = overrides
-    if overrides.context_dir is None and context.context_dir is not None:
-        effective_overrides = replace(overrides, context_dir=context.context_dir)
+    effective_overrides = _effective_context_overrides(context, overrides)
     if "source" in manifest:
         source = manifest["source"]
         if not isinstance(source, str) or not source:
-            raise ValueError(f"Context '{context.name}' manifest.source must be a string")
+            raise ValueError(
+                f"Context '{context.name}' manifest.source must be a string"
+            )
         source_path = Path(os.path.expanduser(source))
         if not source_path.is_absolute():
             source_path = target_dir / source_path
         return build_hydration_plan(
-            str(source_path), overrides=effective_overrides, cwd=cwd, _resolving=resolving
+            str(source_path),
+            overrides=effective_overrides,
+            cwd=cwd,
+            _resolving=resolving,
+            _run_cache=run_cache,
         )
     if "text" in manifest:
         text = manifest["text"]
@@ -637,6 +799,7 @@ def _build_plan(
             overrides=effective_overrides,
             cwd=cwd,
             _resolving=resolving,
+            _run_cache=run_cache,
         )
     data = manifest["data"]
     if not isinstance(data, dict):
@@ -648,6 +811,7 @@ def _build_plan(
         overrides=effective_overrides,
         cwd=cwd,
         _resolving=resolving,
+        _run_cache=run_cache,
     )
 
 
@@ -660,7 +824,9 @@ def resolved_context_dir(context: ContextEntry) -> Path | None:
     return path.resolve()
 
 
-def _reject_manifest_inside_context_root(context: ContextEntry, context_dir: Path) -> None:
+def _reject_manifest_inside_context_root(
+    context: ContextEntry, context_dir: Path
+) -> None:
     source = context.manifest.get("source")
     if not isinstance(source, str):
         return
@@ -705,7 +871,7 @@ def _component_failure_name(reason: str) -> str | None:
     prefix = "Component '"
     if not reason.startswith(prefix):
         return None
-    remainder = reason[len(prefix):]
+    remainder = reason[len(prefix) :]
     name, separator, _ = remainder.partition("'")
     if separator and name:
         return name
@@ -741,6 +907,7 @@ def ensure_manifest_link_hydrated(
     *,
     parent_overrides: HydrateOverrides,
     resolving: tuple[Path, ...] = (),
+    run_cache: HydrationRunCache | None = None,
 ) -> tuple[Path, str | None]:
     resolved = Path(manifest_path).expanduser().resolve()
     if resolved in resolving:
@@ -748,6 +915,29 @@ def ensure_manifest_link_hydrated(
         raise ValueError(f"Cycle detected while resolving linked manifests: {chain}")
     if not resolved.is_file():
         raise ValueError(f"Linked manifest not found: {resolved}")
+
+    cache_key = (
+        str(resolved),
+        parent_overrides.use_cache,
+        parent_overrides.cache_ttl.total_seconds()
+        if parent_overrides.cache_ttl is not None
+        else None,
+        json.dumps(parent_overrides.plugin_overrides, sort_keys=True, default=str),
+        parent_overrides.embedded_resolution,
+    )
+    can_reuse = bool(
+        run_cache is not None
+        and parent_overrides.use_cache is not False
+        and not parent_overrides.refresh_cache
+    )
+    if can_reuse and cache_key in run_cache.linked_manifests:
+        log_progress(
+            "hydrate",
+            "linked manifest",
+            "coalesced",
+            target=str(resolved),
+        )
+        return run_cache.linked_manifests[cache_key]
 
     manifest_name = _peek_manifest_name(resolved)
     canonical_dir = canonical_manifest_link_dir(resolved)
@@ -768,17 +958,23 @@ def ensure_manifest_link_hydrated(
 
     token = set_progress_context(entry.name)
     try:
-        status = _hydrate_one(entry, child_overrides, resolving=resolving + (resolved,))
+        status = _hydrate_one(
+            entry,
+            child_overrides,
+            resolving=resolving + (resolved,),
+            run_cache=run_cache,
+        )
     finally:
         reset_progress_context(token)
 
-    write_context_status(
-        [status], status_path=default_manifest_link_status_path()
-    )
+    write_context_status([status], status_path=default_manifest_link_status_path())
 
     hydrated_dir = status.context_dir
     if status.result in ("hydrated", "up-to-date") and hydrated_dir:
-        return Path(hydrated_dir), manifest_name
+        result = (Path(hydrated_dir), manifest_name)
+        if can_reuse:
+            run_cache.linked_manifests[cache_key] = result
+        return result
     raise ValueError(
         f"Failed to hydrate linked manifest {resolved}: {status.reason or status.result}"
     )
@@ -786,12 +982,10 @@ def ensure_manifest_link_hydrated(
 
 def _planned_paths(plan) -> set[str]:
     written_paths = {
-        path.relative_to(plan.context_dir).as_posix()
-        for path, _ in plan.files_to_write
+        path.relative_to(plan.context_dir).as_posix() for path, _ in plan.files_to_write
     }
     copied_paths = {
-        path.relative_to(plan.context_dir).as_posix()
-        for path, _ in plan.files_to_copy
+        path.relative_to(plan.context_dir).as_posix() for path, _ in plan.files_to_copy
     }
     symlinked_paths = {
         path.relative_to(plan.context_dir).as_posix()
@@ -807,6 +1001,7 @@ def _status_from_result(
     outcome: str,
     reason: str | None,
     manifest_source: str,
+    receipt: dict[str, Any] | None = None,
 ) -> ContextHydrationStatus:
     return _status(
         name=context.name,
@@ -818,6 +1013,7 @@ def _status_from_result(
         component_count=hydrate_result.component_count,
         file_count=hydrate_result.file_count,
         replace=context.replace,
+        receipt=receipt,
     )
 
 
@@ -832,6 +1028,7 @@ def _status(
     replace: str,
     component_count: int | None = None,
     file_count: int | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> ContextHydrationStatus:
     return ContextHydrationStatus(
         name=name,
@@ -844,7 +1041,250 @@ def _status(
         component_count=component_count,
         file_count=file_count,
         replace=replace,
+        receipt=receipt,
     )
+
+
+def _effective_context_overrides(
+    context: ContextEntry,
+    overrides: HydrateOverrides,
+) -> HydrateOverrides:
+    if overrides.context_dir is None and context.context_dir is not None:
+        return replace(overrides, context_dir=context.context_dir)
+    return overrides
+
+
+def _context_input_fingerprint(context: ContextEntry) -> str:
+    manifest = context.manifest
+    if "source" in manifest:
+        source = _resolved_manifest_source(context)
+        if source is None or not source.is_file():
+            payload = {"source": str(source) if source else None, "missing": True}
+        else:
+            payload = {
+                "source": str(source),
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }
+    else:
+        payload = manifest
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _context_options_fingerprint(
+    context: ContextEntry,
+    overrides: HydrateOverrides,
+) -> str:
+    effective = _effective_context_overrides(context, overrides)
+    payload = {
+        "target_dir": str(context.target_dir.resolve(strict=False)),
+        "replace": context.replace,
+        "overrides": asdict(effective),
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _hydration_receipt(
+    context: ContextEntry, overrides: HydrateOverrides, plan
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "input_fingerprint": _context_input_fingerprint(context),
+        "options_fingerprint": _context_options_fingerprint(context, overrides),
+        "local_inputs": plan.local_input_fingerprints,
+        "freshness": plan.freshness_receipts,
+        "provider_revisions": plan.provider_revisions,
+        "enrichment": plan.enrichment_completeness,
+        "outputs": _plan_output_receipts(plan),
+        "planned_paths": sorted(_planned_paths(plan)),
+        "created_at": _now(),
+    }
+
+
+def _current_hydration_receipt(
+    context: ContextEntry,
+    overrides: HydrateOverrides,
+    previous_status: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(previous_status, dict):
+        return None
+    if previous_status.get("result") not in {"hydrated", "up-to-date"}:
+        return None
+    receipt = previous_status.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("version") != 1:
+        return None
+    if (
+        overrides.use_cache is False
+        or overrides.refresh_cache
+        or get_refresh_cache()
+        or get_refresh_media()
+    ):
+        return None
+    context_dir = previous_status.get("context_dir")
+    if not isinstance(context_dir, str) or not Path(context_dir).is_dir():
+        return None
+    if receipt.get("input_fingerprint") != _context_input_fingerprint(context):
+        return None
+    if receipt.get("options_fingerprint") != _context_options_fingerprint(
+        context, overrides
+    ):
+        return None
+    if not _local_inputs_are_current(receipt.get("local_inputs")):
+        return None
+    if not _outputs_are_current(Path(context_dir), receipt):
+        return None
+    if not _provider_revisions_are_current(receipt.get("provider_revisions")):
+        return None
+    enrichment = receipt.get("enrichment")
+    if isinstance(enrichment, dict) and not all(
+        value is True for value in enrichment.values()
+    ):
+        return None
+    freshness = receipt.get("freshness")
+    provider_revisions = receipt.get("provider_revisions")
+    if provider_revisions and not freshness:
+        return None
+    if not _freshness_receipts_are_current(freshness, overrides):
+        return None
+    return receipt
+
+
+def _plan_output_receipts(plan) -> list[dict[str, Any]]:
+    outputs: list[dict[str, Any]] = []
+    for path, content in plan.files_to_write:
+        outputs.append(
+            {
+                "path": path.relative_to(plan.context_dir).as_posix(),
+                "kind": "file",
+                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            }
+        )
+    for path, source in plan.files_to_copy:
+        outputs.append(
+            {
+                "path": path.relative_to(plan.context_dir).as_posix(),
+                "kind": "file",
+                "sha256": _hash_path(source),
+            }
+        )
+    for path, source in plan.files_to_symlink:
+        outputs.append(
+            {
+                "path": path.relative_to(plan.context_dir).as_posix(),
+                "kind": "symlink",
+                "target": str(source.resolve(strict=False)),
+            }
+        )
+    for path, source in plan.dirs_to_symlink:
+        outputs.append(
+            {
+                "path": path.relative_to(plan.context_dir).as_posix(),
+                "kind": "dir-symlink",
+                "target": str(source.resolve(strict=False)),
+            }
+        )
+    return sorted(outputs, key=lambda item: (item["path"], item["kind"]))
+
+
+def _outputs_are_current(context_dir: Path, receipt: dict[str, Any]) -> bool:
+    outputs = receipt.get("outputs")
+    planned_paths = receipt.get("planned_paths")
+    if not isinstance(outputs, list) or not isinstance(planned_paths, list):
+        return False
+    for output in outputs:
+        if not isinstance(output, dict) or not isinstance(output.get("path"), str):
+            return False
+        path = context_dir / output["path"]
+        kind = output.get("kind")
+        if kind == "file":
+            if not path.is_file() or path.is_symlink():
+                return False
+            if _hash_path(path) != output.get("sha256"):
+                return False
+        elif kind in {"symlink", "dir-symlink"}:
+            if not path.is_symlink():
+                return False
+            if str(path.resolve(strict=False)) != output.get("target"):
+                return False
+        else:
+            return False
+    if not all(isinstance(path, str) for path in planned_paths):
+        return False
+    return not find_untracked_files(context_dir, planned_paths=set(planned_paths))
+
+
+def _local_inputs_are_current(raw_inputs: Any) -> bool:
+    if raw_inputs is None:
+        return False
+    if not isinstance(raw_inputs, list):
+        return False
+    for item in raw_inputs:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            return False
+        path = Path(item["path"])
+        if not path.is_file():
+            return False
+        stat_result = path.stat()
+        if stat_result.st_size == item.get(
+            "size"
+        ) and stat_result.st_mtime_ns == item.get("mtime_ns"):
+            continue
+        if _hash_path(path) != item.get("sha256"):
+            return False
+    return True
+
+
+def _hash_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _provider_revisions_are_current(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    from ..plugins.loader import get_loaded_plugins
+
+    current = {
+        plugin.name: plugin.revision or plugin.origin for plugin in get_loaded_plugins()
+    }
+    return all(current.get(name) == revision for name, revision in raw.items())
+
+
+def _freshness_receipts_are_current(
+    raw: Any,
+    overrides: HydrateOverrides,
+) -> bool:
+    if raw is None:
+        return False
+    if not isinstance(raw, list):
+        return False
+    from ..plugins.resolve import probe_plugin_freshness
+
+    for receipt in raw:
+        if not isinstance(receipt, dict):
+            return False
+        provider = receipt.get("provider")
+        if not isinstance(provider, str):
+            return False
+        result = probe_plugin_freshness(
+            provider,
+            receipt,
+            overrides=overrides.plugin_overrides,
+        )
+        if result.get("state") != "fresh":
+            log_progress(
+                provider,
+                "freshness probe",
+                result.get("state", "unknown"),
+                target=str(receipt.get("target") or receipt.get("source") or ""),
+                detail=result.get("reason"),
+            )
+            return False
+    return True
 
 
 def manifest_source_label(context: ContextEntry) -> str:

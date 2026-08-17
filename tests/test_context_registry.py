@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from contextualize import cli
@@ -81,7 +82,9 @@ def _mock_zk(monkeypatch, notes: list[Path]) -> None:
             }
             for path in notes
         ]
-        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+        return subprocess.CompletedProcess(
+            args, 0, stdout=json.dumps(payload), stderr=""
+        )
 
     monkeypatch.setattr("contextualize.manifest.contexts.subprocess.run", _run)
 
@@ -149,7 +152,9 @@ def test_contexts_list_rejects_empty_subscription_context_dir(
     )
 
     assert result.exit_code != 0
-    assert "contexts.subscriptions contextDir must be a non-empty string" in result.output
+    assert (
+        "contexts.subscriptions contextDir must be a non-empty string" in result.output
+    )
 
 
 def test_contexts_list_rejects_empty_static_context_dir(tmp_path: Path) -> None:
@@ -198,6 +203,7 @@ def test_contexts_list_json_discovers_zk_subscription(
             "name": "subscribed-demo",
             "source": str(note.resolve()),
             "origin": "tag:ctx/ref",
+            "designations": [],
             "target": str(target_root / "subscribed-demo"),
             "contextDir": None,
             "hydrated": False,
@@ -225,7 +231,9 @@ def test_contexts_subscription_uses_frontmatter_context(
     notes_dir = tmp_path / "notes"
     target_root = tmp_path / "ref"
     note = notes_dir / "demo.md"
-    _write_note(note, frontmatter="cx:\n  context: explicit-demo\n", name="Ignored Name")
+    _write_note(
+        note, frontmatter="cx:\n  context: explicit-demo\n", name="Ignored Name"
+    )
     _write_registry(tmp_path / "registry.json", {})
     _write_context_config(tmp_path / "config", notes_dir, target_root)
     _mock_zk(monkeypatch, [note])
@@ -342,7 +350,10 @@ def test_contexts_subscription_warns_on_static_name_collision(
 
     assert result.exit_code == 0
     assert "Context registry: total=1" in result.output
-    assert "context subscription: warning: skipping subscribed context demo" in result.output
+    assert (
+        "context subscription: warning: skipping subscribed context demo"
+        in result.output
+    )
     assert str(target_root / "demo") not in result.output
 
 
@@ -862,6 +873,7 @@ def test_contexts_list_cli_json_uses_registry(tmp_path: Path) -> None:
                     "demo": {
                         "targetDir": str(target_dir),
                         "origin": "nix",
+                        "designations": ["mine-context", "project-world"],
                         "manifest": {"source": "manifest.yaml"},
                     }
                 },
@@ -883,6 +895,7 @@ def test_contexts_list_cli_json_uses_registry(tmp_path: Path) -> None:
             "name": "demo",
             "source": "manifest.yaml",
             "origin": "nix",
+            "designations": ["mine-context", "project-world"],
             "target": str(target_dir),
             "contextDir": None,
             "hydrated": None,
@@ -893,6 +906,27 @@ def test_contexts_list_cli_json_uses_registry(tmp_path: Path) -> None:
             "drift": None,
         }
     ]
+
+
+def test_contexts_list_rejects_invalid_designations(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    _write_registry(
+        registry,
+        {
+            "demo": {
+                "targetDir": str(tmp_path / "demo"),
+                "designations": ["mine-context", ""],
+                "manifest": {"data": {"components": []}},
+            }
+        },
+    )
+
+    result = CliRunner().invoke(
+        cli.cli, ["contexts", "list", "--registry", str(registry)]
+    )
+
+    assert result.exit_code != 0
+    assert "Context 'demo' designations[1] must be a non-empty string" in result.output
 
 
 def test_contexts_list_cli_uses_registry_origin(tmp_path: Path) -> None:
@@ -994,7 +1028,9 @@ def test_contexts_list_cli_rejects_empty_registry_origin(tmp_path: Path) -> None
     )
 
     runner = CliRunner()
-    result = runner.invoke(cli.cli, ["contexts", "list", "--registry", str(registry_path)])
+    result = runner.invoke(
+        cli.cli, ["contexts", "list", "--registry", str(registry_path)]
+    )
 
     assert result.exit_code != 0
     assert "Context 'demo' origin must be a non-empty string" in result.output
@@ -1135,7 +1171,7 @@ def test_contexts_hydrate_prefixes_context_warnings(
         encoding="utf-8",
     )
 
-    def _warn_and_hydrate(context, _overrides):
+    def _warn_and_hydrate(context, _overrides, **_kwargs):
         print("Warning: plugin failed", file=__import__("sys").stderr)
         return ContextHydrationStatus(
             name=context.name,
@@ -1198,7 +1234,7 @@ def test_contexts_hydrate_verbose_reports_progress_summary(
         encoding="utf-8",
     )
 
-    def _record_and_hydrate(context, _overrides):
+    def _record_and_hydrate(context, _overrides, **_kwargs):
         record_progress("arena", "channel", "cache_hit", target="Cached Channel")
         return ContextHydrationStatus(
             name=context.name,
@@ -1302,9 +1338,7 @@ def test_contexts_hydrate_verbose_reports_failed_component_reason(
     assert str(missing_path) in result.output
 
 
-def test_hydrate_context_with_manifests_component(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_hydrate_context_with_manifests_component(monkeypatch, tmp_path: Path) -> None:
     _isolate_manifest_link_cache(monkeypatch, tmp_path)
 
     sub_manifest = tmp_path / "sub.yaml"
@@ -1363,9 +1397,9 @@ def test_hydrate_context_with_manifests_component(
     assert statuses[0].result == "hydrated"
     linked = target_dir / ".context" / "contexts" / "sub"
     assert linked.is_symlink()
-    assert (
-        linked / "main" / "notes" / "text-001.md"
-    ).read_text(encoding="utf-8").strip() == "hello from sub"
+    assert (linked / "main" / "notes" / "text-001.md").read_text(
+        encoding="utf-8"
+    ).strip() == "hello from sub"
 
 
 def test_contexts_hydrate_partial_when_sub_manifest_fails(
@@ -1500,9 +1534,7 @@ def test_hydrate_manifests_shared_sub_manifest_reuses_canonical_dir(
                     "path-strategy": "on-disk",
                 }
             },
-            "components": [
-                {"name": "contexts", "manifests": [str(sub_manifest)]}
-            ],
+            "components": [{"name": "contexts", "manifests": [str(sub_manifest)]}],
         }
 
     target_dir_a = tmp_path / "repo-a"
@@ -1586,7 +1618,9 @@ components:
     assert "Hydrated" in result.output
     assert "Progress summary:" in result.output
     assert "  hydrate component: total=1 done=1" in result.output
-    assert (context_dir / "main/notes/text-001.md").read_text(encoding="utf-8") == "hello"
+    assert (context_dir / "main/notes/text-001.md").read_text(
+        encoding="utf-8"
+    ) == "hello"
 
 
 def test_hydrate_cli_quiet_suppresses_default_progress_summary(
@@ -1618,3 +1652,285 @@ components:
     assert result.exit_code == 0
     assert "Hydrated" in result.output
     assert "Progress summary:" not in result.output
+
+
+def test_contexts_hydrate_requires_names_or_all(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    _write_registry(registry, {})
+
+    result = CliRunner().invoke(
+        cli.cli,
+        ["contexts", "hydrate", "--registry", str(registry)],
+    )
+
+    assert result.exit_code != 0
+    assert "provide one or more context names, or pass --all" in result.output
+
+
+def test_contexts_hydrate_rejects_names_with_all(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    _write_registry(registry, {})
+
+    result = CliRunner().invoke(
+        cli.cli,
+        ["contexts", "hydrate", "--all", "--registry", str(registry), "demo"],
+    )
+
+    assert result.exit_code != 0
+    assert "context names cannot be combined with --all" in result.output
+
+
+def test_contexts_hydrate_all_writes_complete_v2_status(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from contextualize.progress import log_progress, reset_progress
+
+    reset_progress()
+    registry = tmp_path / "registry.json"
+    status_path = tmp_path / "status.json"
+    contexts = {}
+    for name in ("one", "two"):
+        target = tmp_path / name
+        target.mkdir()
+        contexts[name] = {
+            "targetDir": str(target),
+            "manifest": {"data": {"components": []}},
+        }
+    _write_registry(registry, contexts)
+    visited: list[str] = []
+
+    def _hydrate(context, _overrides, **_kwargs):
+        visited.append(context.name)
+        log_progress("arena", "remote-request", "request")
+        log_progress("arena", "media", "processed", size_bytes=2048)
+        log_progress("arena", "block-render", "coalesced")
+        return ContextHydrationStatus(
+            name=context.name,
+            target_dir=str(context.target_dir),
+            manifest_source="inline data",
+            context_dir=str(context.target_dir / ".context"),
+            result="hydrated",
+            reason=None,
+            timestamp="2026-08-17T00:00:00Z",
+        )
+
+    monkeypatch.setattr("contextualize.manifest.contexts._hydrate_one", _hydrate)
+    result = CliRunner().invoke(
+        cli.cli,
+        [
+            "contexts",
+            "hydrate",
+            "--all",
+            "--registry",
+            str(registry),
+            "--status",
+            str(status_path),
+        ],
+        env={"XDG_CONFIG_HOME": str(tmp_path / "empty-config")},
+    )
+
+    assert result.exit_code == 0
+    assert visited == ["one", "two"]
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    assert payload["run"]["state"] == "complete"
+    assert payload["run"]["selected_count"] == 2
+    assert payload["run"]["completed_count"] == 2
+    assert payload["run"]["current_context"] is None
+    assert payload["run"]["work"]["one"] == {
+        "arena.block-render.coalesced": 1,
+        "arena.media.bytes": 2048,
+        "arena.media.processed": 1,
+        "arena.remote-request.request": 1,
+    }
+    assert payload["run"]["work"]["two"] == payload["run"]["work"]["one"]
+
+
+def test_contexts_hydrate_records_interrupted_live_status(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry.json"
+    status_path = tmp_path / "status.json"
+    contexts = {}
+    for name in ("one", "two"):
+        target = tmp_path / name
+        target.mkdir()
+        contexts[name] = {
+            "targetDir": str(target),
+            "manifest": {"data": {"components": []}},
+        }
+    _write_registry(registry, contexts)
+
+    def _hydrate(context, _overrides, **_kwargs):
+        if context.name == "two":
+            raise KeyboardInterrupt()
+        return ContextHydrationStatus(
+            name=context.name,
+            target_dir=str(context.target_dir),
+            manifest_source="inline data",
+            context_dir=str(context.target_dir / ".context"),
+            result="hydrated",
+            reason=None,
+            timestamp="2026-08-17T00:00:00Z",
+        )
+
+    monkeypatch.setattr("contextualize.manifest.contexts._hydrate_one", _hydrate)
+    with pytest.raises(KeyboardInterrupt):
+        hydrate_contexts(
+            None,
+            registry_path=registry,
+            status_path=status_path,
+            all_contexts=True,
+        )
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    assert payload["run"]["state"] == "interrupted"
+    assert payload["run"]["current_context"] == "two"
+    assert payload["run"]["completed_count"] == 1
+    assert list(payload["contexts"]) == ["one"]
+
+
+def test_context_status_v2_preserves_v1_context_entries(tmp_path: Path) -> None:
+    from contextualize.manifest.contexts import write_context_status
+
+    status_path = tmp_path / "status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "contexts": {
+                    "legacy": {
+                        "name": "legacy",
+                        "result": "hydrated",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    current = ContextHydrationStatus(
+        name="current",
+        target_dir=str(tmp_path),
+        manifest_source="inline data",
+        context_dir=str(tmp_path / ".context"),
+        result="hydrated",
+        reason=None,
+        timestamp="2026-08-17T00:00:00Z",
+    )
+
+    write_context_status([current], status_path=status_path)
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    assert set(payload["contexts"]) == {"legacy", "current"}
+
+
+def test_invocation_cache_reuses_resolution_across_context_manifest_bases(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from contextualize.manifest import hydrate as hydrate_module
+
+    registry = tmp_path / "registry.json"
+    contexts = {}
+    for name in ("one", "two"):
+        target = tmp_path / name
+        target.mkdir()
+        manifest = target / "manifest.yaml"
+        manifest.write_text(
+            "components:\n  - name: remote\n    files:\n      - https://example.test/item\n",
+            encoding="utf-8",
+        )
+        contexts[name] = {
+            "targetDir": str(target),
+            "manifest": {"source": str(manifest)},
+        }
+    _write_registry(registry, contexts)
+    calls = 0
+
+    def _counted(target, *_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return [
+            hydrate_module.ResolvedItem(
+                source_type="http",
+                source_ref=target,
+                source_rev=None,
+                source_path=target,
+                context_subpath="item.md",
+                content="remote",
+                manifest_spec=target,
+            )
+        ]
+
+    monkeypatch.setattr(hydrate_module, "_resolve_spec_items", _counted)
+
+    hydrate_contexts(
+        ["one", "two"],
+        registry_path=registry,
+        status_path=tmp_path / "status.json",
+    )
+
+    assert calls == 1
+
+    calls = 0
+    hydrate_contexts(
+        ["one", "two"],
+        registry_path=registry,
+        status_path=tmp_path / "refresh-status.json",
+        overrides=hydrate_module.HydrateOverrides(refresh_cache=True),
+    )
+    assert calls == 2
+
+
+def test_receipt_freshness_falls_back_and_refresh_bypasses(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import contextualize.manifest.contexts as context_module
+
+    target = tmp_path / "target"
+    context_dir = target / ".context"
+    context_dir.mkdir(parents=True)
+    context = context_module.ContextEntry(
+        name="demo",
+        target_dir=target,
+        manifest={"data": {"components": []}},
+        replace="guarded",
+    )
+    overrides = context_module.HydrateOverrides()
+    receipt = {
+        "version": 1,
+        "input_fingerprint": context_module._context_input_fingerprint(context),
+        "options_fingerprint": context_module._context_options_fingerprint(
+            context, overrides
+        ),
+        "local_inputs": [],
+        "freshness": [{"provider": "fake", "kind": "object", "target": "fake:one"}],
+        "provider_revisions": {},
+        "enrichment": {},
+    }
+    previous = {
+        "result": "hydrated",
+        "context_dir": str(context_dir),
+        "receipt": receipt,
+    }
+    monkeypatch.setattr(
+        "contextualize.plugins.resolve.probe_plugin_freshness",
+        lambda *_args, **_kwargs: {"state": "stale"},
+    )
+
+    assert (
+        context_module._current_hydration_receipt(context, overrides, previous) is None
+    )
+    assert (
+        context_module._current_hydration_receipt(
+            context,
+            context_module.HydrateOverrides(refresh_cache=True),
+            previous,
+        )
+        is None
+    )

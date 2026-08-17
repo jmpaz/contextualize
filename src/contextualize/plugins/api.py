@@ -83,6 +83,12 @@ class PluginTargetDescriptor(TypedDict, total=False):
     error: str | None
 
 
+class PluginFreshnessResult(TypedDict, total=False):
+    state: str
+    revision: str
+    reason: str
+
+
 CanResolveFn = Callable[[str, PluginContext], bool]
 ResolveFn = Callable[[str, PluginContext], list[PluginDocument]]
 ListTargetsFn = Callable[[str, PluginContext], PluginListEnvelope]
@@ -93,6 +99,7 @@ ClassifyTargetFn = Callable[[str, PluginContext], PluginTargetDescriptor | None]
 NormalizeManifestConfigFn = Callable[[dict[str, Any] | None], dict[str, Any] | None]
 RegisterCliOptionsFn = Callable[[str, Any], None]
 CollectCliOverridesFn = Callable[[str, dict[str, Any]], dict[str, Any] | None]
+ProbeFreshnessFn = Callable[[dict[str, Any], PluginContext], PluginFreshnessResult]
 
 
 class TranscriptionProviderError(RuntimeError):
@@ -179,6 +186,7 @@ class LoadedPlugin:
     origin: str
     can_resolve: CanResolveFn
     resolve: ResolveFn
+    revision: str | None = None
     list_targets: ListTargetsFn | None = None
     materialize: MaterializeFn | None = None
     register_auth_command: RegisterAuthCommandFn | None = None
@@ -186,6 +194,7 @@ class LoadedPlugin:
     normalize_manifest_config: NormalizeManifestConfigFn | None = None
     register_cli_options: RegisterCliOptionsFn | None = None
     collect_cli_overrides: CollectCliOverridesFn | None = None
+    probe_freshness: ProbeFreshnessFn | None = None
     register_command: RegisterCommandFn | None = None
     transcription_providers: tuple[TranscriptionProvider, ...] = field(
         default_factory=tuple

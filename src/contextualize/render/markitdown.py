@@ -560,10 +560,13 @@ def _llm_chat_completion(
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            return client.chat.completions.create(
+            record_progress("markitdown", "model-call", "request", target=model)
+            response = client.chat.completions.create(
                 model=model,
                 messages=messages,
             )
+            record_progress("markitdown", "model-call", "processed", target=model)
+            return response
         except Exception as exc:
             last_exc = exc
             if not _is_transient_llm_error(exc) or attempt >= max_attempts:
@@ -576,6 +579,7 @@ def _llm_chat_completion(
                 attempt,
                 max_attempts,
             )
+            record_progress("markitdown", "model-call", "retry", target=model)
             time.sleep(wait)
     raise MarkItDownConversionError(f"LLM request failed: {last_exc}")
 
@@ -1364,6 +1368,70 @@ def _markdown_cache_lookup(
     return key, None
 
 
+def _media_description_cache_payload(
+    media_md5: str,
+    *,
+    modality: str,
+    suffix: str,
+    prompt: str,
+) -> dict[str, Any]:
+    base_url = _configured_llm_base_url()
+    model = (os.getenv("OPENAI_MODEL") or "").strip() or _DEFAULT_OPENROUTER_MODEL
+    return {
+        "v": 1,
+        "type": "media-description",
+        "descriptor_version": "media-description-v1",
+        "modality": modality,
+        "media_md5": media_md5,
+        "suffix": suffix,
+        "provider": _llm_provider_label(base_url),
+        "base_url": base_url,
+        "model": model,
+        "prompt": prompt,
+        "frame_settings": {
+            "native_video": True,
+            "fallback_frame": "first-frame-v1",
+            "hls_transcode": "mp4-v1",
+        }
+        if modality == "video"
+        else None,
+        "markitdown_version": _markitdown_version(),
+    }
+
+
+def _media_description_cache_lookup(
+    payload: dict[str, Any],
+) -> tuple[str, MarkItDownResult | None]:
+    key, cached = _markdown_cache_lookup(payload)
+    record_progress(
+        "markitdown",
+        "media-description-cache",
+        "cache_hit" if cached is not None else "backfill",
+        target=str(payload.get("modality") or "media"),
+    )
+    return key, cached
+
+
+def _store_media_description_result(
+    key: str,
+    payload: dict[str, Any],
+    markdown: str,
+) -> MarkItDownResult:
+    _write_cache_entry(
+        key,
+        payload=payload,
+        markdown=markdown,
+        title=None,
+    )
+    record_progress(
+        "markitdown",
+        "media-description-cache",
+        "processed",
+        target=str(payload.get("modality") or "media"),
+    )
+    return MarkItDownResult(markdown=markdown, title=None)
+
+
 def _pdf_ocr_cache_payload(
     file_md5: str,
     *,
@@ -1511,7 +1579,9 @@ def _app_server_pdf_batch_texts_from_pages(
     ]
     requested_model = _resolve_app_server_request_model(model)
     effort = _DEFAULT_CODEX_APP_SERVER_EFFORT
-    turn_timeout = per_page_timeout_seconds * max((len(batch) for batch in batches), default=1)
+    turn_timeout = per_page_timeout_seconds * max(
+        (len(batch) for batch in batches), default=1
+    )
     _verbose_log(
         "  sending to model: "
         "provider=codex-app-server "
@@ -1970,6 +2040,20 @@ def convert_path_to_markdown(
             video_path = _maybe_convert_gif_to_mp4(path_obj)
             cleanup_video = video_path is not path_obj
             prompt = _merge_prompt(_video_prompt(video_path), prompt_append)
+            media_md5 = _file_md5(video_path)
+            cache_key_payload = _media_description_cache_payload(
+                media_md5,
+                modality="video",
+                suffix=video_path.suffix.lower(),
+                prompt=prompt,
+            )
+            cache_key = _cache_key(cache_key_payload)
+            from ..runtime import get_refresh_media, get_refresh_videos
+
+            if not (get_refresh_media() or get_refresh_videos()):
+                cache_key, cached = _media_description_cache_lookup(cache_key_payload)
+                if cached is not None:
+                    return cached
             remote_url = (source_url or "").strip()
             if remote_url and remote_url.startswith(("http://", "https://")):
                 try:
@@ -1979,7 +2063,9 @@ def convert_path_to_markdown(
                         prompt=prompt,
                         video_url=remote_url,
                     )
-                    return MarkItDownResult(markdown=markdown, title=None)
+                    return _store_media_description_result(
+                        cache_key, cache_key_payload, markdown
+                    )
                 except MarkItDownConversionError as exc:
                     if _is_non_recoverable_video_error(exc):
                         raise
@@ -1992,13 +2078,17 @@ def convert_path_to_markdown(
                         _video_prompt(hls_transcoded_path), prompt_append
                     ),
                 )
-                return MarkItDownResult(markdown=markdown, title=None)
+                return _store_media_description_result(
+                    cache_key, cache_key_payload, markdown
+                )
             markdown = _llm_video_markdown(
                 video_path.read_bytes(),
                 suffix=video_path.suffix.lower(),
                 prompt=prompt,
             )
-            return MarkItDownResult(markdown=markdown, title=None)
+            return _store_media_description_result(
+                cache_key, cache_key_payload, markdown
+            )
         except MarkItDownConversionError as exc:
             if _is_non_recoverable_video_error(exc):
                 raise
@@ -2012,12 +2102,29 @@ def convert_path_to_markdown(
 
     if is_audio:
         try:
+            prompt = _merge_prompt(_audio_prompt(), prompt_append)
+            media_md5 = _file_md5(path_obj)
+            cache_key_payload = _media_description_cache_payload(
+                media_md5,
+                modality="audio",
+                suffix=path_obj.suffix.lower(),
+                prompt=prompt,
+            )
+            cache_key = _cache_key(cache_key_payload)
+            from ..runtime import get_refresh_audio, get_refresh_media
+
+            if not (get_refresh_media() or get_refresh_audio()):
+                cache_key, cached = _media_description_cache_lookup(cache_key_payload)
+                if cached is not None:
+                    return cached
             markdown = _llm_audio_markdown(
                 path_obj.read_bytes(),
                 suffix=path_obj.suffix.lower(),
-                prompt=_merge_prompt(_audio_prompt(), prompt_append),
+                prompt=prompt,
             )
-            return MarkItDownResult(markdown=markdown, title=None)
+            return _store_media_description_result(
+                cache_key, cache_key_payload, markdown
+            )
         except MarkItDownConversionError:
             pass
 

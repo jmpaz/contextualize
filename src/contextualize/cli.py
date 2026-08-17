@@ -1528,7 +1528,9 @@ def _echo_context_hydration_statuses(statuses, *, label: str) -> None:
             parts.append(f"-> {status.context_dir}")
         if status.reason:
             parts.append(f"({status.reason})")
-        click.echo(" ".join(parts), err=status.result in {"failed", "partial", "skipped"})
+        click.echo(
+            " ".join(parts), err=status.result in {"failed", "partial", "skipped"}
+        )
 
 
 def _echo_context_registry(contexts) -> None:
@@ -1547,12 +1549,13 @@ def _echo_context_registry(contexts) -> None:
             name,
             manifest_source_label(contexts[name]),
             contexts[name].origin,
+            ",".join(contexts[name].designations) or "-",
             str(contexts[name].target_dir),
             str(resolved_context_dir(contexts[name]) or "manifest"),
         )
         for name in names
     ]
-    headers = ("name", "source", "origin", "target", "context")
+    headers = ("name", "source", "origin", "designations", "target", "context")
     table_width = max(
         sum(term_len(value) for value in row) + (len(row) - 1) * 4
         for row in [headers, *rows]
@@ -1580,6 +1583,7 @@ def _echo_context_registry_json(contexts, statuses=None) -> None:
             "name": name,
             "source": manifest_source_label(contexts[name]),
             "origin": contexts[name].origin,
+            "designations": list(contexts[name].designations),
             "target": str(contexts[name].target_dir),
             "contextDir": (
                 str(resolved_context_dir(contexts[name]))
@@ -1698,7 +1702,9 @@ def _complete_context_names(ctx, param, incomplete):
     ):
         if name in selected or not name.startswith(incomplete):
             continue
-        items.append(CompletionItem(name, help=f"{context.origin} {context.target_dir}"))
+        items.append(
+            CompletionItem(name, help=f"{context.origin} {context.target_dir}")
+        )
     return items
 
 
@@ -1719,7 +1725,9 @@ def contexts_cmd() -> None:
     type=click.Path(dir_okay=False),
     help="Context hydration status path (default: XDG contextualize/contexts/status.json).",
 )
-@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Print machine-readable JSON."
+)
 def contexts_list_cmd(registry, status_path, json_output) -> None:
     """List registered contexts. --json includes each context's hydration
     state, cache age, and drift alongside its registry entry."""
@@ -1756,9 +1764,7 @@ def contexts_status_cmd(status_path) -> None:
     from .manifest.contexts import default_context_status_path
 
     path = (
-        Path(status_path).expanduser()
-        if status_path
-        else default_context_status_path()
+        Path(status_path).expanduser() if status_path else default_context_status_path()
     )
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -1768,12 +1774,26 @@ def contexts_status_cmd(status_path) -> None:
     contexts = payload.get("contexts") if isinstance(payload, dict) else None
     if not isinstance(contexts, dict):
         raise click.ClickException("Context status must contain a 'contexts' mapping")
+    run = payload.get("run") if isinstance(payload, dict) else None
+    if isinstance(run, dict):
+        state = run.get("state", "unknown")
+        pid = run.get("pid")
+        if state == "running" and isinstance(pid, int):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                state = "stale"
+        completed = run.get("completed_count", 0)
+        selected = run.get("selected_count", 0)
+        current = run.get("current_context")
+        line = f"run: {state} completed={completed}/{selected}"
+        if current:
+            line += f" current={current}"
+        click.echo(line, err=state in {"interrupted", "stale"})
     for name in sorted(contexts):
         status = contexts[name]
         result = (
-            status.get("result", "unknown")
-            if isinstance(status, dict)
-            else "unknown"
+            status.get("result", "unknown") if isinstance(status, dict) else "unknown"
         )
         reason = status.get("reason") if isinstance(status, dict) else None
         target_dir = status.get("target_dir") if isinstance(status, dict) else None
@@ -1812,7 +1832,9 @@ def contexts_compile_cmd(names, registry, manifest_path, context_name, pretty) -
     from .manifest.quote_resolver import LocalVoiceQuoteResolver
 
     if manifest_path and (registry or names):
-        raise click.UsageError("--manifest cannot be combined with --registry or context names")
+        raise click.UsageError(
+            "--manifest cannot be combined with --registry or context names"
+        )
     if context_name and not manifest_path:
         raise click.UsageError("--name requires --manifest")
     try:
@@ -1847,6 +1869,12 @@ def contexts_compile_cmd(names, registry, manifest_path, context_name, pretty) -
 
 @contexts_cmd.command("hydrate", cls=PluginGroupedCommand)
 @click.argument("names", nargs=-1, type=str, shell_complete=_complete_context_names)
+@click.option(
+    "--all",
+    "hydrate_all",
+    is_flag=True,
+    help="Hydrate every registered context.",
+)
 @click.option(
     "--registry",
     type=click.Path(exists=True, dir_okay=False),
@@ -1964,6 +1992,7 @@ def contexts_compile_cmd(names, registry, manifest_path, context_name, pretty) -
 def contexts_hydrate_cmd(
     ctx,
     names,
+    hydrate_all,
     registry,
     status_path,
     strict,
@@ -1987,7 +2016,7 @@ def contexts_hydrate_cmd(
     embedded_resolution,
     **extra_params,
 ):
-    """Hydrate one or more registered contexts."""
+    """Hydrate named registered contexts, or every context with --all."""
     _use_default_hydrate_progress(ctx, quiet=quiet)
     used_options = _collect_used_global_option_labels(
         ctx,
@@ -2025,6 +2054,7 @@ def contexts_hydrate_cmd(
             registry_path=registry,
             status_path=status_path,
             overrides=overrides,
+            all_contexts=hydrate_all,
         )
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2565,7 +2595,9 @@ def hydrate_cmd(
     type=click.Path(exists=True, dir_okay=False),
     help="Context registry path for name:component.member selectors (default: XDG contextualize/contexts.json).",
 )
-@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Print machine-readable JSON."
+)
 @_video_frame_options
 @click.pass_context
 def cat_cmd(
@@ -2788,7 +2820,10 @@ def cat_cmd(
             selector_result = _cat_selector(
                 p, around=around, registry_path=selector_registry, cwd=os.getcwd()
             )
-            if selector_result["state"] == "not-found" and selector_result["origin"]["kind"] == "unknown":
+            if (
+                selector_result["state"] == "not-found"
+                and selector_result["origin"]["kind"] == "unknown"
+            ):
                 spliced_paths.append(p)
                 continue
             selector_cat_results.append(selector_result)
@@ -2868,9 +2903,7 @@ def cat_cmd(
                     else [str(Path(repo_dir))]
                 )
                 for path in expanded_paths:
-                    add_file_refs(
-                        [path], text_only=True, binary_policy="placeholder"
-                    )
+                    add_file_refs([path], text_only=True, binary_policy="placeholder")
                 continue
             raw_url = github_blob_to_raw_url(p)
             if raw_url:
@@ -2937,9 +2970,7 @@ def cat_cmd(
                     else [str(Path(repo_dir))]
                 )
                 for path in expanded_paths:
-                    add_file_refs(
-                        [path], text_only=True, binary_policy="placeholder"
-                    )
+                    add_file_refs([path], text_only=True, binary_policy="placeholder")
             else:
                 add_file_refs([p])
 
@@ -3060,7 +3091,9 @@ def cat_cmd(
             result = result + "\n\n" + "\n\n".join(adjacency_blocks)
 
     if json_output:
-        click.echo(json.dumps({"content": result, "selectors": selector_cat_results}, indent=2))
+        click.echo(
+            json.dumps({"content": result, "selectors": selector_cat_results}, indent=2)
+        )
         ctx.exit()
 
     return result
@@ -3077,13 +3110,17 @@ def _emit_serve_result(ctx, result, json_output: bool, render) -> None:
 
 @cli.command("show")
 @click.argument("selector", required=False)
-@click.option("--depth", type=int, default=None, help="Limit nested group expansion to N levels.")
+@click.option(
+    "--depth", type=int, default=None, help="Limit nested group expansion to N levels."
+)
 @click.option(
     "--registry",
     type=click.Path(exists=True, dir_okay=False),
     help="Context registry path (default: XDG contextualize/contexts.json).",
 )
-@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Print machine-readable JSON."
+)
 @click.pass_context
 def show_cmd(ctx, selector, depth, registry, json_output) -> None:
     """Render a context/manifest as authored: components, groups, and sets
@@ -3102,15 +3139,21 @@ def show_cmd(ctx, selector, depth, registry, json_output) -> None:
 @cli.command("links")
 @click.argument("selector", required=False)
 @click.option("--in", "direction_in", is_flag=True, help="Show who cites this context.")
-@click.option("--out", "direction_out", is_flag=True, help="Show what this context cites.")
+@click.option(
+    "--out", "direction_out", is_flag=True, help="Show what this context cites."
+)
 @click.option(
     "--registry",
     type=click.Path(exists=True, dir_okay=False),
     help="Context registry path (default: XDG contextualize/contexts.json).",
 )
-@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Print machine-readable JSON."
+)
 @click.pass_context
-def links_cmd(ctx, selector, direction_in, direction_out, registry, json_output) -> None:
+def links_cmd(
+    ctx, selector, direction_in, direction_out, registry, json_output
+) -> None:
     """The connective tissue between contexts: who cites this one (--in)
     and what it cites (--out). Both directions by default."""
     if not selector:
@@ -3129,7 +3172,9 @@ def links_cmd(ctx, selector, direction_in, direction_out, registry, json_output)
     from .serve.core import links as query_links
     from .serve.render import render_links
 
-    result = query_links(selector, direction=direction, registry_path=registry, cwd=os.getcwd())
+    result = query_links(
+        selector, direction=direction, registry_path=registry, cwd=os.getcwd()
+    )
     _emit_serve_result(ctx, result, json_output, render_links)
 
 
@@ -3152,7 +3197,9 @@ def links_cmd(ctx, selector, direction_in, direction_out, registry, json_output)
     type=click.Path(file_okay=False),
     help="Scope registry-wide status to contexts whose target contains this directory.",
 )
-@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Print machine-readable JSON."
+)
 @click.pass_context
 def status_cmd(ctx, selector, registry, status_path, cwd_scope, json_output) -> None:
     """Freshness and drift, per context or registry-wide: hydration state,

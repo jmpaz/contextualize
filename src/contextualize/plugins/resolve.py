@@ -436,6 +436,43 @@ def resolve_plugin_references(
     return [], False
 
 
+def probe_plugin_freshness(
+    provider: str,
+    receipt: dict[str, Any],
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = _build_inspection_context(
+        overrides,
+        use_cache=False,
+        cache_ttl=None,
+        refresh_cache=True,
+    )
+    for plugin in get_loaded_plugins():
+        if plugin.name != provider:
+            continue
+        if plugin.probe_freshness is None:
+            return {"state": "unknown", "reason": "plugin has no freshness probe"}
+        try:
+            result = plugin.probe_freshness(receipt, context)
+        except Exception as exc:
+            return {
+                "state": "unknown",
+                "reason": f"{exc.__class__.__name__}: {exc}",
+            }
+        if not isinstance(result, dict) or result.get("state") not in {
+            "fresh",
+            "stale",
+            "unknown",
+        }:
+            return {
+                "state": "unknown",
+                "reason": "plugin returned invalid freshness result",
+            }
+        return dict(result)
+    return {"state": "unknown", "reason": f"plugin is not loaded: {provider}"}
+
+
 def list_plugin_targets(
     target: str,
     *,

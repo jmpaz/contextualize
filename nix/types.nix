@@ -44,6 +44,12 @@ let
         description = "Registry origin label displayed by contextualize.";
       };
 
+      designations = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Routing designations exposed by the context registry.";
+      };
+
       manifest = lib.mkOption {
         type = manifestSource;
         default = {};
@@ -75,6 +81,12 @@ let
         type = types.str;
         default = "nix";
         description = "Registry origin label displayed by contextualize.";
+      };
+
+      designations = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Routing designations exposed by the context registry.";
       };
 
       manifest = lib.mkOption {
