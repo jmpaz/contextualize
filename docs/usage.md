@@ -201,6 +201,20 @@ contextualize contexts list  # shows source, origin, and target
 contextualize contexts hydrate my-context
 ```
 
+Authored component text normally hydrates under the component's `notes/`
+directory. Set `text-file` to a top-level filename when the text should instead
+become a named root document, such as a context's orientation README:
+
+```yaml
+components:
+  - name: orientation
+    text-file: README.md
+    text: |
+      # Orientation
+
+      Read this before using the context.
+```
+
 Static registry entries default to origin `registry`. Nix-generated registries set origin `nix`; subscribed contexts use `tag:<tag>`.
 
 ### shell completion

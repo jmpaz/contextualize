@@ -1538,6 +1538,68 @@ components:
     }
 
 
+def test_hydrate_component_text_file_writes_named_root_file(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    context_dir = tmp_path / "ctx"
+    manifest_path.write_text(
+        f"""config:
+  context:
+    dir: {context_dir}
+    include-meta: true
+
+components:
+  - name: orientation
+    text-file: README.md
+    text: |
+      # Orientation
+
+      Read this first.
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_hydration_plan(
+        str(manifest_path),
+        overrides=HydrateOverrides(),
+        cwd=str(tmp_path),
+    )
+    apply_hydration_plan(plan)
+
+    assert (context_dir / "README.md").read_text(encoding="utf-8") == (
+        "# Orientation\n\nRead this first.\n"
+    )
+    assert not (context_dir / "orientation" / "notes" / "text-001.md").exists()
+    assert "text-file: README.md" in (
+        context_dir / "manifest.yaml"
+    ).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "text_file",
+    ["nested/README.md", "manifest.yaml", "index.json"],
+)
+def test_hydrate_component_text_file_rejects_unsafe_names(
+    tmp_path: Path,
+    text_file: str,
+) -> None:
+    with pytest.raises(ValueError, match="text-file"):
+        build_hydration_plan_data(
+            {
+                "config": {"context": {"dir": str(tmp_path / "ctx")}},
+                "components": [
+                    {
+                        "name": "orientation",
+                        "text-file": text_file,
+                        "text": "Read this first.",
+                    }
+                ],
+            },
+            manifest_cwd=str(tmp_path),
+            overrides=HydrateOverrides(),
+            cwd=str(tmp_path),
+        )
+
+
 def test_hydrate_outline_records_order_comments_and_disabled_members(
     tmp_path: Path,
 ) -> None:

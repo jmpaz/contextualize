@@ -584,6 +584,7 @@ def build_hydration_plan_data(
         comp_repos = comp.get("repos")
         comp_manifests = comp.get("manifests")
         comp_text = comp.get("text")
+        comp_text_file = comp.get("text-file")
         comp_prefix = comp.get("prefix")
         comp_suffix = comp.get("suffix")
         comp_gitignore_raw = comp.get("gitignore")
@@ -626,6 +627,13 @@ def build_hydration_plan_data(
                 continue
             raise ValueError(f"Component '{comp_name}' has no content")
 
+        if comp_text_file is not None:
+            if comp_text is None:
+                raise ValueError(
+                    f"Component '{comp_name}' text-file requires text"
+                )
+            _validate_context_text_filename(comp_text_file)
+
         normalized_comp = _build_normalized_component(comp, comp_name)
         normalized_files: list[Any] = []
         for note_name, note_value in (
@@ -639,8 +647,17 @@ def build_hydration_plan_data(
                 raise ValueError(
                     f"Component '{comp_name}' note '{note_name}' must be a string"
                 )
-            note_root = component_root or Path(comp_name)
-            note_path = context_dir / note_root / "notes" / note_name
+            if note_name == "text-001.md" and comp_text_file is not None:
+                note_path = context_dir / comp_text_file
+                if any(path == note_path for path, _ in files_to_write):
+                    raise ValueError(
+                        f"Component '{comp_name}' text-file conflicts with "
+                        f"another generated file: {comp_text_file}"
+                    )
+                used_paths.add(comp_text_file)
+            else:
+                note_root = component_root or Path(comp_name)
+                note_path = context_dir / note_root / "notes" / note_name
             files_to_write.append((note_path, note_value))
 
         if comp_files is not None and not isinstance(comp_files, list):
@@ -1646,6 +1663,17 @@ def _validate_agent_filename(name: str) -> None:
         raise ValueError("Agent filename must be a non-empty name")
     if "/" in name or "\\" in name:
         raise ValueError("Agent filename must not contain path separators")
+
+
+def _validate_context_text_filename(name: Any) -> None:
+    if not isinstance(name, str):
+        raise ValueError("Component text-file must be a string")
+    if not name or name in {".", ".."}:
+        raise ValueError("Component text-file must be a non-empty name")
+    if "/" in name or "\\" in name:
+        raise ValueError("Component text-file must not contain path separators")
+    if name in {"manifest.yaml", "index.json"}:
+        raise ValueError(f"Component text-file uses reserved filename: {name}")
 
 
 def _validate_manifest_name(name: Any) -> None:
