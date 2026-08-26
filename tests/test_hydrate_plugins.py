@@ -292,6 +292,7 @@ def test_hydrate_embedded_resolution_targets_inherit_parent_context_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    resolved_assets: list[str] = []
 
     class _ArenaEntrypoint:
         name = "arena"
@@ -307,35 +308,25 @@ def test_hydrate_embedded_resolution_targets_inherit_parent_context_path(
             )
 
             def resolve(target: str, _context: dict[str, object]) -> list[dict]:
-                if target != "root://channel":
+                if target == "root://one":
+                    block_id = 42
+                elif target == "root://two":
+                    block_id = 43
+                else:
                     return []
                 return [
                     {
                         "source": target,
-                        "label": "entry-42.md",
-                        "content": "entry 42",
+                        "label": f"entry-{block_id}.md",
+                        "content": f"entry {block_id}",
                         "metadata": {
                             "provider": "arena",
-                            "block_id": 42,
+                            "block_id": block_id,
                             "block_type": "Link",
                             "channel_path": "channels/root",
-                            "context_subpath": "channels/root/42.md",
+                            "context_subpath": f"channels/root/{block_id}.md",
                             "source_ref": "are.na",
-                            "source_path": "channels/root/42",
-                        },
-                    },
-                    {
-                        "source": target,
-                        "label": "entry-43.md",
-                        "content": "entry 43",
-                        "metadata": {
-                            "provider": "arena",
-                            "block_id": 43,
-                            "block_type": "Link",
-                            "channel_path": "channels/root",
-                            "context_subpath": "channels/root/43.md",
-                            "source_ref": "are.na",
-                            "source_path": "channels/root/43",
+                            "source_path": f"channels/root/{block_id}",
                         },
                     },
                 ]
@@ -361,18 +352,23 @@ def test_hydrate_embedded_resolution_targets_inherit_parent_context_path(
             plugin.PLUGIN_NAME = "asset"
             plugin.PLUGIN_PRIORITY = 600
             plugin.can_resolve = lambda target, _context: target == "asset://child"
-            plugin.resolve = lambda target, _context: [
-                {
-                    "source": target,
-                    "label": "asset.md",
-                    "content": "child content",
-                    "metadata": {
-                        "context_subpath": "child.md",
-                        "source_ref": "asset",
-                        "source_path": "child",
-                    },
-                }
-            ]
+
+            def resolve(target: str, _context: dict[str, object]) -> list[dict]:
+                resolved_assets.append(target)
+                return [
+                    {
+                        "source": target,
+                        "label": "asset.md",
+                        "content": "child content",
+                        "metadata": {
+                            "context_subpath": "child.md",
+                            "source_ref": "asset",
+                            "source_path": "child",
+                        },
+                    }
+                ]
+
+            plugin.resolve = resolve
             return plugin
 
     monkeypatch.setattr(
@@ -390,7 +386,7 @@ def test_hydrate_embedded_resolution_targets_inherit_parent_context_path(
                 {
                     "name": "main",
                     "embedded-resolution": True,
-                    "files": ["root://channel"],
+                    "files": ["root://one", "root://two"],
                 }
             ],
         },
@@ -404,10 +400,11 @@ def test_hydrate_embedded_resolution_targets_inherit_parent_context_path(
         for path, content in plan.files_to_write
     ] == [
         ("channels/root/42.md", "entry 42"),
-        ("channels/root/43.md", "entry 43"),
         ("channels/root/42.asset-child.md", "child content"),
+        ("channels/root/43.md", "entry 43"),
         ("channels/root/43.asset-child.md", "child content"),
     ]
+    assert resolved_assets == ["asset://child"]
 
 
 def test_hydrate_embedded_resolution_media_targets_use_parent_sidecar(

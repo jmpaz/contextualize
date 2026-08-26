@@ -6,10 +6,16 @@ import os
 import re
 import sys
 import tempfile
-from dataclasses import dataclass
+import copy
+import threading
+from concurrent.futures import Future
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from datetime import timedelta
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from ..concurrency import media_task_semaphore, run_indexed_tasks_fail_fast
 from ..plugins.resolve import (
@@ -39,6 +45,45 @@ from .address import split_mark_address
 from .url import URLReference
 
 _EXTERNAL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+@dataclass
+class _EmbeddedResolutionSession:
+    lock: threading.Lock
+    futures: dict[tuple[Any, ...], Future[Any]]
+
+
+_EMBEDDED_RESOLUTION_SESSION: ContextVar[_EmbeddedResolutionSession | None] = (
+    ContextVar("contextualize_embedded_resolution_session", default=None)
+)
+
+
+@contextmanager
+def embedded_resolution_session() -> Iterator[None]:
+    existing = _EMBEDDED_RESOLUTION_SESSION.get()
+    if existing is not None:
+        yield
+        return
+    token = _EMBEDDED_RESOLUTION_SESSION.set(
+        _EmbeddedResolutionSession(lock=threading.Lock(), futures={})
+    )
+    try:
+        yield
+    finally:
+        _EMBEDDED_RESOLUTION_SESSION.reset(token)
+
+
+def with_embedded_resolution_session(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with embedded_resolution_session():
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
 _CONVERTIBLE_CONTENT_TYPES = frozenset(
     {
         "application/pdf",
@@ -143,6 +188,62 @@ def _apply_embedded_context(
                     clean_sidecar_stem,
                 )
     return refs
+
+
+def _clone_embedded_refs(refs: list[Any]) -> list[Any]:
+    cloned: list[Any] = []
+    for ref in refs:
+        current = copy.copy(ref)
+        if isinstance(ref, PluginReference):
+            current.document = replace(
+                ref.document,
+                metadata=dict(ref.document.metadata),
+                prose_authors=list(ref.document.prose_authors),
+            )
+        cloned.append(current)
+    return cloned
+
+
+def _freeze_embedded_cache_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(
+            (str(key), _freeze_embedded_cache_value(item))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_embedded_cache_value(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_embedded_cache_value(item) for item in value))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _run_embedded_once(key: tuple[Any, ...], resolver: Callable[[], Any]) -> Any:
+    session = _EMBEDDED_RESOLUTION_SESSION.get()
+    if session is None:
+        return resolver()
+    with session.lock:
+        future = session.futures.get(key)
+        owner = future is None
+        if future is None:
+            future = Future()
+            session.futures[key] = future
+    if owner:
+        try:
+            future.set_result(resolver())
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+    return future.result()
+
+
+def _resolve_embedded_once(
+    key: tuple[Any, ...], resolver: Callable[[], list[Any]]
+) -> list[Any]:
+    return _clone_embedded_refs(_run_embedded_once(("resolve", *key), resolver))
 
 
 def _embedded_seen_key(
@@ -638,6 +739,7 @@ def _embedded_target_from_ref(ref: Any) -> _EmbeddedResolutionTarget | None:
     return _EmbeddedResolutionTarget(target)
 
 
+@with_embedded_resolution_session
 def _resolve_embedded_resolution_refs(
     parent_refs: list[Any],
     *,
@@ -682,7 +784,7 @@ def _resolve_embedded_resolution_refs(
         (
             index,
             (
-                lambda current=node.target: _list_embedded_targets_safely(
+                lambda current=node.target: _list_embedded_targets_once(
                     current,
                     plugin_overrides=plugin_overrides,
                     use_cache=use_cache,
@@ -761,38 +863,62 @@ def _resolve_embedded_resolution_refs(
         "start",
         detail=f"targets={len(child_jobs)} jobs={media_jobs}",
     )
+    resolution_scope = (
+        format,
+        label,
+        label_suffix,
+        include_token_count,
+        token_target,
+        inject,
+        depth,
+        id(trace_collector),
+        text_only,
+        use_cache,
+        cache_ttl.total_seconds() if cache_ttl is not None else None,
+        refresh_cache,
+        _freeze_embedded_cache_value(plugin_overrides),
+        _freeze_embedded_cache_value(arena_overrides),
+        _freeze_embedded_cache_value(discord_overrides),
+        _freeze_embedded_cache_value(atproto_overrides),
+        _freeze_embedded_cache_value(soundcloud_overrides),
+        binary_policy,
+    )
     resolve_tasks = [
         (
             index,
             (
-                lambda current=child: _resolve_embedded_child_refs(
-                    current,
-                    ignore_patterns=ignore_patterns,
-                    format=format,
-                    label=label,
-                    label_suffix=label_suffix,
-                    include_token_count=include_token_count,
-                    token_target=token_target,
-                    inject=inject,
-                    depth=depth,
-                    trace_collector=trace_collector,
-                    text_only=text_only,
-                    use_cache=use_cache,
-                    cache_ttl=cache_ttl,
-                    refresh_cache=refresh_cache,
-                    plugin_overrides=plugin_overrides,
-                    arena_overrides=arena_overrides,
-                    discord_overrides=discord_overrides,
-                    atproto_overrides=atproto_overrides,
-                    soundcloud_overrides=soundcloud_overrides,
-                    binary_policy=binary_policy,
-                    seen=seen,
+                lambda current=child: _resolve_embedded_once(
+                    (current.target, *resolution_scope),
+                    lambda: _resolve_embedded_child_refs(
+                        current,
+                        ignore_patterns=ignore_patterns,
+                        format=format,
+                        label=label,
+                        label_suffix=label_suffix,
+                        include_token_count=include_token_count,
+                        token_target=token_target,
+                        inject=inject,
+                        depth=depth,
+                        trace_collector=trace_collector,
+                        text_only=text_only,
+                        use_cache=use_cache,
+                        cache_ttl=cache_ttl,
+                        refresh_cache=refresh_cache,
+                        plugin_overrides=plugin_overrides,
+                        arena_overrides=arena_overrides,
+                        discord_overrides=discord_overrides,
+                        atproto_overrides=atproto_overrides,
+                        soundcloud_overrides=soundcloud_overrides,
+                        binary_policy=binary_policy,
+                        seen=seen,
+                    ),
                 )
             ),
         )
         for index, child in child_jobs
     ]
     child_targets = {index: child.target for index, child in child_jobs}
+    children_by_index = dict(child_jobs)
 
     def _record_child_resolved(index, child_refs):
         record_progress(
@@ -804,15 +930,23 @@ def _resolve_embedded_resolution_refs(
         )
 
     resolved_total = 0
-    for _, child_refs in run_indexed_tasks_fail_fast(
+    for child_index, child_refs in run_indexed_tasks_fail_fast(
         resolve_tasks,
         max_workers=media_jobs,
         semaphore=media_task_semaphore(),
         on_complete=_record_child_resolved,
     ):
+        child = children_by_index[child_index]
+        child_refs = _apply_embedded_context(
+            child_refs,
+            context_prefix=child.context_prefix,
+            context_sidecar_stem=child.context_sidecar_stem,
+        )
         resolved_total += len(child_refs)
         refs.extend(child_refs)
-    log_progress("plugins", "embedded-resolve", "done", detail="targets", count=resolved_total)
+    log_progress(
+        "plugins", "embedded-resolve", "done", detail="targets", count=resolved_total
+    )
     return refs
 
 
@@ -843,6 +977,33 @@ def _list_embedded_targets_safely(
     return target, listed, None
 
 
+def _list_embedded_targets_once(
+    target: str,
+    *,
+    plugin_overrides: dict[str, Any],
+    use_cache: bool,
+    cache_ttl: timedelta | None,
+    refresh_cache: bool,
+) -> tuple[str, Any | None, Exception | None]:
+    return _run_embedded_once(
+        (
+            "list",
+            target,
+            use_cache,
+            cache_ttl.total_seconds() if cache_ttl is not None else None,
+            refresh_cache,
+            _freeze_embedded_cache_value(plugin_overrides),
+        ),
+        lambda: _list_embedded_targets_safely(
+            target,
+            plugin_overrides=plugin_overrides,
+            use_cache=use_cache,
+            cache_ttl=cache_ttl,
+            refresh_cache=refresh_cache,
+        ),
+    )
+
+
 def _resolve_embedded_child_refs(
     target_node: _EmbeddedResolutionTarget,
     *,
@@ -869,7 +1030,7 @@ def _resolve_embedded_child_refs(
 ) -> list[Any]:
     target = target_node.target
     try:
-        plugin_refs, plugin_claimed = resolve_plugin_references(
+        plugin_refs, _plugin_claimed = resolve_plugin_references(
             target,
             format=format,
             label=label,
@@ -890,13 +1051,8 @@ def _resolve_embedded_child_refs(
             file=sys.stderr,
         )
         plugin_refs = []
-        plugin_claimed = False
     if plugin_refs:
-        return _apply_embedded_context(
-            plugin_refs,
-            context_prefix=target_node.context_prefix,
-            context_sidecar_stem=target_node.context_sidecar_stem,
-        )
+        return plugin_refs
 
     try:
         materialized = materialize_plugin_target(
@@ -951,13 +1107,7 @@ def _resolve_embedded_child_refs(
                         binary_policy="skip" if text_only else binary_policy,
                         _embedded_resolution_seen=seen,
                     )
-                    refs.extend(
-                        _apply_embedded_context(
-                            list(result["refs"]),
-                            context_prefix=target_node.context_prefix,
-                            context_sidecar_stem=target_node.context_sidecar_stem,
-                        )
-                    )
+                    refs.extend(list(result["refs"]))
                 except Exception as exc:
                     print(
                         f"Warning: embedded resolution materialized target failed for {target}: {exc}",

@@ -24,6 +24,7 @@ from ..plugins import (
 from ..plugins.reference import PluginReference
 from ..progress import log_progress
 from ..references import URLReference, create_file_references
+from ..references.factory import with_embedded_resolution_session
 from ..references.address import format_clock_time, split_mark_address
 from ..runtime import get_payload_spec_jobs, get_refresh_cache, get_refresh_media
 from ..references.helpers import (
@@ -211,6 +212,7 @@ def apply_hydration_plan(plan: HydratePlan) -> HydrateResult:
     )
 
 
+@with_embedded_resolution_session
 def build_inline_hydration_plan(
     targets: list[str],
     *,
@@ -468,6 +470,7 @@ def build_hydration_plan(
     )
 
 
+@with_embedded_resolution_session
 def build_hydration_plan_data(
     data: dict[str, Any],
     manifest_cwd: str,
