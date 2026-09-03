@@ -2,18 +2,25 @@ from __future__ import annotations
 
 from collections import Counter
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
 import sys
 import threading
 from typing import Any
 
+
+PROGRESS_JOURNAL_ENV = "CONTEXTUALIZE_PROGRESS_JOURNAL"
 
 _CURRENT_CONTEXT: ContextVar[str | None] = ContextVar(
     "contextualize_progress_context", default=None
 )
 _EVENTS: list["ProgressEvent"] = []
 _LOCK = threading.Lock()
+_JOURNAL_HANDLE: Any = None
+_JOURNAL_FAILED = False
 _LIVE_LOCK = threading.Lock()
 _LIVE_REPORTER: "_RichProgressReporter | None" = None
 
@@ -108,9 +115,33 @@ def record_progress(
     )
     with _LOCK:
         _EVENTS.append(event)
+        _append_to_journal(event)
     reporter = _current_reporter()
     if reporter is not None:
         reporter.record(event)
+
+
+def _append_to_journal(event: "ProgressEvent") -> None:
+    global _JOURNAL_HANDLE, _JOURNAL_FAILED
+
+    if _JOURNAL_FAILED:
+        return
+    if _JOURNAL_HANDLE is None:
+        raw_path = (os.environ.get(PROGRESS_JOURNAL_ENV) or "").strip()
+        if not raw_path:
+            _JOURNAL_FAILED = True
+            return
+        try:
+            path = Path(raw_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _JOURNAL_HANDLE = path.open("a", encoding="utf-8", buffering=1)
+        except OSError:
+            _JOURNAL_FAILED = True
+            return
+    try:
+        _JOURNAL_HANDLE.write(json.dumps(asdict(event), sort_keys=True) + "\n")
+    except (OSError, TypeError, ValueError):
+        _JOURNAL_FAILED = True
 
 
 def log_progress(

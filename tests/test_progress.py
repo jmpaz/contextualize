@@ -151,3 +151,46 @@ def test_live_progress_resets_embedded_target_counts(capsys) -> None:
     assert "1/3" in captured
     assert "0/3 done=1" not in captured
     reset_progress()
+
+
+def test_progress_journal_appends_jsonl_when_configured(tmp_path, monkeypatch) -> None:
+    import json
+
+    from contextualize import progress as progress_module
+
+    journal = tmp_path / "nested" / "progress.jsonl"
+    monkeypatch.setenv("CONTEXTUALIZE_PROGRESS_JOURNAL", str(journal))
+    monkeypatch.setattr(progress_module, "_JOURNAL_HANDLE", None)
+    monkeypatch.setattr(progress_module, "_JOURNAL_FAILED", False)
+
+    reset_progress()
+    token = set_progress_context("demo")
+    try:
+        record_progress("arena", "channel", "cache_miss", target="computing", count=412)
+    finally:
+        reset_progress_context(token)
+        progress_module._JOURNAL_HANDLE = None
+
+    lines = [line for line in journal.read_text().splitlines() if line.strip()]
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["provider"] == "arena"
+    assert event["operation"] == "channel"
+    assert event["outcome"] == "cache_miss"
+    assert event["target"] == "computing"
+    assert event["count"] == 412
+    assert event["context"] == "demo"
+    assert event["timestamp"]
+
+
+def test_progress_journal_is_off_by_default(tmp_path, monkeypatch) -> None:
+    from contextualize import progress as progress_module
+
+    monkeypatch.delenv("CONTEXTUALIZE_PROGRESS_JOURNAL", raising=False)
+    monkeypatch.setattr(progress_module, "_JOURNAL_HANDLE", None)
+    monkeypatch.setattr(progress_module, "_JOURNAL_FAILED", False)
+
+    reset_progress()
+    record_progress("arena", "channel", "cache_miss")
+
+    assert list(tmp_path.iterdir()) == []
