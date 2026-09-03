@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar, copy_context
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Generator
 
 _MEDIA_SEMAPHORE_LOCK = threading.Lock()
 _MEDIA_SEMAPHORE: tuple[int, threading.BoundedSemaphore] | None = None
 _MEDIA_SEMAPHORE_DEPTH: ContextVar[int] = ContextVar(
     "contextualize_media_semaphore_depth", default=0
 )
+
+_LANES_LOCK = threading.Lock()
+_LANES: dict[str, tuple[int, threading.BoundedSemaphore]] = {}
 
 
 def run_indexed_tasks_fail_fast(
@@ -65,6 +69,33 @@ def media_task_semaphore() -> threading.BoundedSemaphore:
         if _MEDIA_SEMAPHORE is None or _MEDIA_SEMAPHORE[0] != jobs:
             _MEDIA_SEMAPHORE = (jobs, threading.BoundedSemaphore(jobs))
         return _MEDIA_SEMAPHORE[1]
+
+
+def transcription_lane() -> AbstractContextManager[None]:
+    from .runtime import get_transcription_jobs
+
+    return _lane_guard("transcription", get_transcription_jobs())
+
+
+def download_lane() -> AbstractContextManager[None]:
+    from .runtime import get_media_download_jobs
+
+    return _lane_guard("download", get_media_download_jobs())
+
+
+@contextmanager
+def _lane_guard(name: str, jobs: int) -> Generator[None]:
+    with _lane(name, jobs):
+        yield
+
+
+def _lane(name: str, jobs: int) -> threading.BoundedSemaphore:
+    with _LANES_LOCK:
+        entry = _LANES.get(name)
+        if entry is None or entry[0] != jobs:
+            entry = (jobs, threading.BoundedSemaphore(jobs))
+            _LANES[name] = entry
+        return entry[1]
 
 
 def _run_with_semaphore(

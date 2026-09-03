@@ -101,8 +101,15 @@ def test_cat_accepts_forwarded_parallel_job_options(
     captured: dict[str, int] = {}
 
     def _create_file_references(*args, **kwargs):
+        from contextualize.runtime import (
+            get_media_download_jobs,
+            get_transcription_jobs,
+        )
+
         captured["spec_jobs"] = get_payload_spec_jobs()
         captured["media_jobs"] = get_payload_media_jobs()
+        captured["transcription_jobs"] = get_transcription_jobs()
+        captured["download_jobs"] = get_media_download_jobs()
         return {
             "refs": [],
             "concatenated": "",
@@ -117,11 +124,27 @@ def test_cat_accepts_forwarded_parallel_job_options(
     runner = CliRunner()
     result = runner.invoke(
         cli.cli,
-        ["--spec-jobs", "7", "--media-jobs", "5", "cat", str(note_path)],
+        [
+            "--spec-jobs",
+            "7",
+            "--media-jobs",
+            "5",
+            "--transcription-jobs",
+            "3",
+            "--download-jobs",
+            "6",
+            "cat",
+            str(note_path),
+        ],
     )
 
     assert result.exit_code == 0
-    assert captured == {"spec_jobs": 7, "media_jobs": 5}
+    assert captured == {
+        "spec_jobs": 7,
+        "media_jobs": 5,
+        "transcription_jobs": 3,
+        "download_jobs": 6,
+    }
 
 
 def test_cat_merges_video_cli_overrides_into_file_reference_creation(

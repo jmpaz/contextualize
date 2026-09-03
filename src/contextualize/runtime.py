@@ -30,8 +30,17 @@ _PAYLOAD_MEDIA_JOBS: ContextVar[int | None] = ContextVar(
     "contextualize_payload_media_jobs", default=None
 )
 
+_TRANSCRIPTION_JOBS: ContextVar[int | None] = ContextVar(
+    "contextualize_transcription_jobs", default=None
+)
+_MEDIA_DOWNLOAD_JOBS: ContextVar[int | None] = ContextVar(
+    "contextualize_media_download_jobs", default=None
+)
+
 _DEFAULT_PAYLOAD_SPEC_JOBS = 8
 _DEFAULT_PAYLOAD_MEDIA_JOBS = 4
+_DEFAULT_TRANSCRIPTION_JOBS = 2
+_DEFAULT_MEDIA_DOWNLOAD_JOBS = 2
 _MAX_PAYLOAD_JOBS = 64
 
 
@@ -202,3 +211,47 @@ def set_payload_media_jobs(value: int | None) -> Token[int | None]:
 
 def reset_payload_media_jobs(token: Token[int | None]) -> None:
     _PAYLOAD_MEDIA_JOBS.reset(token)
+
+
+def get_transcription_jobs() -> int:
+    override = _TRANSCRIPTION_JOBS.get()
+    if override is not None:
+        return normalize_payload_jobs(override, default=_DEFAULT_TRANSCRIPTION_JOBS)
+    return _read_positive_int_env(
+        "CONTEXTUALIZE_TRANSCRIPTION_JOBS", _DEFAULT_TRANSCRIPTION_JOBS
+    )
+
+
+def set_transcription_jobs(value: int | None) -> Token[int | None]:
+    normalized = (
+        normalize_payload_jobs(value, default=_DEFAULT_TRANSCRIPTION_JOBS)
+        if value is not None
+        else None
+    )
+    return _TRANSCRIPTION_JOBS.set(normalized)
+
+
+def reset_transcription_jobs(token: Token[int | None]) -> None:
+    _TRANSCRIPTION_JOBS.reset(token)
+
+
+def get_media_download_jobs() -> int:
+    override = _MEDIA_DOWNLOAD_JOBS.get()
+    if override is not None:
+        return normalize_payload_jobs(override, default=_DEFAULT_MEDIA_DOWNLOAD_JOBS)
+    return _read_positive_int_env(
+        "CONTEXTUALIZE_MEDIA_DOWNLOAD_JOBS", _DEFAULT_MEDIA_DOWNLOAD_JOBS
+    )
+
+
+def set_media_download_jobs(value: int | None) -> Token[int | None]:
+    normalized = (
+        normalize_payload_jobs(value, default=_DEFAULT_MEDIA_DOWNLOAD_JOBS)
+        if value is not None
+        else None
+    )
+    return _MEDIA_DOWNLOAD_JOBS.set(normalized)
+
+
+def reset_media_download_jobs(token: Token[int | None]) -> None:
+    _MEDIA_DOWNLOAD_JOBS.reset(token)

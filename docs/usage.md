@@ -14,6 +14,8 @@
 - `--token-target STR` choose the encoding/model for token counting (e.g. `cl100k_base`, `gpt-4o-mini`, `claude-3-5-sonnet-20241022`)
 - `--spec-jobs N` set parallel file-spec resolution jobs; defaults to `CONTEXTUALIZE_PAYLOAD_SPEC_JOBS` or `8`
 - `--media-jobs N` set parallel embedded/media processing jobs; defaults to `CONTEXTUALIZE_PAYLOAD_MEDIA_JOBS` or `4`
+- `--transcription-jobs N` set concurrent transcription requests; defaults to `CONTEXTUALIZE_TRANSCRIPTION_JOBS` or `2`
+- `--download-jobs N` set concurrent media downloads; defaults to `CONTEXTUALIZE_MEDIA_DOWNLOAD_JOBS` or `2`
 - `-a, --after` / `-b, --before` control placement in pipelines (default: after)
 
 `--count` cannot be combined with `--copy` or `--copy-segments`.

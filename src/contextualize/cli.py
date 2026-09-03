@@ -43,6 +43,8 @@ GLOBAL_OPTION_LABELS = (
     ("codex_app_server_command", "--codex-app-server-command"),
     ("spec_jobs", "--spec-jobs"),
     ("media_jobs", "--media-jobs"),
+    ("transcription_jobs", "--transcription-jobs"),
+    ("download_jobs", "--download-jobs"),
     ("output_position", "--position"),
     ("append_flag", "--after"),
     ("prepend_flag", "--before"),
@@ -65,6 +67,8 @@ GLOBAL_OPTION_DEFAULTS = {
     "codex_app_server_command": None,
     "spec_jobs": None,
     "media_jobs": None,
+    "transcription_jobs": None,
+    "download_jobs": None,
     "output_position": None,
     "append_flag": False,
     "prepend_flag": False,
@@ -709,6 +713,24 @@ class DefaultCommandGroup(OrderedGroup):
     ),
 )
 @click.option(
+    "--transcription-jobs",
+    type=click.IntRange(1, 64),
+    default=None,
+    help=(
+        "Concurrent transcription requests. Overrides "
+        "CONTEXTUALIZE_TRANSCRIPTION_JOBS (default: 2)."
+    ),
+)
+@click.option(
+    "--download-jobs",
+    type=click.IntRange(1, 64),
+    default=None,
+    help=(
+        "Concurrent media downloads. Overrides "
+        "CONTEXTUALIZE_MEDIA_DOWNLOAD_JOBS (default: 2)."
+    ),
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Enable provider progress logs on stderr.",
@@ -748,6 +770,8 @@ def cli(
     codex_app_server_command,
     spec_jobs,
     media_jobs,
+    transcription_jobs,
+    download_jobs,
     verbose,
     quiet,
     output_position,
@@ -812,12 +836,19 @@ def cli(
 
     from .progress import reset_progress
     from .run_metadata import reset_run_metadata
-    from .runtime import set_payload_media_jobs, set_payload_spec_jobs
+    from .runtime import (
+        set_media_download_jobs,
+        set_payload_media_jobs,
+        set_payload_spec_jobs,
+        set_transcription_jobs,
+    )
 
     reset_progress()
     reset_run_metadata()
     set_payload_spec_jobs(spec_jobs)
     set_payload_media_jobs(media_jobs)
+    set_transcription_jobs(transcription_jobs)
+    set_media_download_jobs(download_jobs)
     _set_progress_logging(ctx, verbose_logging)
     ctx.call_on_close(lambda: _finish_run(ctx))
 
