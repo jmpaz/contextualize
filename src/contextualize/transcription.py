@@ -13,9 +13,11 @@ from contextualize.references.audio_transcription import (
     record_transcription_routing_summary,
 )
 from contextualize.references.audio_transcription import transcription_routing_summary
+from contextualize.references.audio_transcription import TransientTranscriptionError
 from contextualize.references.audio_transcription import _routing_cache_identity
 
 __all__ = [
+    "TransientTranscriptionError",
     "record_transcription_routing_summary",
     "transcribe_audio_bytes",
     "transcribe_audio_file",

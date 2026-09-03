@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import random
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 
 from contextualize.cache.local_media import (
@@ -33,6 +36,9 @@ from contextualize.plugins.api import (
     TranscriptionResult,
 )
 from contextualize.progress import record_progress
+
+_DEFAULT_TRANSCRIPTION_ATTEMPTS = 4
+_MAX_TRANSCRIPTION_RETRY_DELAY = 60.0
 
 _AUDIO_SUFFIX_TO_MIME: dict[str, str] = {
     ".wav": "audio/wav",
@@ -83,6 +89,10 @@ def is_media_suffix(suffix: str) -> bool:
 
 
 class CacheMissError(RuntimeError):
+    pass
+
+
+class TransientTranscriptionError(RuntimeError):
     pass
 
 
@@ -444,6 +454,7 @@ def _transcribe_audio_bytes(
 
     cache_only = get_cache_only()
     errors: list[str] = []
+    transient_errors: list[str] = []
     _log(
         "transcription routing "
         f"filename={filename} provider={explicit_provider or 'auto'} "
@@ -483,7 +494,7 @@ def _transcribe_audio_bytes(
                 "start",
                 target=filename,
             )
-            result = provider.transcribe(request)
+            result = _transcribe_with_retry(provider, request, filename=filename)
             _log(
                 "transcription request finished "
                 f"for {filename} via {provider.name} model={result.model}"
@@ -504,6 +515,29 @@ def _transcribe_audio_bytes(
                 raise RuntimeError(str(exc)) from exc
             errors.append(str(exc))
             continue
+        except TransientTranscriptionError as exc:
+            if cache_identity and use_cache and should_refresh:
+                cached_result = _read_stale_transcription_result_after_error(
+                    cache_identity,
+                    provider=provider,
+                    request=request,
+                    filename=filename,
+                    error=exc,
+                )
+                if cached_result is not None:
+                    return cached_result
+            record_progress(
+                provider.name,
+                "transcription",
+                "failed",
+                target=filename,
+                detail=str(exc),
+            )
+            if explicit_provider:
+                raise
+            transient_errors.append(str(exc))
+            errors.append(str(exc))
+            continue
         except TranscriptionProviderError as exc:
             if cache_identity and use_cache and should_refresh:
                 cached_result = _read_stale_transcription_result_after_error(
@@ -515,6 +549,13 @@ def _transcribe_audio_bytes(
                 )
                 if cached_result is not None:
                     return cached_result
+            record_progress(
+                provider.name,
+                "transcription",
+                "failed",
+                target=filename,
+                detail=str(exc),
+            )
             raise RuntimeError(str(exc)) from exc
 
         if cache_identity and use_cache and result.text.strip():
@@ -535,6 +576,8 @@ def _transcribe_audio_bytes(
     if cache_only:
         raise CacheMissError(f"No cached transcript for audio: {filename}")
     if errors:
+        if transient_errors and len(transient_errors) == len(errors):
+            raise TransientTranscriptionError("; ".join(errors))
         raise RuntimeError("; ".join(errors))
     raise RuntimeError("No transcription providers could handle the media input")
 
@@ -954,7 +997,69 @@ def _read_stale_transcription_result_after_error(
     return cached_result
 
 
+def _transcription_max_attempts() -> int:
+    raw = (os.environ.get("CONTEXTUALIZE_TRANSCRIPTION_MAX_ATTEMPTS") or "").strip()
+    if not raw:
+        return _DEFAULT_TRANSCRIPTION_ATTEMPTS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _DEFAULT_TRANSCRIPTION_ATTEMPTS
+
+
+def _transcription_retry_delay(attempt: int, *, retry_after: float | None) -> float:
+    if retry_after is not None:
+        return min(retry_after, _MAX_TRANSCRIPTION_RETRY_DELAY)
+    base = min(_MAX_TRANSCRIPTION_RETRY_DELAY, 2.0 ** max(0, attempt - 1))
+    return random.uniform(base / 2, base)
+
+
+def _transcribe_with_retry(provider, request, *, filename: str):
+    from ..concurrency import transcription_lane
+
+    max_attempts = _transcription_max_attempts()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with transcription_lane():
+                return provider.transcribe(request)
+        except (
+            TranscriptionProviderUnavailableError,
+            TranscriptionProviderUnsupportedError,
+            TranscriptionProviderAuthError,
+        ):
+            raise
+        except TranscriptionProviderError as exc:
+            if not _is_retryable_transcription_error(exc):
+                raise
+            if attempt >= max_attempts:
+                raise TransientTranscriptionError(str(exc)) from exc
+            wait = _transcription_retry_delay(attempt, retry_after=exc.retry_after)
+            _log(
+                f"transcription retry {attempt}/{max_attempts - 1} for {filename} "
+                f"via {provider.name} in {wait:.1f}s: {exc}"
+            )
+            record_progress(
+                provider.name,
+                "transcription",
+                "retry",
+                target=filename,
+                detail=f"status={exc.status_code}",
+            )
+            time.sleep(wait)
+    raise TransientTranscriptionError(f"transcription exhausted retries for {filename}")
+
+
+def _is_retryable_transcription_error(error: TranscriptionProviderError) -> bool:
+    retryable = getattr(error, "retryable", None)
+    if isinstance(retryable, bool):
+        return retryable
+    return _is_transient_transcription_error(error)
+
+
 def _is_transient_transcription_error(error: TranscriptionProviderError) -> bool:
+    retryable = getattr(error, "retryable", None)
+    if isinstance(retryable, bool) and retryable:
+        return True
     msg = str(error).lower()
     return any(
         token in msg
