@@ -183,3 +183,46 @@ def test_all_candidates_transient_raises_transient_error(
         transcribe_audio_bytes(
             b"audio", filename="clip.mp3", content_type="audio/mpeg"
         )
+
+
+def test_later_hard_failure_keeps_transient_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audio_transcription.time, "sleep", lambda _seconds: None)
+    monkeypatch.setenv("CONTEXTUALIZE_TRANSCRIPTION_MAX_ATTEMPTS", "1")
+
+    def _busy(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise TranscriptionProviderError(
+            "queue is full", retryable=True, status_code=429
+        )
+
+    def _broken(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise TranscriptionProviderError("returned no text")
+
+    monkeypatch.setattr(
+        audio_transcription,
+        "loaded_transcription_providers",
+        lambda: [_provider("busy", _busy), _provider("broken", _broken)],
+    )
+
+    with pytest.raises(TransientTranscriptionError):
+        transcribe_audio_bytes(
+            b"audio", filename="clip.mp3", content_type="audio/mpeg"
+        )
+
+
+def test_all_hard_failures_stay_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _broken(_request: TranscriptionRequest) -> TranscriptionResult:
+        raise TranscriptionProviderError("returned no text")
+
+    monkeypatch.setattr(
+        audio_transcription,
+        "loaded_transcription_providers",
+        lambda: [_provider("broken", _broken), _provider("also-broken", _broken)],
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        transcribe_audio_bytes(
+            b"audio", filename="clip.mp3", content_type="audio/mpeg"
+        )
+    assert not isinstance(excinfo.value, TransientTranscriptionError)

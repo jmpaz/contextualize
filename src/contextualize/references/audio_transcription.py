@@ -556,7 +556,10 @@ def _transcribe_audio_bytes(
                 target=filename,
                 detail=str(exc),
             )
-            raise RuntimeError(str(exc)) from exc
+            if explicit_provider:
+                raise RuntimeError(str(exc)) from exc
+            errors.append(str(exc))
+            continue
 
         if cache_identity and use_cache and result.text.strip():
             store_local_media_transcript_result(
@@ -576,7 +579,7 @@ def _transcribe_audio_bytes(
     if cache_only:
         raise CacheMissError(f"No cached transcript for audio: {filename}")
     if errors:
-        if transient_errors and len(transient_errors) == len(errors):
+        if transient_errors:
             raise TransientTranscriptionError("; ".join(errors))
         raise RuntimeError("; ".join(errors))
     raise RuntimeError("No transcription providers could handle the media input")
