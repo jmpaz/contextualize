@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from contextualize import cli
 from contextualize.manifest.edition import (
     AUTHORED_EDITION_SCHEMA_VERSION,
+    AuthoredPortal,
     compile_authored_manifest,
     compile_authored_registry,
 )
@@ -961,3 +962,35 @@ def test_manifest_cli_rejects_registry_selection(tmp_path: Path) -> None:
     )
     assert result.exit_code != 0
     assert "--manifest cannot be combined" in result.output
+
+
+def test_portal_reverse_omits_absent_line_bounds() -> None:
+    portal = AuthoredPortal(
+        id="ctx://authored-portal/alpha@one/root/target",
+        stable_id="ctx://authored-portal/alpha/root/target",
+        key="root/target",
+        position_id="ctx://context/alpha@one/position/root",
+        position_stable_id="ctx://context/alpha/position/root",
+        position_locators=("alpha",),
+        role="material",
+        order=0,
+        disabled=False,
+        authored_target="notes.md",
+        target_aliases=("notes.md",),
+        target_position_id=None,
+        source_path="manifest.yaml",
+        line_start=None,
+        line_end=None,
+        comment=None,
+        inline_comment=None,
+        options={},
+        ranges=(),
+        dynamic=None,
+        status="resolved",
+    ).to_dict()
+
+    assert "lineStart" not in portal
+    assert "lineEnd" not in portal
+    assert "lineStart" not in portal["reverse"]
+    assert "lineEnd" not in portal["reverse"]
+    assert None not in portal["reverse"].values()

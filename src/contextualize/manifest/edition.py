@@ -156,16 +156,18 @@ class AuthoredPortal:
                 "authoredTarget": self.authored_target,
                 "targetAliases": list(self.target_aliases),
                 "targetPositionId": self.target_position_id,
-                "reverse": {
-                    "positionId": self.position_id,
-                    "positionStableId": self.position_stable_id,
-                    "positionLocators": list(self.position_locators),
-                    "sourcePath": self.source_path,
-                    "lineStart": self.line_start,
-                    "lineEnd": self.line_end,
-                    "role": self.role,
-                    "order": self.order,
-                },
+                "reverse": _omit_none(
+                    {
+                        "positionId": self.position_id,
+                        "positionStableId": self.position_stable_id,
+                        "positionLocators": list(self.position_locators),
+                        "sourcePath": self.source_path,
+                        "lineStart": self.line_start,
+                        "lineEnd": self.line_end,
+                        "role": self.role,
+                        "order": self.order,
+                    }
+                ),
                 "sourcePath": self.source_path,
                 "lineStart": self.line_start,
                 "lineEnd": self.line_end,
