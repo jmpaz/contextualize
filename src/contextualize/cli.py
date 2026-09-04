@@ -921,11 +921,23 @@ def _use_default_cat_progress(ctx, *, trace: bool, json_output: bool) -> None:
         _set_progress_logging(ctx, True)
 
 
+def _echo_result(ctx, message: str) -> None:
+    from .progress import live_progress_active
+
+    if live_progress_active():
+        ctx.obj.setdefault("result_messages", []).append(message)
+    else:
+        click.echo(message)
+
+
 def _finish_run(ctx) -> None:
     from .progress import flush_progress_summary, set_live_progress
 
     set_live_progress(False)
     flush_progress_summary(enabled=bool(ctx.obj.get("verbose_logging")))
+    for message in ctx.obj.get("result_messages", ()):
+        click.echo(message)
+    ctx.obj["result_messages"] = []
     try:
         from .render.codex import close_shared_codex_app_server_sessions
 
@@ -1051,7 +1063,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         if trace_output:
             click.echo(trace_output)
             click.echo("\n-----\n")
-        click.echo(f"Wrote {token_count} tokens ({token_method}) to {write_file}")
+        _echo_result(ctx, f"Wrote {token_count} tokens ({token_method}) to {write_file}")
     elif copy_segments:
         from .utils import build_segment, segment_output, wait_for_enter
 
@@ -1165,7 +1177,7 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
         if trace_output:
             click.echo(trace_output)
             click.echo("\n-----\n")
-        click.echo(f"Total: {token_count} tokens ({token_method}).")
+        _echo_result(ctx, f"Total: {token_count} tokens ({token_method}).")
     elif copy_flag:
         try:
             if staged_copy:
@@ -1214,8 +1226,9 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
                 if trace_output:
                     click.echo(trace_output)
                     click.echo("\n-----\n")
-                click.echo(
-                    f"Copied {token_count} tokens ({token_method}) to clipboard."
+                _echo_result(
+                    ctx,
+                    f"Copied {token_count} tokens ({token_method}) to clipboard.",
                 )
         except Exception as e:
             click.echo(f"Error copying to clipboard: {e}", err=True)

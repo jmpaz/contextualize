@@ -89,3 +89,30 @@ def test_cat_quiet_suppresses_copy_progress_default(
 
     assert result.exit_code == 0
     assert captured["verbose"] is False
+
+
+def test_result_message_survives_live_progress(capsys) -> None:
+    import click
+
+    from contextualize import cli as cli_module
+    from contextualize.progress import (
+        live_progress_active,
+        reset_progress,
+        set_live_progress,
+    )
+
+    ctx = click.Context(cli_module.cli)
+    ctx.obj = {"verbose_logging": False}
+
+    reset_progress()
+    set_live_progress(True, force_terminal=True, transient=False)
+    try:
+        assert live_progress_active()
+        cli_module._echo_result(ctx, "Copied 20488 tokens (cl100k_base) to clipboard.")
+        assert "Copied" not in capsys.readouterr().out
+        cli_module._finish_run(ctx)
+    finally:
+        set_live_progress(False)
+        reset_progress()
+
+    assert "Copied 20488 tokens (cl100k_base) to clipboard." in capsys.readouterr().out
