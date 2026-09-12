@@ -58,6 +58,21 @@ items shaped like:
 }
 ```
 
+`contextualize cat --list --json TARGET...` preserves these envelopes in a
+`listings` array, one entry per expanded input target. Each entry adds `source`
+(the input target) and `provider` (the plugin name), alongside `targets`,
+`summary`, `pagination`, `metadata`, and `capabilities`. Optional envelope fields
+may be `null`. Item labels, kinds, traversal flags, and metadata remain intact;
+results from different inputs are not flattened together.
+
+The JSON object also contains `content`, the plain Markdown listing, and
+`selectors`, any contextualize selector provenance. Without `--json`, `--list`
+still prints deduplicated target references only. Use the structured envelope
+when continuation cursors, scan bounds, or other provider metadata matter:
+an empty `targets` array can still have more results available according to its
+`pagination` and provider summary. Git listings use the same JSON structure
+with `provider: "git"`.
+
 Callers may pass `list_limit` and `list_offset` through plugin context. The
 core plugin resolver applies that page window to the normalized envelope and
 adds `offset`, `limit`, `returned`, `totalCount`, `hasMore`, and `nextOffset`

@@ -2897,6 +2897,7 @@ def cat_cmd(
         if use_rev:
             raise click.ClickException("--list does not support --rev")
         listing_targets: list[str] = []
+        listing_envelopes: list[dict] = []
         unsupported: list[str] = []
         for p in expanded_all_paths:
             tgt = parse_git_target(p)
@@ -2906,9 +2907,21 @@ def cat_cmd(
                     pull=effective_git_pull,
                     reclone=git_reclone,
                 )
-                add_listing_targets(
-                    listing_targets,
-                    [item.target for item in list_git_target_refs(tgt, repo_dir)],
+                git_items = list_git_target_refs(tgt, repo_dir)
+                add_listing_targets(listing_targets, [item.target for item in git_items])
+                listing_envelopes.append(
+                    {
+                        "source": p,
+                        "provider": "git",
+                        "targets": [
+                            {"target": item.target, "label": item.path}
+                            for item in git_items
+                        ],
+                        "summary": {"targetCount": len(git_items)},
+                        "pagination": None,
+                        "metadata": {},
+                        "capabilities": {"listTargets": True},
+                    }
                 )
                 continue
 
@@ -2917,6 +2930,17 @@ def cat_cmd(
                 add_listing_targets(
                     listing_targets,
                     [item["target"] for item in plugin_result.items],
+                )
+                listing_envelopes.append(
+                    {
+                        "source": p,
+                        "provider": plugin_result.plugin_name,
+                        "targets": list(plugin_result.items),
+                        "summary": plugin_result.summary,
+                        "pagination": plugin_result.pagination,
+                        "metadata": plugin_result.metadata,
+                        "capabilities": plugin_result.capabilities,
+                    }
                 )
                 continue
             if plugin_result.matched and plugin_result.plugin_name:
@@ -2930,7 +2954,20 @@ def cat_cmd(
                 "Listing is only supported for git targets and plugins with list_targets: "
                 + ", ".join(unsupported)
             )
-        return render_listing_targets(listing_targets)
+        rendered_listing = render_listing_targets(listing_targets)
+        if json_output:
+            click.echo(
+                json.dumps(
+                    {
+                        "content": rendered_listing,
+                        "selectors": selector_cat_results,
+                        "listings": listing_envelopes,
+                    },
+                    indent=2,
+                )
+            )
+            ctx.exit()
+        return rendered_listing
 
     for p in expanded_all_paths:
         if p.startswith("http://") or p.startswith("https://"):

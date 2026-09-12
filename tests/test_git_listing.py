@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from contextualize import cli
@@ -92,8 +94,9 @@ def test_list_git_target_refs_supports_file_directory_glob_and_revision(
     ] == ["https://example.com/org/repo@main:docs/guide.md"]
 
 
+@pytest.mark.parametrize("json_output", [False, True])
 def test_cat_list_routes_git_targets_without_reading_content(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, json_output: bool
 ) -> None:
     from contextualize.plugins import clear_loaded_plugins_cache
     from contextualize.plugins import loader as plugin_loader
@@ -124,11 +127,26 @@ def test_cat_list_routes_git_targets_without_reading_content(
 
     result = CliRunner().invoke(
         cli.cli,
-        ["cat", "--list", "https://github.com/octocat/Hello-World"],
+        [
+            "cat",
+            "--list",
+            *(["--json"] if json_output else []),
+            "https://github.com/octocat/Hello-World",
+        ],
     )
 
     assert result.exit_code == 0
-    assert result.output == (
-        "- `https://github.com/octocat/Hello-World:README.md`\n"
-        "- `https://github.com/octocat/Hello-World:src/lib.py`\n"
-    )
+    plain = "- `https://github.com/octocat/Hello-World:README.md`\n- `https://github.com/octocat/Hello-World:src/lib.py`"
+    if json_output:
+        payload = json.loads(result.output)
+        assert payload["content"] == plain
+        assert (
+            payload["listings"][0]["source"] == "https://github.com/octocat/Hello-World"
+        )
+        assert payload["listings"][0]["provider"] == "git"
+        assert payload["listings"][0]["targets"][1] == {
+            "target": "https://github.com/octocat/Hello-World:src/lib.py",
+            "label": "src/lib.py",
+        }
+    else:
+        assert result.output == plain + "\n"

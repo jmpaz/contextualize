@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import types
 from pathlib import Path
 
@@ -280,3 +281,76 @@ def test_classify_plugin_target_passes_inspection_context(
     assert captured["use_cache"] is False
     assert captured["refresh_cache"] is True
     assert captured["overrides"] == {"demo-list": {"mode": "inspect"}}
+
+
+def test_cat_list_json_preserves_each_provider_envelope(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        plugin_loader,
+        "_iter_plugin_entrypoints",
+        lambda: [_entrypoint(include_list_targets=True)],
+    )
+    clear_loaded_plugins_cache()
+    result = CliRunner().invoke(
+        cli.cli, ["cat", "--list", "--json", "demo://root", "demo://second"]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["content"] == "- `demo://root/a.md`\n- `demo://root/b.md`"
+    assert [item["selector"] for item in payload["selectors"]] == ["demo://root", "demo://second"]
+    assert [listing["source"] for listing in payload["listings"]] == [
+        "demo://root",
+        "demo://second",
+    ]
+    for listing in payload["listings"]:
+        assert listing["provider"] == "demo-list"
+        assert listing["targets"][1]["traverse"] is False
+        assert listing["targets"][1]["kind"] == "channel"
+        assert listing["summary"] == {"title": "Demo root"}
+        assert listing["pagination"] == {"returned": 2, "hasMore": False}
+        assert listing["metadata"] == {"shape": "envelope"}
+        assert listing["capabilities"] == {"materialize": False}
+
+
+def test_cat_list_json_preserves_empty_page_continuation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class EntryPoint:
+        name = "empty-page"
+        value = "empty_page:plugin"
+
+        def load(self):
+            return types.SimpleNamespace(
+                PLUGIN_API_VERSION="1",
+                PLUGIN_NAME="empty-page",
+                PLUGIN_PRIORITY=500,
+                can_resolve=lambda target, context: target.startswith("empty://"),
+                resolve=lambda target, context: [],
+                list_targets=lambda target, context: {
+                    "targets": [],
+                    "summary": {"scanned": 25, "next_target": "empty://next"},
+                    "pagination": {
+                        "returned": 0,
+                        "hasMore": True,
+                        "nextTarget": "empty://next",
+                    },
+                    "metadata": {"scan_limit_reached": True},
+                    "capabilities": {"listTargets": True},
+                },
+            )
+
+    monkeypatch.setattr(
+        plugin_loader, "_iter_plugin_entrypoints", lambda: [EntryPoint()]
+    )
+    clear_loaded_plugins_cache()
+    result = CliRunner().invoke(cli.cli, ["cat", "--list", "--json", "empty://root"])
+    assert result.exit_code == 0, result.output
+    listing = json.loads(result.output)["listings"][0]
+    assert listing["targets"] == []
+    assert listing["pagination"]["hasMore"] is True
+    assert listing["summary"]["next_target"] == "empty://next"
+    assert listing["metadata"]["scan_limit_reached"] is True
