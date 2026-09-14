@@ -2,9 +2,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from contextualize import cli
+
+
+def _complete(line: str) -> str:
+    result = CliRunner().invoke(
+        cli.cli,
+        [],
+        prog_name="contextualize",
+        env={
+            "_CONTEXTUALIZE_COMPLETE": "fish_complete",
+            "COMP_WORDS": line,
+            "COMP_CWORD": line.rsplit(" ", 1)[-1],
+        },
+    )
+    assert result.exit_code == 0
+    return result.output
 
 
 def test_implicit_cat_matches_explicit_cat() -> None:
@@ -74,3 +90,39 @@ def test_prompt_only_mode_preserved_without_path() -> None:
 
     assert result.exit_code == 0
     assert "just a prompt" in result.output
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "contextualize --copy cat docs/us",
+        "contextualize docs/us",
+        "contextualize README.md docs/us",
+        "contextualize map docs/us",
+        "contextualize hydrate docs/us",
+        "contextualize cat docs/{usage,us",
+    ],
+)
+def test_target_arguments_complete_as_file_paths(line: str) -> None:
+    incomplete = line.rsplit(" ", 1)[-1]
+    assert f"file,{incomplete}" in _complete(line)
+
+
+def test_root_completion_keeps_subcommands_and_options() -> None:
+    assert "plain,cat" in _complete("contextualize ca")
+
+    options = _complete("contextualize --cop")
+    assert "plain,--copy" in options
+    assert "file," not in options
+
+
+def test_fish_script_keeps_commas_in_completion_values() -> None:
+    result = CliRunner().invoke(
+        cli.cli,
+        [],
+        prog_name="contextualize",
+        env={"_CONTEXTUALIZE_COMPLETE": "fish_source"},
+    )
+
+    assert result.exit_code == 0
+    assert 'string split -m 1 ","' in result.output

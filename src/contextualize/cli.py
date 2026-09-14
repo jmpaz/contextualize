@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 import click
 from click.formatting import term_len
+from click.shell_completion import CompletionItem, FishComplete, add_completion_class
 
 from .clipboard import copy_to_clipboard, paste_from_clipboard
 from .render.text import process_text
@@ -561,6 +562,20 @@ def _forward_root_options(args, sub_idx, all_opts, value_opts):
     return args[:sub_idx] + to_move + [args[sub_idx]] + remaining
 
 
+@add_completion_class
+class _FishComplete(FishComplete):
+    """Click's fish script splits each completion on every comma, truncating
+    values such as brace expansions (``{a,b``); split only on the type separator."""
+
+    source_template = FishComplete.source_template.replace(
+        'string split ","', 'string split -m 1 ","'
+    )
+
+
+def _complete_paths(ctx, param, incomplete):
+    return [CompletionItem(incomplete, type="file")]
+
+
 DEFAULT_COMMAND = "cat"
 
 
@@ -597,6 +612,12 @@ class DefaultCommandGroup(OrderedGroup):
             args = [DEFAULT_COMMAND, *args]
             sub_idx = 0
         return _forward_root_options(args, sub_idx, all_opts, value_opts)
+
+    def shell_complete(self, ctx, incomplete):
+        items = super().shell_complete(ctx, incomplete)
+        if incomplete.startswith("-"):
+            return items
+        return [*items, *_complete_paths(ctx, None, incomplete)]
 
 
 @click.group(
@@ -1728,8 +1749,6 @@ def _context_hydrate_overrides(
 
 
 def _complete_context_names(ctx, param, incomplete):
-    from click.shell_completion import CompletionItem
-
     try:
         from .manifest.contexts import load_context_registry
 
@@ -2111,7 +2130,7 @@ def contexts_hydrate_cmd(
 
 
 @cli.command("hydrate", cls=PluginGroupedCommand)
-@click.argument("paths", nargs=-1, type=str)
+@click.argument("paths", nargs=-1, type=str, shell_complete=_complete_paths)
 @click.option(
     "--dir",
     "context_dir",
@@ -2505,7 +2524,7 @@ def hydrate_cmd(
 
 
 @cli.command("cat", cls=PluginGroupedCommand)
-@click.argument("paths", nargs=-1, type=str)
+@click.argument("paths", nargs=-1, type=str, shell_complete=_complete_paths)
 @click.option("--ignore", multiple=True, help="File(s) to ignore")
 @click.option("-f", "--format", default="md", help="Output format (md/xml/shell/raw)")
 @click.option(
@@ -3422,7 +3441,7 @@ def paste_cmd(ctx, count, format_hint, annotate_tokens):
 
 
 @cli.command("map")
-@click.argument("paths", nargs=-1, type=str)
+@click.argument("paths", nargs=-1, type=str, shell_complete=_complete_paths)
 @click.option(
     "-t",
     "--max-tokens",

@@ -229,7 +229,7 @@ _CONTEXTUALIZE_COMPLETE=zsh_source contextualize > ~/.zfunc/_contextualize
 _CONTEXTUALIZE_COMPLETE=fish_source contextualize > ~/.config/fish/completions/contextualize.fish
 ```
 
-Context registry commands complete live context names, including tag-discovered contexts, for `contextualize contexts hydrate <TAB>`.
+Target arguments to `cat` (including the implicit `contextualize <path>` form), `map`, and `hydrate` complete file paths. Context registry commands complete live context names, including tag-discovered contexts, for `contextualize contexts hydrate <TAB>`.
 
 ### content injection
 
