@@ -7,6 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from contextualize import cli
+from contextualize.clipboard import ClipboardDelivery
 from contextualize.plugins import clear_loaded_plugins_cache
 from contextualize.plugins import loader as plugin_loader
 from contextualize.runtime import get_verbose_logging
@@ -44,7 +45,10 @@ def _invoke_cat(monkeypatch, tmp_path: Path, args: list[str]):
     monkeypatch.setattr(
         "contextualize.references.create_file_references", _create_file_references
     )
-    monkeypatch.setattr("contextualize.cli.copy_to_clipboard", lambda _text: None)
+    monkeypatch.setattr(
+        "contextualize.cli.copy_to_clipboard",
+        lambda _text: ClipboardDelivery("pbcopy", confirmed=True),
+    )
 
     result = CliRunner().invoke(cli.cli, [*args, str(note_path)])
     return result, captured

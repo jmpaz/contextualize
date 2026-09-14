@@ -24,9 +24,21 @@
 
 Hydration commands enable progress output by default. Use `contextualize hydrate --quiet ...` or `contextualize contexts hydrate --quiet ...` to suppress the live progress display and summary.
 
-`--copy` uses the local clipboard when available and automatically prefers OSC52 when running over SSH or inside tmux. Set `CONTEXTUALIZE_CLIPBOARD=osc52` to force OSC52, `CONTEXTUALIZE_CLIPBOARD=pyperclip` to force the local clipboard backend, or leave it unset for auto-detection.
+The copy modes (`--copy`, `--copy-segments`, `--staged-copy`) pick a clipboard route from the session:
 
-For tmux, `contextualize` first tries `tmux load-buffer -w -`, then falls back to a tmux-wrapped OSC52 sequence. The outer terminal must allow clipboard writes; if tmux does not forward them, add `set -g set-clipboard on` to tmux config and ensure the terminal app allows OSC52 clipboard access.
+- **Local:** the native clipboard — `pbcopy` on macOS, `wl-copy` on Wayland, otherwise pyperclip (X11, Windows, WSL). Every copy is read back, so `Copied … to clipboard` means the clipboard holds the output. If a native clipboard exists but the copy fails or reads back different content, the command fails; OSC52 is used only when no native clipboard is available.
+- **SSH** (`SSH_TTY` or `SSH_CONNECTION` set): OSC52 to your terminal, since the remote host's own clipboard is not the one you paste from.
+- **tmux**, local or remote: `tmux load-buffer -w -` first, then a tmux-wrapped OSC52 sequence.
+
+Terminals do not acknowledge OSC52, so these sends report `Sent … to your terminal via OSC52` (or `via tmux`) instead of `Copied`, and keep a copy of the output. The terminal must allow clipboard writes and may cap how much it accepts; if tmux does not forward them, add `set -g set-clipboard on` to tmux config and ensure the terminal app allows OSC52 clipboard access.
+
+If a copy fails, or a staged or segmented copy is interrupted, the command exits with status 1 and saves the full output. The same file keeps the output of unconfirmed sends: `$XDG_STATE_HOME/contextualize/clipboard/unconfirmed.txt` (default `~/.local/state/contextualize/clipboard/unconfirmed.txt`), readable only by you and replaced each time. Copy it again without repeating the extraction:
+
+```bash
+contextualize --copy < ~/.local/state/contextualize/clipboard/unconfirmed.txt
+```
+
+Set `CONTEXTUALIZE_CLIPBOARD=native` or `CONTEXTUALIZE_CLIPBOARD=osc52` to force a route, or leave it unset (`auto`); `pyperclip` is accepted as an older name for `native`. Forcing `native` gives verified copies inside a local tmux session, and over SSH it targets the remote host's clipboard.
 
 these flags can be combined with any command:
 

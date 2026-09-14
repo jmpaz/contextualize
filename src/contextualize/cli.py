@@ -11,7 +11,13 @@ import click
 from click.formatting import term_len
 from click.shell_completion import CompletionItem, FishComplete, add_completion_class
 
-from .clipboard import copy_to_clipboard, paste_from_clipboard
+from .clipboard import (
+    ClipboardDelivery,
+    ClipboardError,
+    copy_to_clipboard,
+    paste_from_clipboard,
+    save_unconfirmed_output,
+)
 from .render.text import process_text
 from .utils import add_prompt_wrappers, count_tokens, wrap_text
 
@@ -967,6 +973,49 @@ def _finish_run(ctx) -> None:
         pass
 
 
+class _CopySession:
+    def __init__(self, ctx, full_output: str) -> None:
+        self._ctx = ctx
+        self._full_output = full_output
+        self._deliveries: list[ClipboardDelivery] = []
+
+    def copy(self, text: str, stage: str) -> ClipboardDelivery:
+        try:
+            delivery = copy_to_clipboard(text)
+        except ClipboardError as exc:
+            raise self._failure(f"Could not copy {stage} to clipboard: {exc}") from exc
+        self._deliveries.append(delivery)
+        return delivery
+
+    def wait_before(self, next_stage: str) -> None:
+        from .utils import wait_for_enter
+
+        if not wait_for_enter():
+            click.echo(err=True)
+            raise self._failure(f"Copying interrupted before {next_stage}.")
+
+    def finish(self) -> None:
+        if all(delivery.confirmed for delivery in self._deliveries):
+            return
+        try:
+            path = save_unconfirmed_output(self._full_output)
+        except OSError as exc:
+            _echo_result(self._ctx, f"Could not keep a copy of the output: {exc}")
+            return
+        _echo_result(self._ctx, f"Kept a copy at {path}.")
+
+    def _failure(self, reason: str) -> click.ClickException:
+        try:
+            path = save_unconfirmed_output(self._full_output)
+        except OSError as exc:
+            click.echo(self._full_output)
+            return click.ClickException(
+                f"{reason}\nCould not save the output ({exc}); "
+                "printed it to stdout instead."
+            )
+        return click.ClickException(f"{reason}\nFull output saved to {path}")
+
+
 @cli.result_callback()
 @click.pass_context
 def process_output(ctx, subcommand_output, *args, **kwargs):
@@ -1086,173 +1135,145 @@ def process_output(ctx, subcommand_output, *args, **kwargs):
             click.echo("\n-----\n")
         _echo_result(ctx, f"Wrote {token_count} tokens ({token_method}) to {write_file}")
     elif copy_segments:
-        from .utils import build_segment, segment_output, wait_for_enter
+        from .utils import build_segment, segment_output
 
-        try:
-            if staged_copy:
-                content_text = raw_text if raw_text else content_output
-                segment_format = ctx.obj.get("format", "md")
-                segments = segment_output(
-                    content_text, copy_segments, segment_format, token_target
-                )
+        session = _CopySession(ctx, final_output)
+        if staged_copy:
+            content_text = raw_text if raw_text else content_output
+            segment_format = ctx.obj.get("format", "md")
+            segments = segment_output(
+                content_text, copy_segments, segment_format, token_target
+            )
 
-                stages_present = (
-                    int(bool(before_prompt))
-                    + int(bool(segments))
-                    + int(bool(after_prompt))
-                )
-                if stages_present == 0:
-                    click.echo("No content to copy.", err=True)
-                    return
+            stages_present = (
+                int(bool(before_prompt))
+                + int(bool(segments))
+                + int(bool(after_prompt))
+            )
+            if stages_present == 0:
+                click.echo("No content to copy.", err=True)
+                return
 
-                def maybe_wait(next_label: str) -> bool:
-                    click.echo(
-                        f" Press Enter to copy {next_label}...",
-                        nl=False,
-                    )
-                    if not wait_for_enter():
-                        click.echo("\nCopying interrupted.", err=True)
-                        return False
-                    return True
+            def prompt_before(next_label: str) -> None:
+                click.echo(f" Press Enter to copy {next_label}...", nl=False)
+                session.wait_before(next_label)
 
-                if before_prompt:
-                    copy_to_clipboard(before_prompt)
-                    if segments or after_prompt:
-                        click.echo("Copied preprompt to clipboard.", nl=False)
-                        if not maybe_wait("content"):
-                            return
-                    else:
-                        click.echo("Copied preprompt to clipboard.")
-
-                if segments:
-                    for i, (segment_text, _) in enumerate(segments, 1):
-                        copied_segment = wrap_text(segment_text, ctx.obj["wrap_mode"])
-                        copy_to_clipboard(copied_segment)
-                        tokens = count_tokens(copied_segment, target=token_target)[
-                            "count"
-                        ]
-                        is_last_segment = i == len(segments)
-                        msg = f"({i}/{len(segments)}) Copied content segment ({tokens} tokens) to clipboard"
-                        if not is_last_segment:
-                            click.echo(msg + "...", nl=False)
-                            if not wait_for_enter():
-                                click.echo("\nCopying interrupted.", err=True)
-                                return
-                        elif after_prompt:
-                            click.echo(msg + ".", nl=False)
-                            if not maybe_wait("postprompt"):
-                                return
-                        else:
-                            click.echo(msg + ".")
-
-                if after_prompt:
-                    copy_to_clipboard(after_prompt)
-                    click.echo("Copied postprompt to clipboard.")
-            else:
-                segments = segment_output(
-                    raw_text, copy_segments, ctx.obj.get("format", "md"), token_target
-                )
-                if not segments:
-                    click.echo("No content to copy.", err=True)
-                    return
-
-                for i, (segment_text, _) in enumerate(segments, 1):
-                    final_segment = build_segment(
-                        segment_text,
-                        ctx.obj["wrap_mode"],
-                        [] if prompt_only else prompts,
-                        ctx.obj["output_pos"],
-                        i,
-                        len(segments),
-                    )
-
-                    copy_to_clipboard(final_segment)
-                    tokens = count_tokens(final_segment, target=token_target)["count"]
-
-                    if i == 1:
-                        msg = f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard ({token_method})"
-                    else:
-                        msg = (
-                            f"({i}/{len(segments)}) Copied {tokens} tokens to clipboard"
-                        )
-
-                    if i < len(segments):
-                        click.echo(msg + "...", nl=False)
-                        if not wait_for_enter():
-                            click.echo("\nCopying interrupted.", err=True)
-                            break
-                    else:
-                        click.echo(msg + ".")
+            if before_prompt:
+                delivery = session.copy(before_prompt, "preprompt")
+                if segments or after_prompt:
+                    click.echo(f"{delivery.describe('preprompt')}.", nl=False)
+                    prompt_before("content")
                 else:
-                    if trace_output:
-                        click.echo("\n-----\n")
-                        click.echo(trace_output)
-                    return
+                    click.echo(f"{delivery.describe('preprompt')}.")
 
-                if trace_output:
-                    click.echo("\n-----\n")
-                    click.echo(trace_output)
-        except Exception as e:
-            click.echo(f"Error copying to clipboard: {e}", err=True)
+            for i, (segment_text, _) in enumerate(segments, 1):
+                copied_segment = wrap_text(segment_text, ctx.obj["wrap_mode"])
+                delivery = session.copy(
+                    copied_segment, f"content segment {i}/{len(segments)}"
+                )
+                tokens = count_tokens(copied_segment, target=token_target)["count"]
+                msg = f"({i}/{len(segments)}) " + delivery.describe(
+                    f"content segment ({tokens} tokens)"
+                )
+                if i < len(segments):
+                    click.echo(msg + "...", nl=False)
+                    session.wait_before(f"content segment {i + 1}/{len(segments)}")
+                elif after_prompt:
+                    click.echo(msg + ".", nl=False)
+                    prompt_before("postprompt")
+                else:
+                    click.echo(msg + ".")
+
+            if after_prompt:
+                delivery = session.copy(after_prompt, "postprompt")
+                click.echo(f"{delivery.describe('postprompt')}.")
+        else:
+            segments = segment_output(
+                raw_text, copy_segments, ctx.obj.get("format", "md"), token_target
+            )
+            if not segments:
+                click.echo("No content to copy.", err=True)
+                return
+
+            for i, (segment_text, _) in enumerate(segments, 1):
+                final_segment = build_segment(
+                    segment_text,
+                    ctx.obj["wrap_mode"],
+                    [] if prompt_only else prompts,
+                    ctx.obj["output_pos"],
+                    i,
+                    len(segments),
+                )
+
+                delivery = session.copy(final_segment, f"segment {i}/{len(segments)}")
+                tokens = count_tokens(final_segment, target=token_target)["count"]
+                amount = (
+                    f"{tokens} tokens ({token_method})"
+                    if i == 1
+                    else f"{tokens} tokens"
+                )
+                msg = f"({i}/{len(segments)}) {delivery.describe(amount)}"
+
+                if i < len(segments):
+                    click.echo(msg + "...", nl=False)
+                    session.wait_before(f"segment {i + 1}/{len(segments)}")
+                else:
+                    click.echo(msg + ".")
+
+            if trace_output:
+                click.echo("\n-----\n")
+                click.echo(trace_output)
+        session.finish()
     elif count_flag:
         if trace_output:
             click.echo(trace_output)
             click.echo("\n-----\n")
         _echo_result(ctx, f"Total: {token_count} tokens ({token_method}).")
     elif copy_flag:
-        try:
-            if staged_copy:
-                from .utils import wait_for_enter
+        session = _CopySession(ctx, final_output)
+        if staged_copy:
+            stages: list[tuple[str, str]] = []
+            if before_prompt:
+                stages.append(("preprompt", before_prompt))
+            if content_output:
+                stages.append(("content", content_output))
+            if after_prompt:
+                stages.append(("postprompt", after_prompt))
 
-                stages: list[tuple[str, str]] = []
-                if before_prompt:
-                    stages.append(("preprompt", before_prompt))
-                if content_output:
-                    stages.append(("content", content_output))
-                if after_prompt:
-                    stages.append(("postprompt", after_prompt))
+            if not stages:
+                stages.append(("content", final_output))
 
-                if not stages:
-                    stages.append(("content", final_output))
-
-                for i, (label, stage_text) in enumerate(stages):
-                    content_stage_info = None
-                    if label == "content":
-                        content_stage_info = count_tokens(
-                            stage_text, target=token_target
-                        )
-                    copy_to_clipboard(stage_text)
-                    label_msg = label
-                    if content_stage_info is not None:
-                        label_msg = (
-                            f"{label} ({content_stage_info['count']} tokens, "
-                            f"{content_stage_info['method']})"
-                        )
-                    if i < len(stages) - 1:
-                        next_label = stages[i + 1][0]
-                        click.echo(
-                            f"Copied {label_msg} to clipboard. Press Enter to copy {next_label}...",
-                            nl=False,
-                        )
-                        if not wait_for_enter():
-                            click.echo("\nCopying interrupted.", err=True)
-                            return
-                    else:
-                        click.echo(f"Copied {label_msg} to clipboard.")
-                if trace_output:
-                    click.echo(trace_output)
-                    click.echo("\n-----\n")
-            else:
-                copy_to_clipboard(final_output)
-                if trace_output:
-                    click.echo(trace_output)
-                    click.echo("\n-----\n")
-                _echo_result(
-                    ctx,
-                    f"Copied {token_count} tokens ({token_method}) to clipboard.",
-                )
-        except Exception as e:
-            click.echo(f"Error copying to clipboard: {e}", err=True)
+            for i, (label, stage_text) in enumerate(stages):
+                content_stage_info = None
+                if label == "content":
+                    content_stage_info = count_tokens(stage_text, target=token_target)
+                delivery = session.copy(stage_text, label)
+                label_msg = label
+                if content_stage_info is not None:
+                    label_msg = (
+                        f"{label} ({content_stage_info['count']} tokens, "
+                        f"{content_stage_info['method']})"
+                    )
+                if i < len(stages) - 1:
+                    next_label = stages[i + 1][0]
+                    click.echo(
+                        f"{delivery.describe(label_msg)}. Press Enter to copy {next_label}...",
+                        nl=False,
+                    )
+                    session.wait_before(next_label)
+                else:
+                    click.echo(f"{delivery.describe(label_msg)}.")
+            if trace_output:
+                click.echo(trace_output)
+                click.echo("\n-----\n")
+        else:
+            delivery = session.copy(final_output, "output")
+            if trace_output:
+                click.echo(trace_output)
+                click.echo("\n-----\n")
+            amount = f"{token_count} tokens ({token_method})"
+            _echo_result(ctx, f"{delivery.describe(amount)}.")
+        session.finish()
     else:
         click.echo(final_output)
         if trace_output:
