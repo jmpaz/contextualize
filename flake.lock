@@ -3,11 +3,11 @@
     "cx-plugins": {
       "flake": false,
       "locked": {
-        "lastModified": 1777267589,
-        "narHash": "sha256-lEeqvNiDg7eRXjHWSr35Qv/iJKy2KL+jfZVh9C0lgW0=",
+        "lastModified": 1789843438,
+        "narHash": "sha256-gIxzXHlEhLXJ5m6bTkhunrwqvccbnTOyr5ycDypUR8k=",
         "owner": "jmpaz",
         "repo": "cx-plugins",
-        "rev": "726e2ebfbbc51aad03a24b5a2514a1c9d5a0b037",
+        "rev": "6aeff82757aed893827ecaee04f21d7c0c728035",
         "type": "github"
       },
       "original": {
