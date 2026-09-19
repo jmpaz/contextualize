@@ -8,10 +8,16 @@ import pytest
 from contextualize.render import codex, markitdown
 
 
-def test_default_codex_app_server_image_model_is_gpt_5_4(monkeypatch) -> None:
-    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+def test_default_media_models_are_provider_specific(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_MODEL", "openrouter-only")
+    monkeypatch.delenv("CONTEXTUALIZE_CODEX_APP_SERVER_MODEL", raising=False)
 
-    assert markitdown._resolve_app_server_request_model("") == "gpt-5.4"
+    assert markitdown._DEFAULT_OPENROUTER_MODEL == "google/gemini-3.1-flash-lite"
+    assert markitdown._resolve_app_server_request_model("") == "gpt-5.6-luna"
+    assert markitdown._DEFAULT_CODEX_APP_SERVER_EFFORT == "medium"
+
+    monkeypatch.setenv("CONTEXTUALIZE_CODEX_APP_SERVER_MODEL", "app-server-only")
+    assert markitdown._resolve_app_server_request_model("openrouter-only") == "app-server-only"
 
 
 def test_describe_image_starts_ephemeral_app_server_thread(

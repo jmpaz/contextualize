@@ -196,7 +196,7 @@ _IMAGE_PROVIDER_MODES = frozenset({"auto", "app-server", "openrouter"})
 _DEFAULT_IMAGE_PROVIDER_MODE = "auto"
 _DEFAULT_CODEX_APP_SERVER_COMMAND = "codex app-server --listen stdio://"
 _DEFAULT_OPENROUTER_MODEL = "google/gemini-3.1-flash-lite"
-_DEFAULT_CODEX_APP_SERVER_MODEL = "gpt-5.4"
+_DEFAULT_CODEX_APP_SERVER_MODEL = "gpt-5.6-luna"
 _DEFAULT_CODEX_APP_SERVER_EFFORT = "medium"
 _IMAGE_CACHE_STRICT_ENV = "CONTEXTUALIZE_MD_IMAGE_CACHE_STRICT"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -895,14 +895,10 @@ def _image_cache_strict_enabled() -> bool:
     return raw in _TRUE_VALUES
 
 
-def _resolve_app_server_request_model(model: str) -> str:
-    configured_model = (os.getenv("OPENAI_MODEL") or "").strip()
-    provided_model = model.strip()
-    if configured_model:
-        return configured_model
-    if provided_model and provided_model != _DEFAULT_OPENROUTER_MODEL:
-        return provided_model
-    return _DEFAULT_CODEX_APP_SERVER_MODEL
+def _resolve_app_server_request_model(_openrouter_model: str) -> str:
+    return (
+        os.getenv("CONTEXTUALIZE_CODEX_APP_SERVER_MODEL") or ""
+    ).strip() or _DEFAULT_CODEX_APP_SERVER_MODEL
 
 
 def _resolve_image_provider(

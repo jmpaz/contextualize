@@ -702,7 +702,7 @@ class DefaultCommandGroup(OrderedGroup):
 @click.option(
     "--md-model",
     default=None,
-    help="Override OPENAI_MODEL (used for optional image captioning during conversion).",
+    help="Override OPENAI_MODEL for OpenRouter media descriptions.",
 )
 @click.option(
     "--md-image-provider",
