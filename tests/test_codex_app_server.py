@@ -486,3 +486,90 @@ def test_scanned_pdf_wraps_app_server_batch_timeout(
 
     assert captured["image_batches"] == [[page_1, page_2]]
     assert captured["timeout_seconds"] == 84
+
+
+def test_app_server_turn_usage_is_reported_with_the_effective_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"png")
+
+    class _FakeClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            self._events = [
+                {
+                    "method": "thread/tokenUsage/updated",
+                    "params": {
+                        "tokenUsage": {
+                            "last": {
+                                "totalTokens": 16148,
+                                "inputTokens": 16117,
+                                "cachedInputTokens": 9984,
+                                "outputTokens": 31,
+                                "reasoningOutputTokens": 0,
+                                "unknownField": "ignored",
+                            }
+                        }
+                    },
+                },
+                {
+                    "method": "model/rerouted",
+                    "params": {
+                        "fromModel": "gpt-5.6-luna",
+                        "toModel": "gpt-5.6-luna-mini",
+                        "reason": "capacity",
+                    },
+                },
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {"type": "agentMessage", "text": "A small test image."}
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn-1", "status": "completed"}},
+                },
+            ]
+
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def initialize(self) -> None:
+            return None
+
+        def request(
+            self,
+            method: str,
+            *,
+            params: dict[str, Any] | None = None,
+            timeout_seconds: float | None = None,
+        ) -> dict[str, Any]:
+            if method == "thread/start":
+                return {"thread": {"id": "thread-1"}}
+            if method == "turn/start":
+                return {"turn": {"id": "turn-1"}}
+            return {}
+
+        def next_event(self, *, timeout_seconds: float | None = None) -> dict[str, Any]:
+            return self._events.pop(0)
+
+    monkeypatch.setattr(codex, "_CodexAppServerClient", _FakeClient)
+
+    result = codex.describe_image_with_codex_app_server(
+        image_path,
+        prompt="describe",
+        command="codex app-server --listen stdio://",
+    )
+
+    assert result.usage == {
+        "totalTokens": 16148,
+        "inputTokens": 16117,
+        "cachedInputTokens": 9984,
+        "outputTokens": 31,
+        "reasoningOutputTokens": 0,
+    }
+    assert result.rerouted_to_model == "gpt-5.6-luna-mini"

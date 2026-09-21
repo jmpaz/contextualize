@@ -17,6 +17,15 @@ class CodexAppServerError(RuntimeError):
     pass
 
 
+TOKEN_USAGE_FIELDS = (
+    "totalTokens",
+    "inputTokens",
+    "cachedInputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class CodexImageDescriptionResult:
     text: str
@@ -24,6 +33,7 @@ class CodexImageDescriptionResult:
     rerouted_from_model: str | None
     rerouted_to_model: str | None
     reroute_reason: str | None
+    usage: dict[str, int] | None = None
 
 
 class _CodexAppServerClient:
@@ -402,6 +412,19 @@ def _turn_id(result: dict[str, Any]) -> str:
     return turn_id
 
 
+def _token_usage(params: dict[str, Any]) -> dict[str, int] | None:
+    usage = params.get("tokenUsage")
+    last = usage.get("last") if isinstance(usage, dict) else None
+    if not isinstance(last, dict):
+        return None
+    counted = {
+        field: value
+        for field in TOKEN_USAGE_FIELDS
+        if isinstance(value := last.get(field), int) and not isinstance(value, bool)
+    }
+    return counted or None
+
+
 def _turn_error_message(turn: dict[str, Any]) -> str:
     error = turn.get("error")
     if not isinstance(error, dict):
@@ -642,6 +665,7 @@ def _collect_turn_text(
     rerouted_from_model: str | None = None
     rerouted_to_model: str | None = None
     reroute_reason: str | None = None
+    usage: dict[str, int] | None = None
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -666,6 +690,10 @@ def _collect_turn_text(
                     text = item.get("text")
                     if isinstance(text, str) and text.strip():
                         final_text = text.strip()
+            continue
+        if method == "thread/tokenUsage/updated":
+            if isinstance(params, dict):
+                usage = _token_usage(params) or usage
             continue
         if method == "model/rerouted":
             if isinstance(params, dict):
@@ -702,4 +730,5 @@ def _collect_turn_text(
         rerouted_from_model=rerouted_from_model,
         rerouted_to_model=rerouted_to_model,
         reroute_reason=reroute_reason,
+        usage=usage,
     )
