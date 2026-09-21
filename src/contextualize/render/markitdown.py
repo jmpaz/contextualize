@@ -821,6 +821,76 @@ def _openrouter_extra_body(extra_body: Any) -> dict[str, Any]:
     return payload
 
 
+def _messages_carry_image(messages: Any) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, list):
+            continue
+        if any(
+            isinstance(part, Mapping) and part.get("type") == "image_url"
+            for part in content
+        ):
+            return True
+    return False
+
+
+def _usage_attribute(usage: Any, name: str) -> Any:
+    if isinstance(usage, Mapping):
+        return usage.get(name)
+    return getattr(usage, name, None)
+
+
+def _completion_token_usage(response: Any) -> dict[str, int] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None and isinstance(response, Mapping):
+        usage = response.get("usage")
+    if usage is None:
+        return None
+    prompt_details = _usage_attribute(usage, "prompt_tokens_details")
+    completion_details = _usage_attribute(usage, "completion_tokens_details")
+    sources = {
+        "totalTokens": _usage_attribute(usage, "total_tokens"),
+        "inputTokens": _usage_attribute(usage, "prompt_tokens"),
+        "cachedInputTokens": _usage_attribute(prompt_details, "cached_tokens"),
+        "outputTokens": _usage_attribute(usage, "completion_tokens"),
+        "reasoningOutputTokens": _usage_attribute(
+            completion_details, "reasoning_tokens"
+        ),
+    }
+    counted = {
+        field: value
+        for field, value in sources.items()
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    return counted or None
+
+
+def _record_image_description(
+    provider: str,
+    *,
+    model: str | None,
+    usage: dict[str, int] | None,
+    target: str | None = None,
+) -> None:
+    detail: dict[str, Any] = {}
+    if model:
+        detail["model"] = model
+    if usage:
+        detail["usage"] = usage
+    record_progress(
+        provider,
+        "image-description",
+        "processed",
+        target=target,
+        detail=json.dumps(detail, separators=(",", ":"), sort_keys=True)
+        if detail
+        else None,
+        count=usage.get("totalTokens") if usage else None,
+    )
+
+
 class _OpenRouterCompletionsProxy:
     def __init__(
         self, completions: Any, *, provider: str, add_openrouter_defaults: bool
@@ -840,7 +910,14 @@ class _OpenRouterCompletionsProxy:
             "  sending to model: "
             f"provider={self._provider} model={model_label} endpoint=chat.completions"
         )
-        return self._completions.create(*args, **kwargs)
+        response = self._completions.create(*args, **kwargs)
+        if _messages_carry_image(kwargs.get("messages")):
+            _record_image_description(
+                self._provider,
+                model=model_label,
+                usage=_completion_token_usage(response),
+            )
+        return response
 
 
 class _OpenRouterChatProxy:
@@ -1012,10 +1089,12 @@ def _app_server_image_text_from_path(
             )
         else:
             raise
-    record_progress(
+    _record_image_description(
         "codex-app-server",
-        "image-description",
-        "processed",
+        model=description_result.rerouted_to_model
+        or description_result.requested_model
+        or requested_model,
+        usage=description_result.usage,
         target=image_path.name,
     )
     if description_result.rerouted_to_model:

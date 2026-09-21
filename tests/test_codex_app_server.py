@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import types
 from pathlib import Path
 from typing import Any
 
@@ -573,3 +575,150 @@ def test_app_server_turn_usage_is_reported_with_the_effective_model(
         "reasoningOutputTokens": 0,
     }
     assert result.rerouted_to_model == "gpt-5.6-luna-mini"
+
+
+def test_app_server_image_description_records_provider_model_and_usage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from contextualize.progress import progress_events, reset_progress
+
+    image_path = tmp_path / "shot.png"
+    image_path.write_bytes(b"png")
+    monkeypatch.setattr(
+        markitdown,
+        "_resolve_app_server_request_model",
+        lambda _model: "gpt-5.6-luna",
+    )
+    monkeypatch.setattr(
+        codex,
+        "describe_image_with_shared_codex_app_server",
+        lambda *_args, **_kwargs: codex.CodexImageDescriptionResult(
+            text="A small test image.",
+            requested_model="gpt-5.6-luna",
+            rerouted_from_model="gpt-5.6-luna",
+            rerouted_to_model="gpt-5.6-luna-mini",
+            reroute_reason="capacity",
+            usage={"totalTokens": 16148, "outputTokens": 31},
+        ),
+    )
+
+    reset_progress()
+    text = markitdown._app_server_image_text_from_path(
+        image_path,
+        prompt="describe",
+        model="google/gemini-3.1-flash-lite",
+        app_server_command="codex app-server --listen stdio://",
+    )
+
+    assert text == "A small test image."
+    recorded = [
+        event
+        for event in progress_events()
+        if event.operation == "image-description"
+    ]
+    assert len(recorded) == 1
+    assert recorded[0].provider == "codex-app-server"
+    assert recorded[0].count == 16148
+    assert json.loads(recorded[0].detail or "{}") == {
+        "model": "gpt-5.6-luna-mini",
+        "usage": {"totalTokens": 16148, "outputTokens": 31},
+    }
+    reset_progress()
+
+
+def test_openrouter_image_description_records_usage_from_the_response() -> None:
+    from contextualize.progress import progress_events, reset_progress
+
+    class _Usage:
+        total_tokens = 812
+        prompt_tokens = 780
+        completion_tokens = 32
+        prompt_tokens_details = types.SimpleNamespace(cached_tokens=256)
+        completion_tokens_details = types.SimpleNamespace(reasoning_tokens=0)
+
+    class _Completions:
+        def create(self, **_kwargs: Any) -> Any:
+            return types.SimpleNamespace(usage=_Usage())
+
+    proxy = markitdown._OpenRouterCompletionsProxy(
+        _Completions(),
+        provider="openrouter",
+        add_openrouter_defaults=False,
+    )
+
+    reset_progress()
+    proxy.create(
+        model="google/gemini-3.1-flash-lite",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,"}},
+                ],
+            }
+        ],
+    )
+    proxy.create(
+        model="google/gemini-3.1-flash-lite",
+        messages=[{"role": "user", "content": "plain text only"}],
+    )
+
+    recorded = [
+        event
+        for event in progress_events()
+        if event.operation == "image-description"
+    ]
+    assert len(recorded) == 1
+    assert recorded[0].provider == "openrouter"
+    assert recorded[0].count == 812
+    assert json.loads(recorded[0].detail or "{}") == {
+        "model": "google/gemini-3.1-flash-lite",
+        "usage": {
+            "totalTokens": 812,
+            "inputTokens": 780,
+            "cachedInputTokens": 256,
+            "outputTokens": 32,
+            "reasoningOutputTokens": 0,
+        },
+    }
+    reset_progress()
+
+
+def test_openrouter_image_description_records_the_model_without_usage() -> None:
+    from contextualize.progress import progress_events, reset_progress
+
+    class _Completions:
+        def create(self, **_kwargs: Any) -> Any:
+            return types.SimpleNamespace()
+
+    proxy = markitdown._OpenRouterCompletionsProxy(
+        _Completions(),
+        provider="openrouter",
+        add_openrouter_defaults=False,
+    )
+
+    reset_progress()
+    proxy.create(
+        model="google/gemini-3.1-flash-lite",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,"}}
+                ],
+            }
+        ],
+    )
+
+    recorded = [
+        event
+        for event in progress_events()
+        if event.operation == "image-description"
+    ]
+    assert len(recorded) == 1
+    assert recorded[0].count is None
+    assert json.loads(recorded[0].detail or "{}") == {
+        "model": "google/gemini-3.1-flash-lite"
+    }
+    reset_progress()
