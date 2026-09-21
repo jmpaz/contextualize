@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, NoReturn, Protocol
 from urllib.parse import urlparse
 
 from ..progress import record_progress
@@ -208,6 +208,10 @@ class _ImageProviderSelection:
     effective_provider: str
     app_server_live: bool
     app_server_error: str | None
+
+    @property
+    def pins_app_server(self) -> bool:
+        return self.requested_mode == "app-server"
 
 
 _IMAGE_PROVIDER_SELECTION_CACHE: dict[
@@ -1026,19 +1030,89 @@ def _resolve_image_provider(
         with _IMAGE_PROVIDER_SELECTION_LOCK:
             _IMAGE_PROVIDER_SELECTION_CACHE[cache_key] = selection
         return selection
+    effective_provider = (
+        "app-server" if normalized_mode == "app-server" else "openrouter"
+    )
     _verbose_log(
         "  image provider selection: "
-        f"mode={normalized_mode} -> provider=openrouter (app-server unavailable: {error})"
+        f"mode={normalized_mode} -> provider={effective_provider} "
+        f"(app-server unavailable: {error})"
     )
     selection = _ImageProviderSelection(
         requested_mode=normalized_mode,
-        effective_provider="openrouter",
+        effective_provider=effective_provider,
         app_server_live=False,
         app_server_error=error,
     )
     with _IMAGE_PROVIDER_SELECTION_LOCK:
         _IMAGE_PROVIDER_SELECTION_CACHE[cache_key] = selection
     return selection
+
+
+def _raise_pinned_app_server_failure(
+    reason: str,
+    *,
+    target: str,
+    detail: str,
+    operation: str = "image-description",
+    cause: Exception | None = None,
+) -> NoReturn:
+    record_progress(
+        "codex-app-server",
+        operation,
+        "failed",
+        target=target,
+        detail=detail,
+    )
+    raise MarkItDownConversionError(
+        f"Codex app-server is the configured image provider and {reason} "
+        f"for {target}: {detail}"
+    ) from cause
+
+
+def _require_live_app_server(
+    selection: _ImageProviderSelection,
+    *,
+    target: str,
+    operation: str = "image-description",
+) -> None:
+    if not selection.pins_app_server or selection.app_server_live:
+        return
+    _raise_pinned_app_server_failure(
+        "is unavailable",
+        target=target,
+        detail=selection.app_server_error or "app-server unavailable",
+        operation=operation,
+    )
+
+
+def _handle_app_server_image_failure(
+    selection: _ImageProviderSelection, *, target: str, exc: Exception
+) -> None:
+    if selection.pins_app_server:
+        _raise_pinned_app_server_failure(
+            "failed", target=target, detail=str(exc), cause=exc
+        )
+    _verbose_log(
+        f"  app-server image request failed; retrying with OpenRouter image flow: {exc}"
+    )
+    logging.getLogger(__name__).warning(
+        "Codex app-server image description failed; falling back to OpenRouter path: %s",
+        exc,
+    )
+
+
+def _log_app_server_probe_fallback(selection: _ImageProviderSelection) -> None:
+    error = selection.app_server_error
+    if selection.pins_app_server or selection.app_server_live or not error:
+        return
+    _verbose_log(
+        f"  app-server probe failed; falling back to OpenRouter image flow: {error}"
+    )
+    logging.getLogger(__name__).warning(
+        "Codex app-server unavailable; falling back to OpenRouter path: %s",
+        error,
+    )
 
 
 def _app_server_image_text_from_path(
@@ -1760,28 +1834,8 @@ def _convert_scanned_pdf_to_markdown(
     provider_selection = _resolve_image_provider(
         provider_mode, app_server_command=app_server_command
     )
-    if (
-        provider_selection.requested_mode == "app-server"
-        and not provider_selection.app_server_live
-    ):
-        detail = provider_selection.app_server_error or "app-server unavailable"
-        raise MarkItDownConversionError(
-            "PDF has no embedded text; scanned PDF OCR was configured for "
-            f"codex app-server, but app-server is unavailable for {label}: {detail}"
-        )
-    if (
-        provider_selection.requested_mode != "openrouter"
-        and not provider_selection.app_server_live
-        and provider_selection.app_server_error
-    ):
-        _verbose_log(
-            "  app-server probe failed; falling back to OpenRouter image OCR: "
-            f"{provider_selection.app_server_error}"
-        )
-        logging.getLogger(__name__).warning(
-            "Codex app-server unavailable; falling back to OpenRouter image OCR: %s",
-            provider_selection.app_server_error,
-        )
+    _require_live_app_server(provider_selection, target=label, operation="pdf-ocr")
+    _log_app_server_probe_fallback(provider_selection)
     if provider_selection.effective_provider != "app-server" and not llm_enabled:
         raise MarkItDownConversionError(
             "PDF has no embedded text; scanned PDF OCR requires a live codex "
@@ -1994,19 +2048,7 @@ def convert_path_to_markdown(
             cache_requires_description = llm_description_required
             if provider_selection.effective_provider == "app-server":
                 app_server_model_for_cache = _resolve_app_server_request_model(model)
-            if (
-                provider_selection.requested_mode != "openrouter"
-                and not provider_selection.app_server_live
-                and provider_selection.app_server_error
-            ):
-                _verbose_log(
-                    "  app-server probe failed; falling back to OpenRouter image flow: "
-                    f"{provider_selection.app_server_error}"
-                )
-                logging.getLogger(__name__).warning(
-                    "Codex app-server unavailable; falling back to OpenRouter path: %s",
-                    provider_selection.app_server_error,
-                )
+            _log_app_server_probe_fallback(provider_selection)
 
         cache_key_payload = _image_cache_payload(
             media_md5,
@@ -2040,19 +2082,9 @@ def convert_path_to_markdown(
             llm_description_required = bool(
                 provider_selection.effective_provider == "app-server" or llm_enabled
             )
-            if (
-                provider_selection.requested_mode != "openrouter"
-                and not provider_selection.app_server_live
-                and provider_selection.app_server_error
-            ):
-                _verbose_log(
-                    "  app-server probe failed; falling back to OpenRouter image flow: "
-                    f"{provider_selection.app_server_error}"
-                )
-                logging.getLogger(__name__).warning(
-                    "Codex app-server unavailable; falling back to OpenRouter path: %s",
-                    provider_selection.app_server_error,
-                )
+            _log_app_server_probe_fallback(provider_selection)
+
+        _require_live_app_server(provider_selection, target=path_obj.name)
 
         if provider_selection.effective_provider == "app-server":
             try:
@@ -2074,13 +2106,8 @@ def convert_path_to_markdown(
                 )
                 return result
             except Exception as exc:
-                _verbose_log(
-                    "  app-server image request failed; retrying with OpenRouter image flow: "
-                    f"{exc}"
-                )
-                logging.getLogger(__name__).warning(
-                    "Codex app-server image description failed; falling back to OpenRouter path: %s",
-                    exc,
+                _handle_app_server_image_failure(
+                    provider_selection, target=path_obj.name, exc=exc
                 )
                 llm_description_required = llm_enabled
                 cache_key_payload = _image_cache_payload(
@@ -2278,19 +2305,7 @@ def convert_response_to_markdown(
             cache_requires_description = llm_description_required
             if provider_selection.effective_provider == "app-server":
                 app_server_model_for_cache = _resolve_app_server_request_model(model)
-            if (
-                provider_selection.requested_mode != "openrouter"
-                and not provider_selection.app_server_live
-                and provider_selection.app_server_error
-            ):
-                _verbose_log(
-                    "  app-server probe failed; falling back to OpenRouter image flow: "
-                    f"{provider_selection.app_server_error}"
-                )
-                logging.getLogger(__name__).warning(
-                    "Codex app-server unavailable; falling back to OpenRouter path: %s",
-                    provider_selection.app_server_error,
-                )
+            _log_app_server_probe_fallback(provider_selection)
 
         cache_key_payload = _image_cache_payload(
             media_md5,
@@ -2324,19 +2339,9 @@ def convert_response_to_markdown(
             llm_description_required = bool(
                 provider_selection.effective_provider == "app-server" or llm_enabled
             )
-            if (
-                provider_selection.requested_mode != "openrouter"
-                and not provider_selection.app_server_live
-                and provider_selection.app_server_error
-            ):
-                _verbose_log(
-                    "  app-server probe failed; falling back to OpenRouter image flow: "
-                    f"{provider_selection.app_server_error}"
-                )
-                logging.getLogger(__name__).warning(
-                    "Codex app-server unavailable; falling back to OpenRouter path: %s",
-                    provider_selection.app_server_error,
-                )
+            _log_app_server_probe_fallback(provider_selection)
+
+        _require_live_app_server(provider_selection, target=str(response.url))
 
         if provider_selection.effective_provider == "app-server":
             image_suffix = (
@@ -2362,13 +2367,8 @@ def convert_response_to_markdown(
                 )
                 return result
             except Exception as exc:
-                _verbose_log(
-                    "  app-server image request failed; retrying with OpenRouter image flow: "
-                    f"{exc}"
-                )
-                logging.getLogger(__name__).warning(
-                    "Codex app-server image description failed; falling back to OpenRouter path: %s",
-                    exc,
+                _handle_app_server_image_failure(
+                    provider_selection, target=str(response.url), exc=exc
                 )
                 llm_description_required = llm_enabled
                 cache_key_payload = _image_cache_payload(

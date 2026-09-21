@@ -447,6 +447,16 @@ def test_scanned_pdf_app_server_mode_fails_closed_when_unavailable(
         "_render_pdf_pages_to_png",
         lambda *_args, **_kwargs: pytest.fail("should not render pages"),
     )
+    monkeypatch.setattr(
+        markitdown,
+        "_build_llm_config",
+        lambda: pytest.fail("OpenRouter client must not be built"),
+    )
+    monkeypatch.setattr(
+        markitdown,
+        "_openrouter_image_text_from_path",
+        lambda *_args, **_kwargs: pytest.fail("OpenRouter image OCR must not run"),
+    )
 
     with pytest.raises(markitdown.MarkItDownConversionError, match="configured"):
         markitdown.convert_path_to_markdown(pdf_path)
@@ -722,3 +732,288 @@ def test_openrouter_image_description_records_the_model_without_usage() -> None:
         "model": "google/gemini-3.1-flash-lite"
     }
     reset_progress()
+
+
+def _image_context_for(mode: str, *, llm_enabled: bool = True):
+    return lambda: (
+        llm_enabled,
+        "https://openrouter.ai/api/v1",
+        "gpt-5.4",
+        "describe",
+        None,
+        mode,
+        "codex app-server --listen stdio://",
+    )
+
+
+def _selection(mode: str, *, live: bool, error: str | None = None):
+    return markitdown._ImageProviderSelection(
+        requested_mode=mode,
+        effective_provider=(
+            "app-server" if live or mode == "app-server" else "openrouter"
+        ),
+        app_server_live=live,
+        app_server_error=error,
+    )
+
+
+def _pin_selection(monkeypatch, selection) -> None:
+    monkeypatch.setattr(
+        markitdown, "_resolve_image_provider", lambda *_args, **_kwargs: selection
+    )
+
+
+def _forbid_openrouter(monkeypatch) -> None:
+    for name in (
+        "_build_llm_config",
+        "_get_converter",
+        "_convert_markitdown",
+        "_convert_markitdown_with_normalization",
+        "_openrouter_image_text_from_path",
+    ):
+        monkeypatch.setattr(
+            markitdown,
+            name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(
+                f"OpenRouter path must not run: {_name}"
+            ),
+        )
+
+
+def _failed_description_events() -> list[Any]:
+    from contextualize.progress import progress_events
+
+    return [
+        event
+        for event in progress_events()
+        if event.outcome == "failed" and event.provider == "codex-app-server"
+    ]
+
+
+class _FakeImageResponse:
+    def __init__(self, url: str, content: bytes) -> None:
+        self.url = url
+        self.content = content
+        self.headers = {"Content-Type": "image/png"}
+
+
+def test_pinned_app_server_image_turn_failure_never_reaches_openrouter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from contextualize.progress import reset_progress
+
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"png")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(markitdown, "_image_context", _image_context_for("app-server"))
+    _pin_selection(monkeypatch, _selection("app-server", live=True))
+    _forbid_openrouter(monkeypatch)
+
+    def fail_turn(*_args: Any, **_kwargs: Any) -> str:
+        raise markitdown.MarkItDownConversionError("turn failed")
+
+    monkeypatch.setattr(
+        markitdown, "_app_server_image_markdown_from_path", fail_turn
+    )
+
+    reset_progress()
+    with pytest.raises(
+        markitdown.MarkItDownConversionError,
+        match="configured image provider and failed",
+    ):
+        markitdown.convert_path_to_markdown(image_path)
+
+    recorded = _failed_description_events()
+    assert [(event.operation, event.target) for event in recorded] == [
+        ("image-description", "image.png")
+    ]
+    assert recorded[0].detail == "turn failed"
+    reset_progress()
+
+
+def test_pinned_app_server_image_probe_failure_never_reaches_openrouter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from contextualize.progress import reset_progress
+
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"png")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(markitdown, "_image_context", _image_context_for("app-server"))
+    _pin_selection(
+        monkeypatch, _selection("app-server", live=False, error="not running")
+    )
+    _forbid_openrouter(monkeypatch)
+    monkeypatch.setattr(
+        markitdown,
+        "_app_server_image_markdown_from_path",
+        lambda *_args, **_kwargs: pytest.fail("app-server must not be called"),
+    )
+
+    reset_progress()
+    with pytest.raises(
+        markitdown.MarkItDownConversionError,
+        match="configured image provider and is unavailable",
+    ):
+        markitdown.convert_path_to_markdown(image_path)
+
+    assert [event.detail for event in _failed_description_events()] == ["not running"]
+    reset_progress()
+
+
+def test_auto_image_turn_failure_still_falls_back_to_openrouter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"png")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(markitdown, "_image_context", _image_context_for("auto"))
+    _pin_selection(monkeypatch, _selection("auto", live=True))
+
+    def fail_turn(*_args: Any, **_kwargs: Any) -> str:
+        raise markitdown.MarkItDownConversionError("turn failed")
+
+    monkeypatch.setattr(
+        markitdown, "_app_server_image_markdown_from_path", fail_turn
+    )
+    monkeypatch.setattr(markitdown, "_image_text_tools_available", lambda: True)
+    monkeypatch.setattr(
+        markitdown,
+        "_convert_markitdown_with_normalization",
+        lambda _path: ("# Description:\nopenrouter description", None),
+    )
+
+    result = markitdown.convert_path_to_markdown(image_path)
+
+    assert "openrouter description" in result.markdown
+
+
+def test_pinned_app_server_response_turn_failure_never_reaches_openrouter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from contextualize.progress import reset_progress
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(markitdown, "_image_context", _image_context_for("app-server"))
+    _pin_selection(monkeypatch, _selection("app-server", live=True))
+    _forbid_openrouter(monkeypatch)
+
+    def fail_turn(*_args: Any, **_kwargs: Any) -> str:
+        raise markitdown.MarkItDownConversionError("turn failed")
+
+    monkeypatch.setattr(
+        markitdown, "_app_server_image_markdown_from_bytes", fail_turn
+    )
+
+    reset_progress()
+    with pytest.raises(
+        markitdown.MarkItDownConversionError,
+        match="configured image provider and failed",
+    ):
+        markitdown.convert_response_to_markdown(
+            _FakeImageResponse("https://example.test/image.png", b"png")
+        )
+
+    assert [event.target for event in _failed_description_events()] == [
+        "https://example.test/image.png"
+    ]
+    reset_progress()
+
+
+def test_pinned_app_server_response_probe_failure_never_reaches_openrouter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from contextualize.progress import reset_progress
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(markitdown, "_image_context", _image_context_for("app-server"))
+    _pin_selection(
+        monkeypatch, _selection("app-server", live=False, error="not running")
+    )
+    _forbid_openrouter(monkeypatch)
+    monkeypatch.setattr(
+        markitdown,
+        "_app_server_image_markdown_from_bytes",
+        lambda *_args, **_kwargs: pytest.fail("app-server must not be called"),
+    )
+
+    reset_progress()
+    with pytest.raises(
+        markitdown.MarkItDownConversionError,
+        match="configured image provider and is unavailable",
+    ):
+        markitdown.convert_response_to_markdown(
+            _FakeImageResponse("https://example.test/image.png", b"png")
+        )
+
+    assert [event.detail for event in _failed_description_events()] == ["not running"]
+    reset_progress()
+
+
+def test_auto_response_turn_failure_still_falls_back_to_openrouter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(markitdown, "_image_context", _image_context_for("auto"))
+    _pin_selection(monkeypatch, _selection("auto", live=True))
+
+    def fail_turn(*_args: Any, **_kwargs: Any) -> str:
+        raise markitdown.MarkItDownConversionError("turn failed")
+
+    monkeypatch.setattr(
+        markitdown, "_app_server_image_markdown_from_bytes", fail_turn
+    )
+    monkeypatch.setattr(markitdown, "_image_text_tools_available", lambda: True)
+    monkeypatch.setattr(
+        markitdown,
+        "_convert_markitdown",
+        lambda _source, **_kwargs: ("# Description:\nopenrouter description", None),
+    )
+
+    result = markitdown.convert_response_to_markdown(
+        _FakeImageResponse("https://example.test/image.png", b"png")
+    )
+
+    assert "openrouter description" in result.markdown
+
+
+def test_pinned_app_server_pdf_ocr_failure_never_reaches_openrouter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        markitdown,
+        "_convert_markitdown_with_normalization",
+        lambda _path: ("", None),
+    )
+    monkeypatch.setattr(markitdown, "_image_context", _image_context_for("app-server"))
+    _pin_selection(monkeypatch, _selection("app-server", live=True))
+    monkeypatch.setattr(
+        markitdown,
+        "_build_llm_config",
+        lambda: pytest.fail("OpenRouter client must not be built"),
+    )
+    monkeypatch.setattr(
+        markitdown,
+        "_openrouter_image_text_from_path",
+        lambda *_args, **_kwargs: pytest.fail("OpenRouter image OCR must not run"),
+    )
+
+    def fake_render(_path: Path, output_dir: Path, *, dpi: int) -> list[Path]:
+        page = output_dir / "page-1.png"
+        page.write_bytes(b"page 1")
+        return [page]
+
+    monkeypatch.setattr(markitdown, "_render_pdf_pages_to_png", fake_render)
+
+    def fail_batches(*_args: Any, **_kwargs: Any) -> list[str]:
+        raise markitdown.MarkItDownConversionError("batch failed")
+
+    monkeypatch.setattr(
+        markitdown, "_app_server_pdf_batch_texts_from_pages", fail_batches
+    )
+
+    with pytest.raises(markitdown.MarkItDownConversionError, match="batch failed"):
+        markitdown.convert_path_to_markdown(pdf_path)
