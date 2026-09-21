@@ -4,6 +4,7 @@ import re
 
 from contextualize.progress import (
     set_live_progress,
+    progress_events,
     progress_summary_lines,
     record_progress,
     reset_progress,
@@ -194,3 +195,23 @@ def test_progress_journal_is_off_by_default(tmp_path, monkeypatch) -> None:
     record_progress("arena", "channel", "cache_miss")
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_progress_events_returns_a_copy_filtered_by_context() -> None:
+    reset_progress()
+    token = set_progress_context("one-call")
+    try:
+        record_progress("codex-app-server", "image-description", "processed", count=42)
+    finally:
+        reset_progress_context(token)
+    record_progress("markitdown", "image-cache", "cache_hit")
+
+    scoped = progress_events("one-call")
+
+    assert [(event.provider, event.count) for event in scoped] == [
+        ("codex-app-server", 42)
+    ]
+    assert len(progress_events()) == 2
+    scoped.clear()
+    assert len(progress_events("one-call")) == 1
+    reset_progress()

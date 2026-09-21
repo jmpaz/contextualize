@@ -197,6 +197,14 @@ def progress_summary_lines() -> list[str]:
     return lines
 
 
+def progress_events(context: str | None = None) -> list[ProgressEvent]:
+    with _LOCK:
+        events = list(_EVENTS)
+    if context is None:
+        return events
+    return [event for event in events if event.context == context]
+
+
 def progress_counters(context: str | None = None) -> dict[str, int]:
     with _LOCK:
         events = list(_EVENTS)
