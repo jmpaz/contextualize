@@ -709,8 +709,8 @@ class DefaultCommandGroup(OrderedGroup):
     type=click.Choice(["auto", "app-server", "openrouter"], case_sensitive=False),
     default=None,
     help=(
-        "Prefer image description provider. Overrides CONTEXTUALIZE_MD_IMAGE_PROVIDER "
-        "(default: auto)."
+        "Image description provider. Overrides CONTEXTUALIZE_MD_IMAGE_PROVIDER "
+        "(default: auto); an explicit provider never falls back to the other."
     ),
 )
 @click.option(
