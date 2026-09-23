@@ -501,6 +501,24 @@ def _find_subcommand(args, known_commands, value_opts):
     return None, has_positional
 
 
+def _command_option_strings(group, ctx, args, sub_idx):
+    """Collect the option strings of the invoked command and of the nested
+    subcommands named after it, such as ``contexts hydrate``."""
+    option_strings: set[str] = set()
+    command = group.get_command(ctx, args[sub_idx])
+    remaining = iter(args[sub_idx + 1 :])
+    while command is not None:
+        for param in command.params:
+            if isinstance(param, click.Option):
+                option_strings.update((*param.opts, *param.secondary_opts))
+        if not isinstance(command, click.Group):
+            break
+        names = set(command.list_commands(ctx))
+        name = next((arg for arg in remaining if arg in names), None)
+        command = command.get_command(ctx, name) if name else None
+    return option_strings
+
+
 def _forward_root_options(args, sub_idx, all_opts, value_opts):
     """Move global options trailing the command to before it, where Click's
     group parser can consume them. Handles ``--opt=val``, value options, and
@@ -595,7 +613,8 @@ class DefaultCommandGroup(OrderedGroup):
        ``contextualize cat file.txt``. A token naming a subcommand wins; a file
        named like a command is reached via ``contextualize cat name`` or ``./name``.
     2. Global options trailing the (explicit or injected) command are moved in
-       front of it, where the group parser can consume them.
+       front of it, where the group parser can consume them, unless the
+       command defines the same option itself.
     """
 
     def parse_args(self, ctx, args):
@@ -617,7 +636,8 @@ class DefaultCommandGroup(OrderedGroup):
                 return args
             args = [DEFAULT_COMMAND, *args]
             sub_idx = 0
-        return _forward_root_options(args, sub_idx, all_opts, value_opts)
+        command_opts = _command_option_strings(self, ctx, args, sub_idx)
+        return _forward_root_options(args, sub_idx, all_opts - command_opts, value_opts)
 
     def shell_complete(self, ctx, incomplete):
         items = super().shell_complete(ctx, incomplete)

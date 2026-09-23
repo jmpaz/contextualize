@@ -84,6 +84,27 @@ def test_short_cluster_forwarded_through_implicit_cat() -> None:
         assert "PRE" in clustered.output
 
 
+def test_subcommand_keeps_options_it_defines(monkeypatch) -> None:
+    captured: dict[str, bool] = {}
+
+    def _hydrate_contexts(*_args, **kwargs):
+        captured["copy"] = kwargs["overrides"].copy
+        return []
+
+    monkeypatch.setattr(
+        "contextualize.manifest.contexts.hydrate_contexts", _hydrate_contexts
+    )
+    runner = CliRunner()
+
+    nested = runner.invoke(cli.cli, ["contexts", "hydrate", "--copy", "demo"])
+    paste = runner.invoke(cli.cli, ["paste", "--count", "0"])
+
+    assert nested.exit_code == 0, nested.output
+    assert "ignoring global options" not in nested.output
+    assert captured["copy"] is True
+    assert "--count must be at least 1" in paste.output
+
+
 def test_prompt_only_mode_preserved_without_path() -> None:
     runner = CliRunner()
     result = runner.invoke(cli.cli, ["-p", "just a prompt"])
