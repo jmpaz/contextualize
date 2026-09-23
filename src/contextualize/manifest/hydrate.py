@@ -414,6 +414,30 @@ def clear_context_dir(path: Path) -> None:
     _clear_context_dir(path)
 
 
+def find_replaced_files(plan: HydratePlan) -> list[Path]:
+    sources = dict((*plan.files_to_copy, *plan.files_to_symlink))
+    destinations = [dest for dest, _ in plan.files_to_write] + list(sources)
+    replaced: list[Path] = []
+    for dest in destinations:
+        for parent in reversed(dest.relative_to(plan.context_dir).parents[:-1]):
+            parent_path = plan.context_dir / parent
+            if parent_path.is_symlink() or (
+                parent_path.exists() and not parent_path.is_dir()
+            ):
+                raise ValueError(
+                    f"Cannot hydrate {dest}: {parent_path} is not a directory"
+                )
+        if not (dest.is_symlink() or dest.exists()):
+            continue
+        if dest.is_dir() and not dest.is_symlink():
+            raise ValueError(f"Cannot hydrate {dest}: a directory exists there")
+        source = sources.get(dest)
+        if source is not None and not dest.is_symlink() and dest.samefile(source):
+            raise ValueError(f"Cannot hydrate {dest} onto its own source")
+        replaced.append(dest)
+    return replaced
+
+
 _RANGE_RE = re.compile(r"^\s*L?(\d+)\s*(?:-|:)\s*L?(\d+)\s*$")
 
 

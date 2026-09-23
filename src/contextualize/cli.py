@@ -1594,6 +1594,24 @@ def payload_cmd(
     return payload_content
 
 
+def _confirm_on_tty(prompt: str) -> bool | None:
+    """Ask on the controlling terminal; None when no answer can be read."""
+    try:
+        with open("/dev/tty", "r", encoding="utf-8", errors="ignore") as tty_in:
+            while True:
+                click.echo(prompt, nl=False, err=True)
+                response = tty_in.readline()
+                if not response:
+                    return None
+                value = response.strip().lower()
+                if value in {"n", "no", ""}:
+                    return False
+                if value in {"y", "yes"}:
+                    return True
+    except OSError:
+        return None
+
+
 def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
     if untracked_count > 0:
         prompt = (
@@ -1603,27 +1621,14 @@ def _confirm_overwrite(path: str, untracked_count: int = 0) -> bool:
         )
     else:
         prompt = f"{path} exists. Replace it and all contents? [y/N]: "
-    try:
-        with open("/dev/tty", "r", encoding="utf-8", errors="ignore") as tty_in:
-            while True:
-                click.echo(prompt, nl=False, err=True)
-                response = tty_in.readline()
-                if not response:
-                    break
-                value = response.strip().lower()
-                if value in {"n", "no", ""}:
-                    return False
-                if value in {"y", "yes"}:
-                    return True
-    except OSError:
-        if untracked_count > 0:
-            raise click.ClickException(
-                f"{path} contains {untracked_count} untracked file{'s' if untracked_count != 1 else ''}. "
-                f"Interactive confirmation required."
-            ) from None
+    confirmed = _confirm_on_tty(prompt)
+    if confirmed is not None:
+        return confirmed
+    if untracked_count > 0:
         raise click.ClickException(
-            f"{path} exists. Use --overwrite to replace it."
-        ) from None
+            f"{path} contains {untracked_count} untracked file{'s' if untracked_count != 1 else ''}. "
+            f"Interactive confirmation required."
+        )
     raise click.ClickException(f"{path} exists. Use --overwrite to replace it.")
 
 
@@ -2326,6 +2331,7 @@ def hydrate_cmd(
         HydrateOverrides,
         apply_hydration_plan,
         clear_context_dir,
+        find_replaced_files,
         find_untracked_files,
         plan_matches_existing,
     )
@@ -2470,40 +2476,25 @@ def hydrate_cmd(
             raise click.ClickException(str(exc)) from exc
 
     if inline_targets and plan.context_dir.exists():
-        import shutil
+        try:
+            replaced_files = find_replaced_files(plan)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
 
-        subdirs_to_clear: set[str] = set()
-        files_to_clear: list[Path] = []
-        all_dests = (
-            [(d, c) for d, c in plan.files_to_write]
-            + [(d, s) for d, s in plan.files_to_copy]
-            + [(d, t) for d, t in plan.files_to_symlink]
-        )
-        for dest, _ in all_dests:
-            rel = dest.relative_to(plan.context_dir)
-            if len(rel.parts) > 1:
-                subdirs_to_clear.add(rel.parts[0])
-            else:
-                files_to_clear.append(dest)
-
-        existing_subdirs = [
-            s for s in subdirs_to_clear if (plan.context_dir / s).exists()
-        ]
-        existing_files = [f for f in files_to_clear if f.exists() or f.is_symlink()]
-
-        if (existing_subdirs or existing_files) and not overwrite:
-            parts = [str(plan.context_dir / s) for s in sorted(existing_subdirs)]
-            parts += [str(f) for f in existing_files]
+        if replaced_files and not overwrite:
             click.echo("The following will be replaced:", err=True)
-            for p in parts:
-                click.echo(f"  {p}", err=True)
-            if not click.confirm("Continue?"):
+            for path in replaced_files:
+                click.echo(f"  {path}", err=True)
+            confirmed = _confirm_on_tty("Continue? [y/N]: ")
+            if confirmed is None:
+                raise click.ClickException(
+                    "Existing files would be replaced. Use --overwrite to replace them."
+                )
+            if not confirmed:
                 ctx.exit(1)
 
-        for subdir in existing_subdirs:
-            shutil.rmtree(plan.context_dir / subdir)
-        for f in existing_files:
-            f.unlink()
+        for path in replaced_files:
+            path.unlink()
     elif plan.context_dir.exists():
         if plan_matches_existing(plan):
             if trace:
